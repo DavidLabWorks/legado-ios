@@ -130,12 +130,12 @@ struct EPUBBook {
         var seen = Set<String>()
         for path in paths where seen.insert(path).inserted {
             guard let data = try? read(path) else { continue }
-            if let image = Self.coverThumbnail(data) { return image }
+            if let image = BookCoverThumbnail.png(data) { return image }
             guard let doc = try? document(path), let images = try? doc.select("img, image").array() else { continue }
             for image in images {
                 let href = ["src", "xlink:href", "href"].compactMap { try? image.attr($0) }.first { !$0.isEmpty }
                 guard let href, let resource = Self.resolve(href, relativeTo: path),
-                      let bytes = try? read(resource.path), let thumbnail = Self.coverThumbnail(bytes) else { continue }
+                      let bytes = try? read(resource.path), let thumbnail = BookCoverThumbnail.png(bytes) else { continue }
                 return thumbnail
             }
         }
@@ -316,20 +316,6 @@ struct EPUBBook {
         return result
     }
 
-    private static func coverThumbnail(_ data: Data) -> Data? {
-        guard let source = CGImageSourceCreateWithData(data as CFData, [kCGImageSourceShouldCache: false] as CFDictionary),
-              let image = CGImageSourceCreateThumbnailAtIndex(source, 0, [
-                kCGImageSourceCreateThumbnailFromImageAlways: true,
-                kCGImageSourceThumbnailMaxPixelSize: 512,
-                kCGImageSourceCreateThumbnailWithTransform: true
-              ] as CFDictionary) else { return nil }
-        let output = NSMutableData()
-        guard let destination = CGImageDestinationCreateWithData(output, "public.png" as CFString, 1, nil) else { return nil }
-        CGImageDestinationAddImage(destination, image, nil)
-        guard CGImageDestinationFinalize(destination) else { return nil }
-        return output as Data
-    }
-
     private static func safePath(_ path: String) -> Bool {
         !path.isEmpty && !path.hasPrefix("/") && !path.contains("\\") && !path.contains("\0") && !path.split(separator: "/").contains("..")
     }
@@ -416,5 +402,21 @@ private final class EPUBXMLNode: NSObject, XMLParserDelegate {
 
     func parser(_ parser: XMLParser, didEndElement elementName: String, namespaceURI: String?, qualifiedName qName: String?) {
         _ = stack.popLast()
+    }
+}
+
+public enum BookCoverThumbnail {
+    public static func png(_ data: Data) -> Data? {
+        guard let source = CGImageSourceCreateWithData(data as CFData, [kCGImageSourceShouldCache: false] as CFDictionary),
+              let image = CGImageSourceCreateThumbnailAtIndex(source, 0, [
+                kCGImageSourceCreateThumbnailFromImageAlways: true,
+                kCGImageSourceThumbnailMaxPixelSize: 512,
+                kCGImageSourceCreateThumbnailWithTransform: true
+              ] as CFDictionary) else { return nil }
+        let output = NSMutableData()
+        guard let destination = CGImageDestinationCreateWithData(output, "public.png" as CFString, 1, nil) else { return nil }
+        CGImageDestinationAddImage(destination, image, nil)
+        guard CGImageDestinationFinalize(destination) else { return nil }
+        return output as Data
     }
 }

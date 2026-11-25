@@ -45,6 +45,7 @@ public struct URLTemplateContext: Sendable {
 }
 
 public struct PreparedRequest: Sendable {
+    public var webViewCookies: [HTTPCookie] = []
     var redirectOrigin: URL?
     public var suppressesUserAgent: Bool
     public var ruleURL: String
@@ -225,10 +226,15 @@ public struct LegadoURLBuilder: Sendable {
             throw RuleEngineError.invalidInput(rule: template, expected: "书源未提供当前章节的评论地址")
         }
         let charsetEncoding = options.charset.flatMap(HTTPTextDecoder.encoding(named:))
-        let requestURLText = encodeQueryIfNeeded(urlText, encoding: charsetEncoding)
+        let fragmentStart = urlText.firstIndex(of: "#") ?? urlText.endIndex
+        let requestURLText = encodeQueryIfNeeded(String(urlText[..<fragmentStart]), encoding: charsetEncoding)
         var urlAllowed = CharacterSet.urlFragmentAllowed
         urlAllowed.insert(charactersIn: "%")
-        let encoded = requestURLText.addingPercentEncoding(withAllowedCharacters: urlAllowed) ?? requestURLText
+        var encoded = requestURLText.addingPercentEncoding(withAllowedCharacters: urlAllowed) ?? requestURLText
+        if fragmentStart != urlText.endIndex {
+            let fragment = String(urlText[urlText.index(after: fragmentStart)...])
+            encoded += "#" + (fragment.addingPercentEncoding(withAllowedCharacters: urlAllowed) ?? fragment)
+        }
         guard let url = URL(string: encoded, relativeTo: baseURL)?.absoluteURL else {
             throw RuleEngineError.malformedRule(rule: template, detail: "URL 无法解析：\(urlText)")
         }

@@ -4,6 +4,33 @@ import SwiftUI
 import LegadoCore
 #endif
 
+struct BrowserSearchPage: Identifiable {
+    let id = UUID()
+    let url: URL
+    let keyword: String
+    let page: Int
+    let source: BookSource
+    let diagnostics: [RuleDiagnostic]
+    let manualVerification: ManualSearchVerification?
+
+    init?(outcome: SourceSearchOutcome, source: BookSource, keyword: String, page: Int, diagnostics: [RuleDiagnostic]) {
+        manualVerification = outcome.manualVerification
+        if let manualVerification {
+            self.url = manualVerification.url
+        } else {
+            guard source.bookSourceUrl == "https://101kks.com",
+                  let url = outcome.forbiddenGETURL, url.scheme == "https", url.host == "101kks.com", url.port == nil,
+                  url.user == nil, url.password == nil, url.query == nil, url.fragment == nil,
+                  url.path == "/search/\(keyword)/\(page).html" else { return nil }
+            self.url = url
+        }
+        self.keyword = keyword
+        self.page = page
+        self.source = source
+        self.diagnostics = diagnostics
+    }
+}
+
 @MainActor
 final class SearchViewModel: ObservableObject {
     enum State: Equatable { case idle, searching, finished, empty, unavailable }
@@ -19,6 +46,9 @@ final class SearchViewModel: ObservableObject {
     @Published private(set) var totalSourceCount = 0
     @Published private(set) var submittedKeyword = ""
     @Published private(set) var isShowingCachedResults = false
+
+    @Published private(set) var browserPages: [BrowserSearchPage] = []
+    var browserPage: BrowserSearchPage? { browserPages.first { $0.manualVerification == nil } }
 
     private let service: BookSearchService
     private let keywordRepository: any SearchKeywordRepository
@@ -55,6 +85,7 @@ final class SearchViewModel: ObservableObject {
         guard !keyword.isEmpty else { cancel(reset: true); return }
         searchTask?.cancel()
         searchGeneration &+= 1
+        browserPages = []
         currentKeyword = keyword
         submittedKeyword = keyword
         currentPrecision = precision
@@ -115,7 +146,7 @@ final class SearchViewModel: ObservableObject {
                 }
                 accumulator.add(usable)
                 cachedIdentities = Set(usable.map { BookSearchService.mergeIdentity(for: $0) })
-                preferred = Set(usable.flatMap(\.origins)).intersection(Set(enabled.keys))
+                preferred = Set(usable.map(\.origin))
                 publishResults()
             }
             var lastVisibleUpdate = ProcessInfo.processInfo.systemUptime - 1
@@ -123,13 +154,18 @@ final class SearchViewModel: ObservableObject {
                 guard !Task.isCancelled, generation == searchGeneration else { return }
                 pendingSourceIDs.remove(outcome.sourceID)
                 completedCount += 1
-                collectedDiagnostics += namedDiagnostics(outcome)
-                for book in outcome.books {
-                    let identity = BookSearchService.mergeIdentity(for: book)
-                    if requestedPage > 1 && !liveIdentities.contains(identity) { foundMoreOnActivePage = true }
-                    liveIdentities.insert(identity)
-                    accumulator.add([book], replacingExisting: cachedIdentities.remove(identity) != nil)
+                if outcome.books.isEmpty, outcome.diagnostics.contains(where: { $0.code == "rule.unsupported" && $0.severity == .error }) {
+                    pagedSources.removeAll { $0.id == outcome.sourceID }
                 }
+                let named = namedDiagnostics(outcome)
+                collectedDiagnostics += named
+                if (outcome.manualVerification != nil || outcome.forbiddenGETURL != nil),
+                   !browserPages.contains(where: { $0.source.id == outcome.sourceID }),
+                   let source = sources.first(where: { $0.id == outcome.sourceID }),
+                   let recovery = BrowserSearchPage(outcome: outcome, source: source, keyword: keyword, page: requestedPage, diagnostics: named) {
+                    browserPages.append(recovery)
+                }
+                addLiveBooks(outcome.books, on: requestedPage)
                 let now = ProcessInfo.processInfo.systemUptime
                 if books.isEmpty || now - lastVisibleUpdate >= 0.25 {
                     publishResults()
@@ -144,6 +180,39 @@ final class SearchViewModel: ObservableObject {
             isLoadingMore = false
             state = books.isEmpty ? .empty : .finished
         }
+    }
+
+    private func addLiveBooks(_ results: [SearchBook], on requestedPage: Int) {
+        for book in results {
+            let identity = BookSearchService.mergeIdentity(for: book)
+            if requestedPage > 1 && !liveIdentities.contains(identity) { foundMoreOnActivePage = true }
+            liveIdentities.insert(identity)
+            accumulator.add([book], replacingExisting: cachedIdentities.remove(identity) != nil)
+        }
+    }
+
+    func useBrowserResults(_ html: String, for recovery: BrowserSearchPage) async throws {
+        guard browserPages.contains(where: { $0.id == recovery.id }) else { throw CancellationError() }
+        let response = HTTPResponse(data: Data(html.utf8), statusCode: 200, headers: [:], finalURL: recovery.url,
+                                    requestedCharset: "utf-8", requestVariables: recovery.manualVerification?.variables ?? [:])
+        let outcome = try await service.analyzeSearchPage(response, detailURL: recovery.url.absoluteString,
+                                                         keyword: recovery.keyword, page: recovery.page, source: recovery.source,
+                                                         verifiedListRule: recovery.manualVerification?.listRule)
+        try Task.checkCancellation()
+        guard browserPages.contains(where: { $0.id == recovery.id }) else { throw CancellationError() }
+        guard !outcome.books.isEmpty else {
+            throw NSError(domain: "BrowserSearch", code: 1, userInfo: [NSLocalizedDescriptionKey: "当前书源规则未能识别网页中的书籍。"])
+        }
+        browserPages.removeAll { $0.id == recovery.id }
+        collectedDiagnostics.removeAll { recovery.diagnostics.contains($0) }
+        collectedDiagnostics += namedDiagnostics(outcome)
+        addLiveBooks(outcome.books, on: recovery.page)
+        publishResults()
+        if state != .searching && !isLoadingMore {
+            if page == recovery.page { hasMore = page == 1 ? !books.isEmpty && !pagedSources.isEmpty : foundMoreOnActivePage }
+            state = books.isEmpty ? .empty : .finished
+        }
+        try? await searchBookRepository.put(outcome.books)
     }
 
     private func publishResults() {
@@ -177,6 +246,7 @@ final class SearchViewModel: ObservableObject {
         searchGeneration &+= 1
         isLoadingMore = false
         if reset {
+            browserPages = []
             accumulator = .init()
             cachedIdentities = []
             liveIdentities = []

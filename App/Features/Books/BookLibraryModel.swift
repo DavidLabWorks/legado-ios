@@ -62,7 +62,9 @@ final class BookLibraryModel: ObservableObject {
     @Published private(set) var groups: [BookGroup] = []
     @Published private(set) var errorMessage: String?
     @Published private(set) var updateMessage: String?
+    private(set) var booksRequiringVerification: [Book] = []
     @Published private(set) var isCheckingUpdates = false
+    @Published private(set) var checkingBookURLs: Set<String> = []
 
     private let repository: any BookRepository
     private let localDirectory: URL
@@ -187,6 +189,19 @@ final class BookLibraryModel: ObservableObject {
         books.contains { $0.bookUrl == book.bookUrl }
     }
 
+    func setCover(for book: Book, imageData: Data) async throws {
+        let thumbnail = await Task.detached(priority: .userInitiated) { BookCoverThumbnail.png(imageData) }.value
+        guard let thumbnail else { throw CocoaError(.fileReadCorruptFile) }
+        await waitForSourceSwitch()
+        try Task.checkCancellation()
+        guard let index = books.firstIndex(where: { $0.bookUrl == book.bookUrl && $0.origin == book.origin }) else {
+            throw CocoaError(.fileNoSuchFile)
+        }
+        var updated = books
+        updated[index].customCoverUrl = "data:image/png;base64," + thumbnail.base64EncodedString()
+        guard await persist(updated) else { throw CocoaError(.fileWriteUnknown) }
+    }
+
     /// A reader holds a snapshot. Save only the setting it changed, retaining
     /// current shelf metadata/progress and leaving unshelved previews unshelved.
     @discardableResult
@@ -227,6 +242,7 @@ final class BookLibraryModel: ObservableObject {
         }
         var updated = books
         if let index = updated.firstIndex(where: { $0.bookUrl == book.bookUrl }) {
+            book.customCoverUrl = updated[index].customCoverUrl ?? book.customCoverUrl
             updated[index] = book
         } else {
             updated.append(book)
@@ -276,7 +292,9 @@ final class BookLibraryModel: ObservableObject {
             guard books.contains(where: { $0.bookUrl == oldBookURL }), !report.chapters.isEmpty else { return false }
             var updated = books.filter { $0.bookUrl == oldBookURL || $0.bookUrl != report.book.bookUrl }
             guard let index = updated.firstIndex(where: { $0.bookUrl == oldBookURL }) else { return false }
-            updated[index] = report.book
+            var replacement = report.book
+            replacement.customCoverUrl = updated[index].customCoverUrl ?? replacement.customCoverUrl
+            updated[index] = replacement
             let snapshot = updated
             let succeeded = await persist(snapshot) {
                 try await Self.writeBooksAndChapters(snapshot, chapters: report.chapters, bookURL: report.book.bookUrl,
@@ -370,56 +388,147 @@ final class BookLibraryModel: ObservableObject {
         }
     }
 
-    func checkForUpdates(sources: [BookSource], onlyRead: Bool = false, group: BookGroup? = nil) async {
+    // A user-requested update should finish even if SwiftUI cancels the pull gesture's task.
+    @discardableResult
+    func startGroupUpdate(sources: [BookSource], group: BookGroup, defaultSort: Int = BookshelfSort.recentRead.rawValue) -> Task<Void, Never> {
+        Task { await checkForUpdates(sources: sources, group: group, defaultSort: defaultSort) }
+    }
+
+    func checkForUpdates(sources: [BookSource], onlyRead: Bool = false, group: BookGroup? = nil,
+                         defaultSort: Int = BookshelfSort.recentRead.rawValue, bookURL: String? = nil) async {
         await waitForSourceSwitch()
         guard !isCheckingUpdates else { return }
         isCheckingUpdates = true
-        updateMessage = nil
-        defer { isCheckingUpdates = false }
+        clearUpdateMessage()
+        defer {
+            checkingBookURLs.removeAll()
+            isCheckingUpdates = false
+        }
 
         let sourceByURL = Dictionary(sources.map { ($0.bookSourceUrl, $0) }, uniquingKeysWith: { _, latest in latest })
         let onlyCaughtUp = group?.onlyUpdateRead ?? onlyRead
-        let candidates = group.map { books(in: $0) } ?? books
-        let requestedBooks = candidates.filter {
-            $0.canUpdate && $0.origin != "local"
-                && (!onlyCaughtUp || $0.durChapterIndex >= max($0.totalChapterNum, 1) - 1)
+        let candidates = group.map { books(in: $0, defaultSort: defaultSort) } ?? books
+        let requestedBooks: [Book]
+        if let bookURL {
+            guard let selected = books.first(where: { $0.bookUrl == bookURL }) else { return }
+            if selected.origin == "local" {
+                checkingBookURLs.insert(bookURL)
+                do {
+                    let service: LocalBookService
+                    if let txtTocRuleRepository {
+                        service = try await localService.usingStoredTocRules(from: txtTocRuleRepository)
+                    } else { service = localService }
+                    let chapters = try await Task.detached { try service.loadChapters(book: selected).chapters }.value
+                    let previous = try await chapterRepository.load(bookURL: bookURL)
+                    let report = BookUpdateMerger().merge(book: selected, oldChapters: previous, newChapters: chapters,
+                                                         now: Int64(Date().timeIntervalSince1970 * 1_000))
+                    guard report.refreshed else { updateMessage = "《\(selected.name)》没有可用目录。"; return }
+                    if await commitPreparedUpdate(requestedBook: selected, report: report) {
+                        updateMessage = "《\(selected.name)》目录已刷新，共 \(chapters.count) 章，新增 \(report.addedChapterCount) 章。"
+                    }
+                } catch { errorMessage = error.localizedDescription }
+                return
+            }
+            requestedBooks = [selected]
+        } else {
+            requestedBooks = candidates.filter {
+                $0.canUpdate && $0.origin != "local"
+                    && (!onlyCaughtUp || $0.durChapterIndex >= max($0.totalChapterNum, 1) - 1)
+            }
         }
         var checked = 0
         var added = 0
-        var failed = 0
-        for requestedBook in requestedBooks {
-            guard !Task.isCancelled else { break }
-            guard let source = sourceByURL[requestedBook.origin], source.enabled else {
-                failed += 1
-                continue
-            }
-            let report = await updateCoordinator.refresh(book: requestedBook, source: source, persistDirectory: false)
-            await waitForSourceSwitch()
-            guard !Task.isCancelled else { break }
-            checked += 1
-            if report.refreshed {
-                // Network requests suspend this actor. Merge the new directory
-                // into the current shelf, including any progress or edits made
-                // while the request was running, and never resurrect removals.
+        var updatesByBookURL: [String: String] = [:]
+        var failures: [String] = []
+        var challengedURLs: Set<String> = []
+        var pending = requestedBooks.makeIterator()
+        let concurrentBookLimit = 4
+        await withTaskGroup(of: (Book, BookUpdateReport).self) { tasks in
+            while !Task.isCancelled {
+                while !Task.isCancelled, checkingBookURLs.count < concurrentBookLimit, let book = pending.next() {
+                    guard let source = sourceByURL[book.origin], source.enabled else {
+                        failures.append("《\(book.name)》书源已停用或不存在")
+                        continue
+                    }
+                    guard checkingBookURLs.insert(book.bookUrl).inserted else { continue }
+                    tasks.addTask { [updateCoordinator] in
+                        let report = await updateCoordinator.refresh(book: book, source: source, persistDirectory: false)
+                        return (book, report)
+                    }
+                }
+                guard let (requestedBook, report) = await tasks.next() else { break }
+                defer { checkingBookURLs.remove(requestedBook.bookUrl) }
+                await waitForSourceSwitch()
+                guard !Task.isCancelled else { break }
+                checked += 1
+                guard report.refreshed else {
+                    let error = report.diagnostics.first { $0.severity == .error }
+                    if requestedBook.browserDirectoryURL != nil,
+                       report.diagnostics.contains(where: { $0.code == "toc.verification" }) {
+                        challengedURLs.insert(requestedBook.bookUrl)
+                    }
+                    var reason = error?.message ?? "没有解析到可用章节"
+                    if let error, error.code == "toc.request", !error.rule.contains(","),
+                       let url = URL(string: error.rule), ["http", "https"].contains(url.scheme),
+                       !url.lastPathComponent.isEmpty {
+                        reason += "（\(url.lastPathComponent)）"
+                    }
+                    failures.append("《\(requestedBook.name)》\(reason)")
+                    continue
+                }
+                // Fetch concurrently, but merge one result at a time against the current shelf.
                 guard books.contains(where: {
                     $0.bookUrl == requestedBook.bookUrl && $0.origin == requestedBook.origin
                 }) else { continue }
                 let succeeded = await commitPreparedUpdate(requestedBook: requestedBook, report: report)
-                if succeeded { added += report.addedChapterCount }
-                else { failed += 1 }
-            } else {
-                failed += 1
+                guard succeeded else {
+                    failures.append("《\(requestedBook.name)》\(errorMessage ?? "目录未能保存")")
+                    continue
+                }
+                if report.addedChapterCount > 0 {
+                    added += report.addedChapterCount
+                    updatesByBookURL[requestedBook.bookUrl] = "《\(report.book.name)》新增 \(report.addedChapterCount) 章"
+                }
             }
         }
 
+        let summary: String
         if Task.isCancelled {
-            updateMessage = "更新已取消，已检查 \(checked) 本，发现 \(added) 个新章节。"
-        } else if checked == 0 && failed == 0 {
-            updateMessage = "书架里暂时没有可更新的网络书籍。"
-        } else if failed > 0 {
-            updateMessage = "已检查 \(checked) 本，发现 \(added) 个新章节；另有 \(failed) 本因书源不可用、解析或保存失败未更新。"
+            summary = "更新已取消，已检查 \(checked) 本，发现 \(added) 个新章节。"
+        } else if checked == 0 && failures.isEmpty {
+            summary = "书架里暂时没有可更新的网络书籍。"
+        } else if !failures.isEmpty {
+            summary = "已检查 \(checked) 本，发现 \(added) 个新章节，\(failures.count) 本未更新。"
         } else {
-            updateMessage = added > 0 ? "更新完成，共发现 \(added) 个新章节。" : "更新完成，已是最新目录。"
+            if bookURL != nil, added == 0, let book = requestedBooks.first {
+                summary = "《\(book.name)》已是最新目录。"
+            } else {
+                summary = added > 0 ? "更新完成，共发现 \(added) 个新章节。" : "更新完成，已是最新目录。"
+            }
+        }
+        let updates = requestedBooks.compactMap { updatesByBookURL[$0.bookUrl] }
+        if !Task.isCancelled {
+            booksRequiringVerification = requestedBooks.filter { challengedURLs.contains($0.bookUrl) }
+        }
+        updateMessage = ([summary] + updates + failures.prefix(3)).joined(separator: "\n")
+    }
+
+    func refreshFromBrowser(_ rows: [[String: String]], book: Book, directory: URL) async throws {
+        guard !isCheckingUpdates else {
+            throw NSError(domain: "BrowserDirectory", code: 5, userInfo: [NSLocalizedDescriptionKey: "书架正在更新，请稍后再试。"])
+        }
+        isCheckingUpdates = true
+        defer { isCheckingUpdates = false }
+        let chapters = try book.chapters(fromBrowserRows: rows, at: directory)
+        let stored = try await chapterRepository.load(bookURL: book.bookUrl)
+        guard chapters.count >= Set(stored.map(\.url)).count else {
+            throw NSError(domain: "BrowserDirectory", code: 6, userInfo: [NSLocalizedDescriptionKey:
+                "网页只读到 \(chapters.count) 章，少于已保存目录。请展开全部章节再试。"])
+        }
+        let report = BookUpdateMerger().merge(book: book, oldChapters: stored, newChapters: chapters,
+                                              now: Int64(Date().timeIntervalSince1970 * 1_000))
+        guard await commitPreparedUpdate(requestedBook: book, report: report) else {
+            throw NSError(domain: "BrowserDirectory", code: 7, userInfo: [NSLocalizedDescriptionKey: errorMessage ?? "书架记录已变更，目录未保存。"])
         }
     }
 
@@ -780,7 +889,10 @@ final class BookLibraryModel: ObservableObject {
 
     func clearError() { errorMessage = nil }
 
-    func clearUpdateMessage() { updateMessage = nil }
+    func clearUpdateMessage() {
+        booksRequiringVerification = []
+        updateMessage = nil
+    }
 
     func reportError(_ error: Error) { errorMessage = error.localizedDescription }
 

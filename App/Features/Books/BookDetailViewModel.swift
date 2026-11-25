@@ -13,18 +13,14 @@ final class BookDetailViewModel: ObservableObject {
     @Published private(set) var book: Book
     @Published private(set) var chapters: [BookChapter] = []
     @Published private(set) var diagnostics: [RuleDiagnostic] = []
-    @Published private(set) var isCaching = false
-    @Published private(set) var cacheCompleted = 0
-    @Published private(set) var cacheTotal = 0
-
     @Published private(set) var source: BookSource
     private var searchBook: SearchBook?
     private let service: NetworkBookService
     private let updateCoordinator: BookUpdateCoordinator
     private let contentCoordinator: ChapterContentCoordinator
     private let sourceSwitchService: BookSourceSwitchService
-    private var cacheTask: Task<Void, Never>?
     private var loadGeneration = 0
+    private var directoryTask: Task<Void, Never>?
     private var restoredShelfBook = false
     private(set) var usedStoredDirectory = false
 
@@ -59,13 +55,14 @@ final class BookDetailViewModel: ObservableObject {
         self.book = book
     }
 
-    init(book: Book, source: BookSource, service: NetworkBookService = .init()) {
+    init(book: Book, source: BookSource, chapters: [BookChapter] = [], service: NetworkBookService = .init()) {
         searchBook = nil
         self.book = book
         self.source = source
         self.service = service
-        let chapters = AppBookChapterRepository.live()
-        updateCoordinator = BookUpdateCoordinator(repository: chapters, loader: service)
+        self.chapters = chapters
+        if !chapters.isEmpty { state = .ready }
+        updateCoordinator = BookUpdateCoordinator(repository: AppBookChapterRepository.live(), loader: service)
         contentCoordinator = ChapterContentCoordinator(loader: service)
         sourceSwitchService = BookSourceSwitchService(
             detailLoader: service,
@@ -84,18 +81,44 @@ final class BookDetailViewModel: ObservableObject {
         sourceSwitchService = .init()
         self.chapters = chapters
         state = .ready
-        isCaching = true
-        cacheCompleted = 2
-        cacheTotal = chapters.filter { !$0.isVolume }.count
     }
 
+    @discardableResult
     func load(sources: [BookSource] = [], persistDirectory: Bool = true, runPreUpdateScript: Bool? = nil, forceRefresh: Bool = false,
-              commitSourceSwitch: SourceSwitchCommit? = nil, commitPreparedUpdate: PreparedUpdateCommit? = nil) async {
-        guard state == .idle else { return }
+              commitSourceSwitch: SourceSwitchCommit? = nil, commitPreparedUpdate: PreparedUpdateCommit? = nil) async -> Bool {
+        guard state == .idle, !Task.isCancelled else { return false }
+        directoryTask?.cancel()
         loadGeneration &+= 1
         let generation = loadGeneration
         state = .loading
         usedStoredDirectory = false
+        let work = Task {
+            await loadDirectory(generation: generation, sources: sources, persistDirectory: persistDirectory,
+                                runPreUpdateScript: runPreUpdateScript, forceRefresh: forceRefresh,
+                                commitSourceSwitch: commitSourceSwitch, commitPreparedUpdate: commitPreparedUpdate)
+        }
+        directoryTask = work
+        let timeout: Task<Void, Never>? = browserDirectoryURL == nil ? nil : Task {
+            do { try await Task.sleep(nanoseconds: 15_000_000_000) } catch { return }
+            guard generation == loadGeneration, chapters.isEmpty, state == .loading else { return }
+            diagnostics.append(.init(severity: .error, code: "toc.timeout",
+                                     message: "等待目录超过 15 秒。", rule: book.bookUrl))
+            stopWaitingForDirectory()
+        }
+        defer {
+            timeout?.cancel()
+            if generation == loadGeneration { directoryTask = nil }
+        }
+        await withTaskCancellationHandler {
+            await work.value
+        } onCancel: { work.cancel() }
+        return generation == loadGeneration && !Task.isCancelled
+    }
+
+    private func loadDirectory(generation: Int, sources: [BookSource], persistDirectory: Bool, runPreUpdateScript: Bool?,
+                               forceRefresh: Bool, commitSourceSwitch: SourceSwitchCommit?,
+                               commitPreparedUpdate: PreparedUpdateCommit?) async {
+        guard acceptsLoad(generation) else { return }
         if searchBook == nil || restoredShelfBook {
             let stored = await updateCoordinator.storedChapters(bookURL: book.bookUrl)
             guard acceptsLoad(generation) else { return }
@@ -149,6 +172,10 @@ final class BookDetailViewModel: ObservableObject {
             return
         }
 
+        if browserDirectoryURL != nil {
+            state = .failed
+            return
+        }
         state = .findingSource
         if let available = await sourceSwitchService.firstAvailableSource(for: book, sources: sources) {
             guard acceptsLoad(generation) else { return }
@@ -158,11 +185,34 @@ final class BookDetailViewModel: ObservableObject {
                 state = .failed
                 return
             }
-            applySourceSwitch(available.report, source: available.source)
+            await applySourceSwitch(available.report, source: available.source)
         } else {
             guard acceptsLoad(generation) else { return }
             state = .failed
         }
+    }
+
+    var originalWebPageURL: URL? { book.originalWebPageURL(sourceURL: source.id) }
+
+    var browserDirectoryURL: URL? { book.origin == source.id ? book.browserDirectoryURL : nil }
+
+    func stopWaitingForDirectory() {
+        guard browserDirectoryURL != nil, chapters.isEmpty, state != .ready else { return }
+        loadGeneration &+= 1
+        directoryTask?.cancel()
+        directoryTask = nil
+        state = .failed
+    }
+
+    func useBrowserDirectory(_ rows: [[String: String]], at directory: URL) throws {
+        guard chapters.isEmpty, directory == browserDirectoryURL else { throw CancellationError() }
+        let parsed = try book.chapters(fromBrowserRows: rows, at: directory)
+        stopWaitingForDirectory()
+        let update = BookUpdateMerger().merge(book: book, oldChapters: chapters, newChapters: parsed,
+                                              now: Int64(Date().timeIntervalSince1970 * 1000))
+        book = update.book
+        chapters = update.chapters
+        state = .ready
     }
 
     private func acceptsLoad(_ generation: Int) -> Bool {
@@ -171,23 +221,13 @@ final class BookDetailViewModel: ObservableObject {
         return true
     }
 
-    func cacheNextTen() { startCaching(limit: 10) }
-
-    func cacheRemaining() { startCaching(limit: nil) }
-
-    func cancelCaching() {
-        cacheTask?.cancel()
-        cacheTask = nil
-        isCaching = false
-    }
-
-    func applySourceSwitch(_ report: BookSourceSwitchReport, source: BookSource) {
+    func applySourceSwitch(_ report: BookSourceSwitchReport, source: BookSource) async {
         loadGeneration &+= 1
-        cancelCaching()
+        let cleanup = await ChapterBatchCache.shared.clearForSourceSwitch(from: book.bookUrl, to: report.book.bookUrl, cache: .live())
         searchBook = nil
         book = report.book
         chapters = report.chapters
-        diagnostics = report.diagnostics
+        diagnostics = report.diagnostics + cleanup
         self.source = source
         state = .ready
     }
@@ -252,58 +292,61 @@ final class BookDetailViewModel: ObservableObject {
         book.durChapterTime = stored.durChapterTime
     }
 
+    @discardableResult
     func refresh(sources: [BookSource] = [], persistDirectory: Bool = true,
-                 commitSourceSwitch: SourceSwitchCommit? = nil, commitPreparedUpdate: PreparedUpdateCommit? = nil) async {
-        cancelCaching()
+                 commitSourceSwitch: SourceSwitchCommit? = nil, commitPreparedUpdate: PreparedUpdateCommit? = nil) async -> Bool {
         chapters = []
         diagnostics = []
         state = .idle
-        await load(sources: sources, persistDirectory: persistDirectory, runPreUpdateScript: true, forceRefresh: true,
+        return await load(sources: sources, persistDirectory: persistDirectory, runPreUpdateScript: true, forceRefresh: true,
                    commitSourceSwitch: commitSourceSwitch, commitPreparedUpdate: commitPreparedUpdate)
     }
 
-    private func startCaching(limit: Int?) {
-        cancelCaching()
-        let start = min(max(book.durChapterIndex, 0), max(chapters.count - 1, 0))
-        let jobs = ChapterCachePlanner.plan(chapters: chapters, startIndex: start, limit: limit)
-        guard !jobs.isEmpty else { return }
+    func startCaching(limit: Int?, using queue: ChapterBatchCache) {
+        let jobs = ChapterCachePlanner.plan(chapters: chapters, startIndex: book.durChapterIndex, limit: limit)
+        queue.start(book: book, source: source, jobs: jobs, coordinator: contentCoordinator)
+    }
+}
 
-        isCaching = true
-        cacheCompleted = 0
-        cacheTotal = jobs.count
-        let coordinator = contentCoordinator
-        let currentBook = book
-        let currentSource = source
-        cacheTask = Task { [weak self] in
-            await withTaskGroup(of: Bool.self) { group in
-                var next = 0
-                func enqueue() {
-                    guard next < jobs.count else { return }
-                    let job = jobs[next]
-                    next += 1
-                    group.addTask {
-                        guard !Task.isCancelled else { return false }
-                        return await coordinator.prefetch(
-                            book: currentBook,
-                            chapter: job.chapter,
-                            source: currentSource,
-                            nextChapterURL: job.nextChapterURL
-                        )
-                    }
-                }
-                for _ in 0..<min(3, jobs.count) { enqueue() }
-                while await group.next() != nil {
-                    guard !Task.isCancelled else {
-                        group.cancelAll()
-                        break
-                    }
-                    self?.cacheCompleted += 1
-                    enqueue()
-                }
-            }
-            guard !Task.isCancelled else { return }
-            self?.isCaching = false
-            self?.cacheTask = nil
+extension Book {
+    func originalWebPageURL(sourceURL: String) -> URL? {
+        let rule = bookUrl
+        // An imported address can include Legado request options after the URL.
+        let end = rule.range(of: #",\s*(?=\{)"#, options: .regularExpression)?.lowerBound ?? rule.endIndex
+        let address = rule[..<end].trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !address.isEmpty, !address.hasPrefix("<"), !address.lowercased().hasPrefix("@js:"), !address.contains("{{"),
+              let url = URL(string: address, relativeTo: URL(string: sourceURL))?.absoluteURL,
+              let scheme = url.scheme?.lowercased(), ["http", "https"].contains(scheme),
+              let host = url.host, !host.isEmpty else { return nil }
+        return url
+    }
+
+    var browserDirectoryURL: URL? {
+        guard origin.trimmingCharacters(in: CharacterSet(charactersIn: "/")) == "https://101kks.com",
+              let page = originalWebPageURL(sourceURL: origin), page.scheme == "https",
+              page.host == "101kks.com", page.user == nil, page.password == nil, page.port == nil || page.port == 443,
+              page.path.range(of: #"^/book/[0-9]+(?:\.html|/index\.html)$"#, options: .regularExpression) != nil
+        else { return nil }
+        let bookID = page.pathComponents[2].components(separatedBy: ".")[0]
+        return URL(string: "https://101kks.com/book/\(bookID)/index.html")
+    }
+
+    func chapters(fromBrowserRows rows: [[String: String]], at directory: URL) throws -> [BookChapter] {
+        guard directory == browserDirectoryURL else { throw CancellationError() }
+        let bookID = directory.deletingLastPathComponent().lastPathComponent
+        var seen = Set<String>()
+        var parsed = [BookChapter]()
+        for row in rows {
+            guard let address = row["url"], let title = row["title"], !title.isEmpty,
+                  address.range(of: #"^https://101kks\.com/txt/\#(bookID)/[0-9]+\.html$"#, options: .regularExpression) != nil,
+                  seen.insert(address).inserted else { continue }
+            var chapter = BookChapter(url: address, title: title, bookUrl: bookUrl, index: parsed.count)
+            chapter.baseUrl = directory.absoluteString
+            parsed.append(chapter)
         }
+        guard !parsed.isEmpty else {
+            throw NSError(domain: "BrowserDirectory", code: 2, userInfo: [NSLocalizedDescriptionKey: "网页中没有找到这本书的章节。"])
+        }
+        return parsed
     }
 }

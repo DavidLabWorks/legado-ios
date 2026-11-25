@@ -1,13 +1,24 @@
 import SwiftUI
 
 struct BookDetailView: View {
+    @Environment(\.resumeBookReading) private var resume
     @EnvironmentObject private var library: BookLibraryModel
     @EnvironmentObject private var sourceLibrary: SourceLibraryModel
     @EnvironmentObject private var replaceRules: ReplaceRuleLibraryModel
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @StateObject private var model: BookDetailViewModel
+    @ObservedObject private var batchCache = ChapterBatchCache.shared
+    private var cacheProgress: ChapterBatchCache.Progress? { batchCache.progress[model.book.bookUrl] }
+
+    private struct WebPage: Identifiable {
+        let url: URL
+        let directory: URL?
+        var id: URL { url }
+    }
+
+    @State private var refreshTask: Task<Void, Never>?
+    @State private var webPage: WebPage?
     @State private var showsSourceSwitch = false
-    @State private var showsRemoveConfirmation = false
     @State private var showsTableOfContents = false
     @State private var warmedReader: ReaderViewModel?
     @State private var openedReader: ReaderViewModel?
@@ -17,38 +28,28 @@ struct BookDetailView: View {
         _model = StateObject(wrappedValue: BookDetailViewModel(searchBook: searchBook, source: source))
     }
 
-    init(book: Book, source: BookSource) {
-        _model = StateObject(wrappedValue: BookDetailViewModel(book: book, source: source))
+    init(book: Book, source: BookSource, chapters: [BookChapter] = []) {
+        _model = StateObject(wrappedValue: BookDetailViewModel(book: book, source: source, chapters: chapters))
     }
 
     init(demoBook: Book, source: BookSource, chapters: [BookChapter]) {
+        batchCache = ChapterBatchCache(progress: [demoBook.bookUrl: .init(total: chapters.filter { !$0.isVolume }.count, processed: 2)])
         _model = StateObject(wrappedValue: BookDetailViewModel(demoBook: demoBook, source: source, chapters: chapters))
     }
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 24) {
-                hero
-                Divider()
-                if let intro = MetadataTextSanitizer().clean(model.book.intro), !intro.isEmpty {
-                    VStack(alignment: .leading, spacing: 10) {
-                        Text("简介").font(.headline)
-                        Text(intro).font(.subheadline).foregroundStyle(.secondary).lineSpacing(5)
-                    }
-                    Divider()
-                }
-                chapterCard
-                if model.isCaching || model.cacheCompleted > 0 { cacheProgressCard }
-            }
-            .padding(.horizontal, 20)
-            .padding(.bottom, 30)
-        }
+        detailScrollView
+        .refreshable { await refreshDetails() }
         .background(ReadingTheme.canvas)
         .navigationTitle("书籍详情")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 Menu {
+                    if let url = model.originalWebPageURL {
+                        Button("打开原网页", systemImage: "safari") { openWebPage(url) }
+                            .accessibilityIdentifier("book.detail.openWebPage")
+                    }
                     Button("换源", systemImage: "arrow.triangle.2.circlepath") { showsSourceSwitch = true }
                         .disabled(sourceLibrary.sources.filter(\.enabled).count < 2)
                     Button("允许更新", systemImage: model.book.canUpdate ? "checkmark" : "circle") {
@@ -56,21 +57,7 @@ struct BookDetailView: View {
                         Task { await saveCurrentBook() }
                     }
                     Button("刷新", systemImage: "arrow.clockwise") {
-                        Task {
-                            let requestedBook = model.book
-                            let oldURL = model.book.bookUrl
-                            let wasInLibrary = library.contains(model.book)
-                            await model.refresh(sources: sourceLibrary.sources, persistDirectory: false, commitSourceSwitch: { report in
-                                guard wasInLibrary else { return true }
-                                return await library.commitSourceSwitch(oldBookURL: oldURL, report: report)
-                            }, commitPreparedUpdate: { report in
-                                guard wasInLibrary else { return true }
-                                return await library.commitPreparedUpdate(requestedBook: requestedBook, report: report)
-                            })
-                            if wasInLibrary, oldURL == model.book.bookUrl, model.state == .ready {
-                                await saveLoadedDirectory()
-                            }
-                        }
+                        Task { await refreshDetails() }
                     }
                     if model.source.loginUrl?.isEmpty == false {
                         NavigationLink {
@@ -83,13 +70,13 @@ struct BookDetailView: View {
                         Label("分享", systemImage: "square.and.arrow.up")
                     }
                     Divider()
-                    Button("缓存接下来 10 章", systemImage: "arrow.down.circle") { model.cacheNextTen() }
-                        .disabled(model.chapters.isEmpty || model.isCaching)
-                    Button("缓存剩余章节", systemImage: "square.and.arrow.down.on.square") { model.cacheRemaining() }
-                        .disabled(model.chapters.isEmpty || model.isCaching)
-                    if model.isCaching {
+                    Button("缓存接下来 10 章", systemImage: "arrow.down.circle") { model.startCaching(limit: 10, using: batchCache) }
+                        .disabled(model.chapters.isEmpty || cacheProgress?.isActive == true)
+                    Button("缓存剩余章节", systemImage: "square.and.arrow.down.on.square") { model.startCaching(limit: nil, using: batchCache) }
+                        .disabled(model.chapters.isEmpty || cacheProgress?.isActive == true)
+                    if cacheProgress?.isActive == true {
                         Divider()
-                        Button("停止缓存", systemImage: "stop.circle", role: .destructive) { model.cancelCaching() }
+                        Button("停止缓存", systemImage: "stop.circle", role: .destructive) { batchCache.cancel(bookURL: model.book.bookUrl) }
                     }
                 } label: {
                     Image(systemName: "ellipsis.circle")
@@ -104,8 +91,7 @@ struct BookDetailView: View {
                 model.restoreLibraryBook(from: stored, sources: sourceLibrary.sources)
             }
             let requestedBook = model.book
-            let startsLoad = model.state == .idle
-            await model.load(sources: sourceLibrary.sources, persistDirectory: false, runPreUpdateScript: shouldPersistUpdate, commitSourceSwitch: { report in
+            let applied = await model.load(sources: sourceLibrary.sources, persistDirectory: false, runPreUpdateScript: shouldPersistUpdate, commitSourceSwitch: { report in
                 guard shouldPersistUpdate else { return true }
                 return await library.commitSourceSwitch(oldBookURL: oldURL, report: report)
             }, commitPreparedUpdate: { report in
@@ -117,14 +103,14 @@ struct BookDetailView: View {
                     model.restoreUserSettings(from: stored)
                     model.restoreReadingProgress(from: stored)
                 }
-                if startsLoad, !model.usedStoredDirectory, oldURL == model.book.bookUrl, model.state == .ready {
+                if applied, !model.usedStoredDirectory, oldURL == model.book.bookUrl, model.state == .ready {
                     await saveLoadedDirectory()
                 }
             }
         }
         .task(id: model.chapters.isEmpty ? nil : model.book) {
             warmedReader = nil
-            guard !model.chapters.isEmpty, !ProcessInfo.processInfo.arguments.contains("-uiDemo") else { return }
+            guard resume == nil, !model.chapters.isEmpty, !ProcessInfo.processInfo.arguments.contains("-uiDemo") else { return }
             let reader = await ReaderViewModel.cachedOpening(book: model.book, chapters: model.chapters, source: model.source,
                                                              rules: replaceRules.rules, speculative: true)
             if !Task.isCancelled, reader.hasLoadedCurrentChapter { warmedReader = reader }
@@ -135,6 +121,26 @@ struct BookDetailView: View {
         )) {
             if let openedReader { ReaderView(prepared: openedReader) }
         }
+        .onChange(of: model.state) { state in
+            if state == .failed, model.chapters.isEmpty, webPage == nil, !showsSourceSwitch,
+               let directory = model.browserDirectoryURL {
+                openWebPage(directory)
+            }
+        }
+        .onChange(of: model.source.id) { _ in
+            resume?(model.book, model.chapters, model.source, nil)
+        }
+        .sheet(item: $webPage) { page in
+            if let directory = page.directory {
+                BrowserBookPageView(url: page.url, action: .directory(directory) { rows in
+                    try model.useBrowserDirectory(rows, at: directory)
+                    if library.contains(model.book) { await saveLoadedDirectory() }
+                })
+            } else {
+                InAppWebBrowser(url: page.url, close: { webPage = nil })
+                    .ignoresSafeArea()
+            }
+        }
         .sheet(isPresented: $showsSourceSwitch) {
             ReadingNavigationStack {
                 SourceSwitchView(book: model.book, sources: sourceLibrary.sources) { report, source in
@@ -142,7 +148,7 @@ struct BookDetailView: View {
                     if library.contains(model.book) {
                         guard await library.commitSourceSwitch(oldBookURL: oldURL, report: report) else { return false }
                     }
-                    model.applySourceSwitch(report, source: source)
+                    await model.applySourceSwitch(report, source: source)
                     return true
                 }
             }
@@ -150,28 +156,82 @@ struct BookDetailView: View {
         .fullScreenCover(isPresented: $showsTableOfContents) {
             BookTableOfContentsView(book: model.book, chapters: model.chapters, source: model.source)
         }
-        .confirmationDialog("从书架移除《\(model.book.name)》？", isPresented: $showsRemoveConfirmation) {
-            Button("移出书架", role: .destructive) {
-                Task { await library.remove(bookURL: model.book.bookUrl) }
+    }
+
+    @ViewBuilder
+    private var detailScrollView: some View {
+        if #available(iOS 16.0, *) {
+            ScrollView { detailContent }
+        } else {
+            // On iOS 15 the native pull-to-refresh control is available on List.
+            List {
+                detailContent
+                    .listRowInsets(EdgeInsets())
+                    .listRowSeparator(.hidden)
+                    .listRowBackground(Color.clear)
             }
-            Button("取消", role: .cancel) { }
+            .listStyle(.plain)
         }
     }
 
-    private var cacheProgressCard: some View {
+    private var detailContent: some View {
+        VStack(alignment: .leading, spacing: 24) {
+            hero
+            Divider()
+            if let intro = MetadataTextSanitizer().clean(model.book.intro), !intro.isEmpty {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("简介").font(.headline)
+                    Text(intro).font(.subheadline).foregroundStyle(.secondary).lineSpacing(5)
+                }
+                Divider()
+            }
+            chapterCard
+            if let cacheProgress { cacheProgressCard(cacheProgress) }
+        }
+        .padding(.horizontal, 20)
+        .padding(.bottom, 30)
+    }
+
+    @MainActor
+    private func refreshDetails() async {
+        if let refreshTask {
+            await refreshTask.value
+            return
+        }
+        let task = Task {
+            defer { refreshTask = nil }
+            let requestedBook = model.book
+            let oldURL = model.book.bookUrl
+            let wasInLibrary = library.contains(model.book)
+            let applied = await model.refresh(sources: sourceLibrary.sources, persistDirectory: false, commitSourceSwitch: { report in
+                guard wasInLibrary else { return true }
+                return await library.commitSourceSwitch(oldBookURL: oldURL, report: report)
+            }, commitPreparedUpdate: { report in
+                guard wasInLibrary else { return true }
+                return await library.commitPreparedUpdate(requestedBook: requestedBook, report: report)
+            })
+            if applied, wasInLibrary, oldURL == model.book.bookUrl, model.state == .ready {
+                await saveLoadedDirectory()
+            }
+        }
+        refreshTask = task
+        await task.value
+    }
+
+    private func cacheProgressCard(_ progress: ChapterBatchCache.Progress) -> some View {
         ReadingCard {
             VStack(alignment: .leading, spacing: 10) {
                 HStack {
-                    Label(model.isCaching ? "正在缓存章节" : "章节缓存完成", systemImage: model.isCaching ? "arrow.down.circle.fill" : "checkmark.circle.fill")
+                    Label(progress.title, systemImage: progress.isActive ? "arrow.down.circle.fill" : (progress.failed == 0 ? "checkmark.circle.fill" : "exclamationmark.circle"))
                         .font(.headline)
                     Spacer()
-                    Text("\(model.cacheCompleted)/\(model.cacheTotal)")
+                    Text("\(progress.processed)/\(progress.total)")
                         .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
                 }
-                ProgressView(value: Double(model.cacheCompleted), total: Double(max(model.cacheTotal, 1)))
+                ProgressView(value: Double(progress.processed), total: Double(max(progress.total, 1)))
                     .tint(ReadingTheme.accent)
-                if model.isCaching {
-                    Button("停止缓存", role: .destructive) { model.cancelCaching() }
+                if progress.isActive {
+                    Button("停止缓存", role: .destructive) { batchCache.cancel(bookURL: model.book.bookUrl) }
                         .font(.subheadline)
                 }
             }
@@ -184,7 +244,7 @@ struct BookDetailView: View {
                 BookCoverArtwork(
                     title: model.book.name,
                     author: model.book.author,
-                    remoteURL: model.book.coverUrl,
+                    remoteURL: model.book.displayCoverURL,
                     width: 88,
                     height: 126
                 )
@@ -219,7 +279,9 @@ struct BookDetailView: View {
     @ViewBuilder
     private var readingActions: some View {
         Group {
-            if ProcessInfo.processInfo.arguments.contains("-uiDemo") {
+            if let resume {
+                Button { resume(model.book, model.chapters, model.source, nil) } label: { readingLabel }
+            } else if ProcessInfo.processInfo.arguments.contains("-uiDemo") {
                 NavigationLink {
                     ReaderView(demoBook: model.book, chapters: model.chapters, initialIndex: model.book.durChapterIndex, content: DemoContent.readerText)
                 } label: { readingLabel }
@@ -231,7 +293,7 @@ struct BookDetailView: View {
         .disabled(model.chapters.isEmpty)
         Button {
             if library.contains(model.book) {
-                showsRemoveConfirmation = true
+                Task { await library.remove(bookURL: model.book.bookUrl) }
             } else {
                 Task { await saveCurrentBook() }
             }
@@ -250,6 +312,12 @@ struct BookDetailView: View {
         Text(model.book.durChapterIndex > 0 || model.book.durChapterPos > 0 ? "继续阅读" : "开始阅读")
             .font(.body.weight(.medium))
             .frame(maxWidth: .infinity, minHeight: 28)
+    }
+
+    private func openWebPage(_ url: URL) {
+        let directory = model.chapters.isEmpty ? model.browserDirectoryURL : nil
+        if directory != nil { model.stopWaitingForDirectory() }
+        webPage = WebPage(url: url, directory: directory)
     }
 
     private func openReader() {
@@ -295,9 +363,12 @@ struct BookDetailView: View {
                 ReadingUnavailableView(
                     "没有找到可用目录",
                     systemImage: "exclamationmark.arrow.triangle.2.circlepath",
-                    description: Text("已自动尝试其他可搜索书源，可稍后刷新重试或手动换源。")
+                    description: Text(model.browserDirectoryURL != nil ? "可下拉刷新重试，或在右上角菜单中换源。" : "已自动尝试其他可搜索书源，可稍后刷新重试或手动换源。")
                 )
                 .padding(.vertical, 12)
+                if let issue = model.diagnostics.last(where: { $0.severity == .error && $0.code != "toc.empty" }) ?? model.diagnostics.last(where: { $0.severity == .error }) {
+                    Text(issue.message).font(.footnote).foregroundStyle(.secondary)
+                }
             } else {
                 ForEach(Array(model.chapters.filter { !$0.isVolume }.prefix(8).enumerated()), id: \.element.id) { offset, chapter in
                     if offset > 0 { Divider() }
@@ -305,14 +376,7 @@ struct BookDetailView: View {
                         Text(chapter.title).font(.subheadline.bold()).foregroundStyle(ReadingTheme.accent)
                             .padding(.vertical, 12)
                     } else {
-                        NavigationLink {
-                            ReaderView(
-                                book: model.book,
-                                chapters: model.chapters,
-                                initialIndex: chapter.index,
-                                source: model.source
-                            )
-                        } label: {
+                        BookChapterLink(book: model.book, chapters: model.chapters, source: model.source, index: chapter.index) {
                             HStack(spacing: 12) {
                                 Text(String(format: "%02d", chapter.index + 1))
                                     .font(.caption.monospacedDigit()).foregroundStyle(.tertiary).frame(width: 28)
@@ -342,6 +406,7 @@ struct BookDetailView: View {
 }
 
 private struct BookTableOfContentsView: View {
+    @Environment(\.resumeBookReading) private var resume
     @Environment(\.dismiss) private var dismiss
     let book: Book
     let chapters: [BookChapter]
@@ -363,7 +428,10 @@ private struct BookTableOfContentsView: View {
                 if chapter.isVolume {
                     Text(chapter.title).font(.headline).foregroundStyle(ReadingTheme.accent)
                 } else {
-                    Button { selectedChapter = chapter } label: {
+                    Button {
+                        if let resume { resume(book, chapters, source, chapter.index) }
+                        else { selectedChapter = chapter }
+                    } label: {
                         HStack(spacing: 12) {
                             Text("\(chapter.index + 1)")
                                 .font(.caption.monospacedDigit()).foregroundStyle(.secondary).frame(width: 36, alignment: .trailing)
@@ -378,6 +446,7 @@ private struct BookTableOfContentsView: View {
                     .buttonStyle(.plain)
                 }
             }
+            .id(descending)
             .readingNavigationDestination(isPresented: Binding(
                 get: { selectedChapter != nil }, set: { if !$0 { selectedChapter = nil } }
             )) {

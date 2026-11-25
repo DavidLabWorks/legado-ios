@@ -13,6 +13,53 @@ private struct BookFlowMockTransport: HTTPTransport {
 }
 
 struct NetworkBookServiceTests {
+    @Test func chapterRuleCanEvaluateSourceCommentAfterPreparingContent() async {
+        let base = "https://chapter-comment.example"
+        let url = base + "/chapter"
+        let transport = BookFlowMockTransport(pages: [url: "<div id='content'>第一段</div>"])
+        var source = BookSource(bookSourceUrl: base, bookSourceName: "正文规则")
+        source.bookSourceComment = "result = result.replace('第一段', '第二段')"
+        var rules = ContentRule()
+        rules.content = """
+            <js>
+            if (!result) { result = 'empty'; }
+            eval(String(source.bookSourceComment))
+            java.setContent(result)
+            result = '<div id="content">' + java.getString('#content@text') + '</div>'
+            </js>
+            #content@html||[class~=(?i)content]@html
+            """
+        source.ruleContent = rules
+        let book = Book(bookUrl: base + "/book", name: "书", origin: base)
+        let chapter = BookChapter(url: url, title: "第一章", bookUrl: book.bookUrl, index: 0)
+        let report = await NetworkBookService(transport: transport).loadContent(book: book, chapter: chapter, source: source)
+        #expect(report.diagnostics.isEmpty)
+        #expect(report.content == "第二段")
+    }
+
+    @Test func browserChapterUsesSourcePaginationAndRejectsAnUnfinishedPage() async {
+        let base = "https://rendered.example"
+        let service = NetworkBookService(transport: BookFlowMockTransport(pages: [:]))
+        var source = BookSource(bookSourceUrl: base, bookSourceName: "分页正文")
+        var rules = ContentRule()
+        rules.content = "#content@text"
+        rules.nextContentUrl = "a.next@href"
+        source.ruleContent = rules
+        let book = Book(bookUrl: base + "/book", name: "书", origin: base)
+        let chapter = BookChapter(url: base + "/1", title: "第一章", bookUrl: book.bookUrl, index: 0)
+        let first = "<div id='content'>第一页</div><a class='next' href='/2'>下一页</a>"
+        let complete = await service.loadContent(book: book, chapter: chapter, source: source, nextChapterURL: base + "/3") { url in
+            #expect(["/1", "/2"].contains(url.path))
+            return url.path == "/1" ? first : "<div id='content'>第二页</div><a class='next' href='/3'>下一章</a>"
+        }
+        #expect(complete.diagnostics.isEmpty)
+        #expect(complete.content == "第一页\n第二页")
+        let incomplete = await service.loadContent(book: book, chapter: chapter, source: source, nextChapterURL: nil) { url in
+            url.path == "/1" ? first : "<form>请输入验证码</form>"
+        }
+        #expect(incomplete.diagnostics.contains { $0.code == "content.empty" })
+    }
+
     @Test(arguments: [
         #"<img alt="x > y" src="/formula~large.png?token=one&amp;size=2">"#,
         #"<IMG alt='x > y' src='/formula~large.png?token=one&amp;size=2' />"#,

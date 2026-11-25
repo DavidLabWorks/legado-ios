@@ -220,7 +220,7 @@ final class EPUBReaderModel: ObservableObject, EPUBNavigatorDelegate {
 
     func clearError() { errorMessage = nil }
 
-    private func link(for chapter: BookChapter) -> ReadiumShared.Link? {
+    fileprivate func link(for chapter: BookChapter) -> ReadiumShared.Link? {
         guard let path = chapter.resourceUrl else { return nil }
         var parts = URLComponents()
         parts.path = path
@@ -241,6 +241,7 @@ struct EPUBReaderView: View {
     @EnvironmentObject private var library: BookLibraryModel
     @EnvironmentObject private var activity: ReadingActivityModel
     @StateObject private var model: EPUBReaderModel
+    @State private var showsBookInfo = false
     @State private var showsTOC = false
     @State private var showsSettings = false
     @State private var showsBookmarks = false
@@ -290,6 +291,10 @@ struct EPUBReaderView: View {
         .background(Color(uiColor: .systemBackground))
         .navigationBarHidden(true)
         .readingTabBarHidden()
+        .modifier(ReaderMenuBackGesture(menuVisible: model.showsControls) {
+            saveProgress()
+            dismiss()
+        })
         .task {
             model.onLocationChanged = { locator, chapter in
                 if !isScrubbing, let progress = locator.locations.totalProgression { sliderProgress = progress }
@@ -316,6 +321,15 @@ struct EPUBReaderView: View {
             }
         }
         .fullScreenCover(isPresented: $showsTOC) { tocSheet }
+        .sheet(isPresented: $showsBookInfo) {
+            ReaderBookInfoSheet(book: model.book, source: nil, chapters: model.chapters)
+                .environment(\.resumeBookReading) { _, chapters, _, index in
+                    showsBookInfo = false
+                    guard let index, chapters.indices.contains(index), chapters[index] != model.currentChapter,
+                          let link = model.link(for: chapters[index]) else { return }
+                    Task { await model.go(to: link) }
+                }
+        }
         .sheet(isPresented: $showsSettings) { settingsSheet }
         .sheet(isPresented: $showsBookmarks) { bookmarksSheet }
         .alert("EPUB 阅读", isPresented: Binding(get: { model.navigator != nil && model.errorMessage != nil }, set: { if !$0 { model.clearError() } })) {
@@ -334,6 +348,7 @@ struct EPUBReaderView: View {
             }
             Spacer(minLength: 0)
             Menu {
+                Button("书籍信息", systemImage: "info.circle") { showsBookInfo = true }
                 Button("添加书签", systemImage: "bookmark") {
                     guard let locator = model.location, let chapter = model.currentChapter else { return }
                     Task {

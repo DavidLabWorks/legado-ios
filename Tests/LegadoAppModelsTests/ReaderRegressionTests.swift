@@ -5,6 +5,20 @@ import LegadoCore
 
 @MainActor
 struct ReaderRegressionTests {
+    @Test func simplifiedReadingPreservesOffsetsAndDirectoryIdentity() {
+        let original = "頭髮與發展 📖\n勣與閱讀 ABC"
+        #expect(original.readerText(simplified: false) == original)
+        let display = original.readerText(simplified: true)
+        #expect(display == "头发与发展 📖\n勣与阅读 ABC")
+        #expect((display as NSString).range(of: "阅读").location == (original as NSString).range(of: "閱讀").location)
+        let chapter = BookChapter(url: "https://example.test/閱讀", title: "閱讀時光", bookUrl: "b", index: 0)
+        let directory = ReaderChapterDirectory([chapter])
+        for keyword in ["阅读", "閱讀"] {
+            #expect(directory.rows(matching: keyword, descending: false, simplified: true).first?.chapterURL == chapter.url)
+        }
+        #expect(directory.rows.first?.title == chapter.title)
+    }
+
     @Test func reopenedShelfBookReadsDirectoryAndVisitedChaptersWithNetworkOffline() async throws {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: dir) }
@@ -232,8 +246,38 @@ struct ReaderRegressionTests {
         #expect(await loader.contentRequests.sorted() == [0, 2, 4, 5, 6, 7])
     }
 
-    @Test(arguments: [0, 1, 5])
-    func savedPrefetchCountAndBookEndLimitSilentRequests(count: Int) async throws {
+    @Test func openingInTheMiddleCachesFiveReadableChaptersOnEachSide() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let cache = ChapterContentCache(directory: dir)
+        let loader = CacheRegressionSource()
+        let source = BookSource(bookSourceUrl: "source", bookSourceName: "源")
+        let book = Book(bookUrl: "book", name: "书", origin: source.id)
+        var chapters = (0..<15).map { BookChapter(url: "c\($0)", title: "第\($0)章", bookUrl: book.bookUrl, index: $0) }
+        chapters[6].isVolume = true
+        chapters[8].isVolume = true
+        let reader = ReaderViewModel(book: book, chapters: chapters, initialIndex: 7, source: source,
+                                     service: loader, cache: cache)
+        defer { reader.stopBackgroundReading() }
+        await reader.load(rules: [])
+        for _ in 0..<150 {
+            if try await cache.load(bookURL: book.bookUrl, chapterURL: "c1") != nil { break }
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        let expected = [7, 9, 5, 10, 4, 11, 3, 12, 2, 13, 1]
+        #expect(await loader.contentRequests == expected)
+        reader.stopBackgroundReading()
+        await loader.disconnect()
+        for index in [1, 13] {
+            reader.select(index: index)
+            await reader.load(rules: [], prefetchNextChapter: false)
+            #expect(reader.content == "正文\(index)")
+        }
+        #expect(await loader.contentRequests == expected)
+    }
+
+    @Test(arguments: [(0, [Int]()), (1, [2, 0]), (5, [2, 0, 3])])
+    func savedPrefetchCountAndBookEndLimitSilentRequests(count: Int, expected: [Int]) async throws {
         let suite = UUID().uuidString
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent(suite)
         defer { try? FileManager.default.removeItem(at: dir) }
@@ -253,7 +297,6 @@ struct ReaderRegressionTests {
                                      source: .init(bookSourceUrl: book.origin, bookSourceName: "源"),
                                      service: source, cache: cache, settingsStore: store)
         await reader.load(rules: [])
-        let expected = Array([2, 3].prefix(count))
         for _ in 0..<100 where await source.contentRequests.count < expected.count {
             try await Task.sleep(nanoseconds: 10_000_000)
         }
@@ -371,7 +414,7 @@ struct ReaderRegressionTests {
 
         var replacement = book
         replacement.origin = "https://new-source.test"
-        model.applySourceSwitch(.init(book: replacement, chapters: chapters, exactChapterMatch: true),
+        await model.applySourceSwitch(.init(book: replacement, chapters: chapters, exactChapterMatch: true),
                                 source: .init(bookSourceUrl: replacement.origin, bookSourceName: "无评论"))
         #expect(model.commentsTarget(at: 1) == nil)
         #expect(selected.book.origin == source.id)
@@ -532,6 +575,94 @@ struct ReaderRegressionTests {
         #expect(model.scrollRetries.isEmpty)
     }
 
+    @Test func directoryBatchContinuesAfterReaderClosesAndSharesOneQueueAcrossBooks() async throws {
+        let directory = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let cache = ChapterContentCache(directory: directory)
+        let loader = CacheRegressionSource()
+        let source = BookSource(bookSourceUrl: "source", bookSourceName: "源")
+        let first = Book(bookUrl: UUID().uuidString, name: "第一本", origin: source.id)
+        let second = Book(bookUrl: UUID().uuidString, name: "第二本", origin: source.id)
+        var chapters = (0..<4).map { BookChapter(url: "c\($0)", title: "章", bookUrl: first.bookUrl, index: $0) }
+        chapters[1].isVolume = true
+        try await cache.save(.init(bookURL: first.bookUrl, chapterURL: "c0", content: "已读"))
+        var reader: ReaderViewModel? = .init(book: first, chapters: chapters, initialIndex: 3,
+                                             source: source, service: loader, cache: cache)
+        reader?.cacheChapters()
+        reader?.cacheChapters()
+        reader?.stopBackgroundReading()
+        weak var closedReader = reader
+        reader = nil
+        #expect(closedReader == nil)
+
+        let last = BookChapter(url: "last", title: "另一章", bookUrl: second.bookUrl, index: 0)
+        let other = ReaderViewModel(book: second, chapters: [last], initialIndex: 0, source: source, service: loader, cache: cache)
+        other.cacheChapters()
+        let queue = ChapterBatchCache.shared
+        let deadline = ContinuousClock.now + .seconds(10)
+        while queue.progress[second.bookUrl]?.isActive == true, ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        #expect(queue.progress[first.bookUrl]?.processed == 3)
+        #expect(queue.progress[second.bookUrl]?.failed == 0)
+        #expect(queue.progress[second.bookUrl]?.isActive == false)
+        #expect(await loader.contentRequests == [2, 3, 0])
+        #expect(try await cache.load(bookURL: first.bookUrl, chapterURL: "c3")?.content == "正文3")
+    }
+
+    @Test(arguments: [true, false]) func sourceSwitchClearsDownloadedChaptersAndRejectsLateWrites(sameURL: Bool) async throws {
+        let directory = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let cache = ChapterContentCache(directory: directory)
+        let loader = SuspendedReaderChapterLoader()
+        let old = Book(bookUrl: UUID().uuidString, name: "书", origin: "old")
+        let chapters = (0..<3).map { BookChapter(url: "c\($0)", title: "旧章", bookUrl: old.bookUrl, index: $0) }
+        try await cache.save(.init(bookURL: old.bookUrl, chapterURL: "c0", content: "旧缓存"))
+        let reader = ReaderViewModel(book: old, chapters: chapters, initialIndex: 1,
+                                     source: .init(bookSourceUrl: old.origin, bookSourceName: "旧源"), service: loader, cache: cache)
+        let foreground = Task { await reader.load(rules: [], prefetchNextChapter: false) }
+        await loader.waitUntilSuspended()
+        // Queue an independent batch while the old reader's network response is still outstanding.
+        let batch = ReaderViewModel(book: old, chapters: chapters, initialIndex: 0,
+                                    source: .init(bookSourceUrl: old.origin, bookSourceName: "旧源"),
+                                    service: CacheRegressionSource(), cache: cache)
+        batch.cacheChapters()
+        let new = Book(bookUrl: sameURL ? old.bookUrl : UUID().uuidString, name: "书", origin: "new")
+        let chapter = BookChapter(url: "new", title: "新章", bookUrl: new.bookUrl, index: 0)
+        await reader.applySourceSwitch(.init(book: new, chapters: [chapter], exactChapterMatch: false,
+                                             verifiedContent: .init(content: "新正文")),
+                                       source: .init(bookSourceUrl: new.origin, bookSourceName: "新源"))
+        await reader.load(rules: [], prefetchNextChapter: false)
+        await loader.release()
+        await foreground.value
+        #expect(ChapterBatchCache.shared.progress[old.bookUrl] == nil)
+        #expect(try await cache.statistics().entries == 1)
+        #expect(try await cache.load(bookURL: new.bookUrl, chapterURL: "new")?.content == "新正文")
+    }
+
+    @Test func browserChapterClearsTheScrollErrorAndCachesOnlyCompleteContent() async throws {
+        let directory = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let cache = ChapterContentCache(directory: directory)
+        let source = BookSource(bookSourceUrl: "https://fixture.test", bookSourceName: "源")
+        let book = Book(bookUrl: "book", name: "书", origin: source.id)
+        let chapter = BookChapter(url: "chapter", title: "第一章", bookUrl: book.bookUrl, index: 0)
+        let loader = CacheRegressionSource()
+        await loader.disconnect()
+        let reader = ReaderViewModel(book: book, chapters: [chapter], initialIndex: 0, source: source, service: loader, cache: cache)
+        await reader.load(rules: [], prefetchNextChapter: false)
+        await reader.prepareContinuousReading(rules: [])
+        #expect(reader.currentChapterError != nil)
+        let partial = ChapterContentReport(content: "第一页", diagnostics: [.init(severity: .error, code: "content.empty",
+                                                                                 message: "第二页尚未就绪", rule: "")])
+        await #expect(throws: NSError.self) { try await reader.acceptBrowserChapter(partial, chapter: chapter, source: source) }
+        #expect(try await cache.load(bookURL: book.bookUrl, chapterURL: chapter.url) == nil)
+        try await reader.acceptBrowserChapter(.init(content: "完整正文"), chapter: chapter, source: source)
+        #expect(reader.currentChapterError == nil)
+        #expect(reader.scrollChapters.first?.content == "完整正文")
+        #expect(try await cache.load(bookURL: book.bookUrl, chapterURL: chapter.url)?.content == "完整正文")
+    }
+
     @Test func switchedReaderUsesVerifiedBodyWithoutRepeatingTheRequestAndCachesIt() async throws {
         let directory = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -544,7 +675,7 @@ struct ReaderRegressionTests {
         var replacement = book
         replacement.origin = "new"
         replacement.durChapterPos = 2
-        model.applySourceSwitch(.init(book: replacement, chapters: chapters, exactChapterMatch: true,
+        await model.applySourceSwitch(.init(book: replacement, chapters: chapters, exactChapterMatch: true,
                                       verifiedContent: .init(content: "已验证的正文")),
                                 source: .init(bookSourceUrl: "new", bookSourceName: "新源"))
         await model.load(rules: [], prefetchNextChapter: false)
@@ -571,7 +702,7 @@ struct ReaderRegressionTests {
         #expect(model.content == "old-source正文0")
         var replacement = book
         replacement.origin = "new-source"
-        model.applySourceSwitch(.init(book: replacement, chapters: chapters, exactChapterMatch: true),
+        await model.applySourceSwitch(.init(book: replacement, chapters: chapters, exactChapterMatch: true),
                                 source: .init(bookSourceUrl: "new-source", bookSourceName: "新源"))
         await model.load(rules: [], prefetchNextChapter: false)
         #expect(model.content == "new-source正文0")
@@ -597,7 +728,7 @@ struct ReaderRegressionTests {
         await model.load(rules: [], prefetchNextChapter: false)
         await model.prepareContinuousReading(rules: [])
         model.updateContinuousPosition(chapter: 1)
-        let current = model.bookForSourceSwitch(position: 4)
+        let current = model.bookAtReadingPosition(4)
         #expect(current.durChapterIndex == 1)
         #expect(current.durChapterTitle == "旧1")
         #expect(current.durChapterPos == 4)
@@ -606,7 +737,7 @@ struct ReaderRegressionTests {
         newBook.durChapterIndex = 2
         newBook.durChapterPos = 4
         let newChapters = (0..<4).map { BookChapter(url: "new-\($0)", title: "新\($0)", bookUrl: newBook.bookUrl, index: $0) }
-        model.applySourceSwitch(.init(book: newBook, chapters: newChapters, exactChapterMatch: true),
+        await model.applySourceSwitch(.init(book: newBook, chapters: newChapters, exactChapterMatch: true),
                                 source: .init(bookSourceUrl: "new-source", bookSourceName: "新源"))
         #expect(model.book.origin == "new-source")
         #expect(model.chapters == newChapters)
@@ -661,6 +792,7 @@ struct ReaderRegressionTests {
         let model = ReaderViewModel(demoBook: book, chapters: chapters, initialIndex: 1, content: "正文内容")
         model.goPrevious(position: Int.max)
         await model.load(rules: [])
+        #expect(model.requestedPosition == model.content.utf16.count - 1)
         let prefix = model.title.utf16.count + 1
         let renderedLength = prefix + model.content.utf16.count
 

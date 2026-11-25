@@ -106,6 +106,10 @@ python3 scripts/export-open-source.py /tmp/legado-ios-open-source
 
 目标目录必须尚不存在。导出后检查内容，再用独立仓库管理；`.gitignore` 不会自动清理已经跟踪的文件。
 
+## 本地 IPA 打包
+
+每次打新 IPA 前，以上一个 IPA 为基准，把 `MARKETING_VERSION` 的末位和 `CURRENT_PROJECT_VERSION` 各加一。打包后核对包内 `Info.plist` 的版本号、构建号与文件名一致。
+
 ## 维护应用源
 
 `docs/altstore.json` 是 AltStore Classic、SideStore 和 LiveContainer 共用的应用源，固定地址为：

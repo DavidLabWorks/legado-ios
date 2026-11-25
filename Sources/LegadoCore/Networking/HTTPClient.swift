@@ -5,6 +5,7 @@ import FoundationNetworking
 #endif
 
 public struct HTTPResponse: Sendable {
+    public var webViewCookies: [HTTPCookie]?
     public var data: Data
     public var statusCode: Int
     public var headers: [String: String]
@@ -645,17 +646,8 @@ public struct SourceRateWindow: Sendable, Equatable {
 public actor SourceNetworkPolicy {
     public static let shared = SourceNetworkPolicy()
 
-    private struct StoredCookie: Sendable {
-        var name: String
-        var value: String
-        var domain: String
-        var path: String
-        var expiresAt: Date?
-        var secure: Bool
-    }
-
     private var windows: [String: SourceRateWindow] = [:]
-    private var cookies: [String: [StoredCookie]] = [:]
+    private var cookies: [String: [HTTPCookie]] = [:]
     private let javaScript: JavaScriptRuleEvaluator
 
     public init(javaScript: JavaScriptRuleEvaluator = .init()) { self.javaScript = javaScript }
@@ -807,9 +799,10 @@ public actor SourceNetworkPolicy {
         var webPrepared = prepared
         var request = prepared.urlRequest(timeout: timeout, handleCookies: false)
         if source.enabledCookieJar == true {
+            webPrepared.webViewCookies = matchingCookies(sourceID: source.id, url: prepared.url)
             let stored = cookieHeader(sourceID: source.id, url: prepared.url)
             let explicit = request.value(forHTTPHeaderField: "Cookie") ?? ""
-            let merged = mergeCookieHeaders(stored, explicit)
+            let merged = explicit.isEmpty ? stored : mergeCookieHeaders(stored, explicit)
             if !merged.isEmpty {
                 request.setValue(merged, forHTTPHeaderField: "Cookie")
                 webPrepared.headers["Cookie"] = merged
@@ -835,6 +828,7 @@ public actor SourceNetworkPolicy {
                         let cookies = cookieHeader(sourceID: source.id, url: page.finalURL)
                         let explicit = request.value(forHTTPHeaderField: "Cookie") ?? ""
                         webPrepared.headers["Cookie"] = mergeCookieHeaders(cookies, explicit)
+                        webPrepared.webViewCookies = matchingCookies(sourceID: source.id, url: page.finalURL)
                     }
                     var decoded = page
                     decoded.requestedCharset = prepared.charset ?? page.requestedCharset
@@ -908,23 +902,31 @@ public actor SourceNetworkPolicy {
     }
 
     public func cookieHeader(sourceID: String, url: URL) -> String {
+        matchingCookies(sourceID: sourceID, url: url).map { "\($0.name)=\($0.value)" }.joined(separator: "; ")
+    }
+
+    private func matchingCookies(sourceID: String, url: URL) -> [HTTPCookie] {
         let now = Date()
-        let host = url.host?.lowercased() ?? ""
         let path = url.path.isEmpty ? "/" : url.path
-        let values = (cookies[sourceID] ?? []).filter { cookie in
-            (cookie.expiresAt == nil || cookie.expiresAt! > now)
-                && domainMatches(host: host, domain: cookie.domain)
-                && path.hasPrefix(cookie.path)
-                && (!cookie.secure || url.scheme?.lowercased() == "https")
-        }
-        return values.map { "\($0.name)=\($0.value)" }.joined(separator: "; ")
+        return (cookies[sourceID] ?? []).filter { cookie in
+            let directory = cookie.path.hasSuffix("/") ? cookie.path : cookie.path + "/"
+            return (cookie.expiresDate.map { $0 > now } ?? true)
+                && domainMatches(host: url.host?.lowercased() ?? "", domain: cookie.domain)
+                && (path == cookie.path || path.hasPrefix(directory))
+                && (!cookie.isSecure || url.scheme?.lowercased() == "https")
+        }.sorted { $0.path.count > $1.path.count }
     }
 
     public func setCookieHeader(_ header: String, sourceID: String, url: URL) {
+        guard let host = url.host else { return }
         for part in header.split(separator: ";") {
             let pair = part.split(separator: "=", maxSplits: 1).map(String.init)
             guard pair.count == 2 else { continue }
-            upsert(.init(name: pair[0].trimmingCharacters(in: .whitespaces), value: pair[1], domain: url.host ?? "", path: "/", expiresAt: nil, secure: url.scheme == "https"), sourceID: sourceID)
+            var properties: [HTTPCookiePropertyKey: Any] = [
+                .name: pair[0].trimmingCharacters(in: .whitespaces), .value: pair[1], .domain: host, .path: "/"
+            ]
+            if url.scheme == "https" { properties[.secure] = "TRUE" }
+            if let cookie = HTTPCookie(properties: properties) { upsert(cookie, sourceID: sourceID) }
         }
     }
 
@@ -943,10 +945,16 @@ public actor SourceNetworkPolicy {
     }
 
     private func captureCookies(response: HTTPResponse, sourceID: String) {
-        guard let header = response.headers.first(where: { $0.key.caseInsensitiveCompare("Set-Cookie") == .orderedSame })?.value else { return }
-        LegadoCookieStore.shared.setCookie(header, for: response.finalURL.absoluteString)
-        for cookie in HTTPCookie.cookies(withResponseHeaderFields: ["Set-Cookie": header], for: response.finalURL) {
-            upsert(.init(name: cookie.name, value: cookie.value, domain: cookie.domain, path: cookie.path, expiresAt: cookie.expiresDate, secure: cookie.isSecure), sourceID: sourceID)
+        if let header = response.headers.first(where: { $0.key.caseInsensitiveCompare("Set-Cookie") == .orderedSame })?.value {
+            LegadoCookieStore.shared.setCookie(header, for: response.finalURL.absoluteString)
+            for cookie in HTTPCookie.cookies(withResponseHeaderFields: ["Set-Cookie": header], for: response.finalURL) {
+                upsert(cookie, sourceID: sourceID)
+            }
+        }
+        guard let observed = response.webViewCookies, let host = response.finalURL.host?.lowercased() else { return }
+        for cookie in observed where domainMatches(host: host, domain: cookie.domain) {
+            upsert(cookie, sourceID: sourceID)
+            HTTPCookieStorage.shared.setCookie(cookie)
         }
     }
 
@@ -973,7 +981,7 @@ public actor SourceNetworkPolicy {
         return HTTPResponse(data: data, statusCode: 200, headers: headers, finalURL: prepared.url)
     }
 
-    private func upsert(_ cookie: StoredCookie, sourceID: String) {
+    private func upsert(_ cookie: HTTPCookie, sourceID: String) {
         var values = cookies[sourceID] ?? []
         values.removeAll { $0.name == cookie.name && $0.domain == cookie.domain && $0.path == cookie.path }
         values.append(cookie)
@@ -982,7 +990,7 @@ public actor SourceNetworkPolicy {
 
     private func domainMatches(host: String, domain: String) -> Bool {
         let normalized = domain.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "."))
-        return host == normalized || host.hasSuffix(".\(normalized)")
+        return host == normalized || (domain.hasPrefix(".") && host.hasSuffix(".\(normalized)"))
     }
 
     private func mergeCookieHeaders(_ headers: String...) -> String {

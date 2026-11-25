@@ -21,7 +21,7 @@ public struct SearchBook: Codable, Hashable, Identifiable, Sendable {
     public var origins: Set<String>
     public var variables: [String: String]
 
-    public var id: String { bookURL }
+    public var id: String { "\(origin)\u{0}\(bookURL)" }
     public var variable: String? {
         get {
             guard !variables.isEmpty, let data = try? JSONEncoder().encode(variables) else { return nil }

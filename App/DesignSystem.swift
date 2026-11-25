@@ -245,7 +245,7 @@ enum BookReadingPresentation {
     }
 
     static func position(_ book: Book) -> String {
-        if let title = book.durChapterTitle, !title.isEmpty { return title }
+        if let title = book.durChapterTitle?.trimmingCharacters(in: .whitespacesAndNewlines), !title.isEmpty { return title }
         guard hasStarted(book) else { return "尚未阅读" }
         return book.totalChapterNum > 0
             ? "第\(book.durChapterIndex + 1)章 · 共\(book.totalChapterNum)章"
@@ -254,7 +254,7 @@ enum BookReadingPresentation {
 
     static func progressLabel(_ book: Book) -> String {
         guard hasStarted(book) else { return "尚未阅读" }
-        guard book.totalChapterNum > 0 else { return position(book) }
+        guard book.totalChapterNum > 0 else { return "已开始阅读" }
         return "已读\(Int((progress(book) * 100).rounded()))%"
     }
 }

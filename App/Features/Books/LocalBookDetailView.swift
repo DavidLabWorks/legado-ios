@@ -35,7 +35,6 @@ struct LocalBookDetailView: View {
     let book: Book
     @StateObject private var model = LocalBookDetailViewModel()
     @State private var showsTableOfContents = false
-    @State private var showsRemoveConfirmation = false
     @State private var showsTocRule = false
 
     private var currentBook: Book { library.books.first { $0.bookUrl == book.bookUrl } ?? book }
@@ -45,7 +44,7 @@ struct LocalBookDetailView: View {
         ScrollView {
             VStack(spacing: 16) {
                 VStack(spacing: 14) {
-                    BookCoverArtwork(title: book.name, author: book.author, remoteURL: book.customCoverUrl ?? book.coverUrl, width: 108, height: 154)
+                    BookCoverArtwork(title: book.name, author: book.author, remoteURL: book.displayCoverURL, width: 108, height: 154)
                     Text(book.name).font(.title2.bold())
                     if !book.author.isEmpty { Text(book.author).font(.subheadline).foregroundStyle(.secondary) }
                     HStack {
@@ -74,9 +73,7 @@ struct LocalBookDetailView: View {
                         } else {
                             ForEach(model.chapters.prefix(8)) { chapter in
                                 Divider()
-                                NavigationLink {
-                                    ReaderView(book: book, chapters: model.chapters, initialIndex: chapter.index)
-                                } label: {
+                                BookChapterLink(book: book, chapters: model.chapters, index: chapter.index) {
                                     HStack(spacing: 12) {
                                         Text(String(format: "%02d", chapter.index + 1))
                                             .font(.caption.monospacedDigit()).foregroundStyle(.tertiary).frame(width: 28)
@@ -110,7 +107,12 @@ struct LocalBookDetailView: View {
                     if URL(string: book.bookUrl)?.pathExtension.lowercased() == "txt" {
                         Button("重新分章", systemImage: "list.bullet.indent") { showsTocRule = true }
                     }
-                    Button("移出书架", systemImage: "trash", role: .destructive) { showsRemoveConfirmation = true }
+                    Button("移出书架", systemImage: "trash", role: .destructive) {
+                        Task {
+                            await library.remove(bookURL: book.bookUrl)
+                            if !library.contains(book) { dismiss() }
+                        }
+                    }
                 } label: { Image(systemName: "ellipsis.circle") }
                 .accessibilityLabel("本地书操作")
             }
@@ -119,12 +121,6 @@ struct LocalBookDetailView: View {
         .sheet(isPresented: $showsTocRule) { LocalBookTocRuleView(book: book) }
         .fullScreenCover(isPresented: $showsTableOfContents) {
             LocalBookTableOfContentsView(book: book, chapters: model.chapters)
-        }
-        .confirmationDialog("从书架移除《\(book.name)》？", isPresented: $showsRemoveConfirmation) {
-            Button("移出书架", role: .destructive) {
-                Task { await library.remove(bookURL: book.bookUrl); dismiss() }
-            }
-            Button("取消", role: .cancel) {}
         }
     }
 }
@@ -146,9 +142,7 @@ private struct LocalBookTableOfContentsView: View {
     var body: some View {
         ReadingNavigationStack {
             List(displayed) { chapter in
-                NavigationLink {
-                    ReaderView(book: book, chapters: chapters, initialIndex: chapter.index)
-                } label: {
+                BookChapterLink(book: book, chapters: chapters, index: chapter.index) {
                     HStack {
                         Text("\(chapter.index + 1)").font(.caption.monospacedDigit()).foregroundStyle(.secondary).frame(width: 42, alignment: .trailing)
                         Text(chapter.title).lineLimit(2)
@@ -159,6 +153,7 @@ private struct LocalBookTableOfContentsView: View {
                     }
                 }
             }
+            .id(descending)
             .searchable(text: $query, prompt: "搜索目录")
             .navigationTitle("目录")
             .navigationBarTitleDisplayMode(.inline)

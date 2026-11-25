@@ -36,6 +36,7 @@ public struct Book: Codable, Hashable, Identifiable, Sendable {
     public var syncTime: Int64
 
     public var id: String { bookUrl }
+    public var displayCoverURL: String? { customCoverUrl.flatMap { $0.isEmpty ? nil : $0 } ?? coverUrl }
 
     public init(bookUrl: String, name: String, author: String = "", origin: String = "local") {
         self.bookUrl = bookUrl

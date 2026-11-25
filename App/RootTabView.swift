@@ -164,6 +164,7 @@ private struct BookshelfView: View {
     }
     @State private var showsGroupManager = false
     @State private var showsBookOrder = false
+    @State private var verificationBooks: [Book] = []
     @AppStorage("bookshelfLayout") private var bookshelfLayout = "grid3"
     @AppStorage("bookshelfSort") private var bookshelfSort = 0
 
@@ -263,7 +264,7 @@ private struct BookshelfView: View {
         }
         .refreshable {
             guard selectedGroup.enableRefresh else { return }
-            await library.checkForUpdates(sources: sources.sources, group: selectedGroup)
+            await library.startGroupUpdate(sources: sources.sources, group: selectedGroup, defaultSort: bookshelfSort).value
         }
         .readingLocalBookFileImporter(isPresented: $showsLocalImporter) { files in
             pendingLocalFiles = files
@@ -286,6 +287,13 @@ private struct BookshelfView: View {
         .sheet(isPresented: $showsBookOrder) {
             BookOrderView(groupID: selectedGroup.id).environmentObject(library)
         }
+        .sheet(isPresented: Binding(
+            get: { !verificationBooks.isEmpty },
+            set: { if !$0 { verificationBooks = [] } }
+        )) {
+            BookshelfVerificationView(books: verificationBooks)
+                .environmentObject(library)
+        }
         .alert("书架操作失败", isPresented: Binding(
             get: { library.errorMessage != nil },
             set: { if !$0 { library.clearError() } }
@@ -298,7 +306,13 @@ private struct BookshelfView: View {
             get: { library.updateMessage != nil },
             set: { if !$0 { library.clearUpdateMessage() } }
         )) {
-            Button("好") { library.clearUpdateMessage() }
+            let books = library.booksRequiringVerification
+            if books.isEmpty {
+                Button("好") { library.clearUpdateMessage() }
+            } else {
+                Button(books.count == 1 ? "去验证" : "去验证（\(books.count) 本）") { verificationBooks = books }
+                Button("取消", role: .cancel) { library.clearUpdateMessage() }
+            }
         } message: {
             Text(library.updateMessage ?? "")
         }
@@ -367,7 +381,7 @@ private struct BookshelfView: View {
         } else {
             Menu {
                 Button("更新目录", systemImage: "arrow.clockwise") {
-                    Task { await library.checkForUpdates(sources: sources.sources, group: selectedGroup) }
+                    library.startGroupUpdate(sources: sources.sources, group: selectedGroup, defaultSort: bookshelfSort)
                 }
                 Button("本地书", systemImage: "plus") { showsLocalImporter = true }
                 Button("书架分组", systemImage: "rectangle.3.group") { showsGroupManager = true }
@@ -491,6 +505,49 @@ private struct BookOrderView: View {
     }
 }
 
+private struct BookshelfVerificationView: View {
+    let books: [Book]
+    @EnvironmentObject private var library: BookLibraryModel
+    @Environment(\.dismiss) private var dismiss
+    @State private var remaining: [Book]
+    @State private var selected: Book?
+
+    init(books: [Book]) {
+        self.books = books
+        _remaining = State(initialValue: books)
+    }
+
+    var body: some View {
+        if books.count == 1, let book = books.first {
+            directory(for: book)
+        } else {
+            ReadingNavigationStack {
+                List(remaining) { book in
+                    Button(book.name) { selected = book }
+                }
+                .navigationTitle("待验证（\(remaining.count) 本）")
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) { Button("关闭") { dismiss() } }
+                }
+            }
+            .sheet(item: $selected, onDismiss: {
+                if remaining.isEmpty { dismiss() }
+            }) { book in
+                directory(for: book)
+            }
+        }
+    }
+
+    @ViewBuilder private func directory(for book: Book) -> some View {
+        if let url = book.browserDirectoryURL {
+            BrowserBookPageView(url: url, action: .directory(url) { rows in
+                try await library.refreshFromBrowser(rows, book: book, directory: url)
+                remaining.removeAll { $0.id == book.id }
+            })
+        }
+    }
+}
+
 private struct BookshelfBookLink: View {
     @EnvironmentObject private var library: BookLibraryModel
     @EnvironmentObject private var sources: SourceLibraryModel
@@ -499,13 +556,16 @@ private struct BookshelfBookLink: View {
     let grid: Bool
     let open: () -> Void
     @State private var showsGroupSelector = false
+    @State private var showsWebDirectory = false
+    @State private var showsCoverSearch = false
 
     private var source: BookSource? { sources.sources.first { $0.bookSourceUrl == book.origin } }
 
     var body: some View {
+        let isChecking = library.checkingBookURLs.contains(book.bookUrl)
         Button(action: open) {
-            if grid { BookshelfGridItem(book: book) }
-            else { BookshelfRow(book: book, compact: compact) }
+            if grid { BookshelfGridItem(book: book, isChecking: isChecking) }
+            else { BookshelfRow(book: book, compact: compact, isChecking: isChecking) }
         }
         .buttonStyle(.plain)
         .contextMenu {
@@ -515,6 +575,15 @@ private struct BookshelfBookLink: View {
             } label: {
                 Label("书籍信息", systemImage: "info.circle")
             }
+            Button("设置封面", systemImage: "photo") { showsCoverSearch = true }
+            Button("刷新目录", systemImage: "arrow.clockwise") {
+                Task { await library.checkForUpdates(sources: sources.sources, bookURL: book.bookUrl) }
+            }
+            .disabled(library.isCheckingUpdates)
+            if source?.enabled == true, book.browserDirectoryURL != nil {
+                Button("用网页刷新目录", systemImage: "globe") { showsWebDirectory = true }
+                    .disabled(library.isCheckingUpdates)
+            }
             Button("移至分组", systemImage: "rectangle.3.group") { showsGroupSelector = true }
             Button("移出书架", systemImage: "trash", role: .destructive) {
                 Task { await library.remove(bookURL: book.bookUrl) }
@@ -523,11 +592,71 @@ private struct BookshelfBookLink: View {
         .sheet(isPresented: $showsGroupSelector) {
             BookGroupSelectView(book: book).environmentObject(library)
         }
+        .sheet(isPresented: $showsCoverSearch) {
+            BookCoverSearchView(book: book)
+        }
+        .sheet(isPresented: $showsWebDirectory) {
+            if let url = book.browserDirectoryURL {
+                BrowserBookPageView(url: url, action: .directory(url) { rows in
+                    try await library.refreshFromBrowser(rows, book: book, directory: url)
+                })
+            }
+        }
+    }
+}
+
+private struct BookshelfChapters: View {
+    let book: Book
+    let lineLimit: Int
+
+    var body: some View {
+        let latest = book.latestChapterTitle?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let current = BookReadingPresentation.hasStarted(book) ? BookReadingPresentation.position(book) : "尚未阅读"
+        VStack(alignment: .leading, spacing: 2) {
+            Text("读到：\(current)")
+            Text("最新：\(latest.isEmpty ? "暂无章节信息" : latest)")
+        }
+        .foregroundStyle(.secondary)
+        .multilineTextAlignment(.leading)
+        .lineLimit(lineLimit)
+        .truncationMode(.tail)
+        .fixedSize(horizontal: false, vertical: true)
+    }
+}
+
+private struct BookUpdateIndicator: View {
+    var body: some View {
+        ProgressView()
+            .controlSize(.small)
+            .tint(.white)
+            .frame(width: 26, height: 26)
+            .background(.black.opacity(0.7), in: Circle())
+            .accessibilityLabel("正在检测更新")
+            .allowsHitTesting(false)
+    }
+}
+
+private struct ChapterUpdateBadge: View {
+    let count: Int
+    @ScaledMetric(relativeTo: .caption) private var diameter: CGFloat = 20
+
+    var body: some View {
+        if count > 0 {
+            Text(verbatim: String(count))
+                .font(.caption.bold().monospacedDigit())
+                .foregroundStyle(.white)
+                .padding(.horizontal, 5)
+                .frame(minWidth: diameter, minHeight: diameter)
+                .background(Color(red: 0.82, green: 0.12, blue: 0.19), in: Capsule())
+                .fixedSize()
+                .accessibilityLabel("更新 \(count) 章")
+        }
     }
 }
 
 private struct BookshelfGridItem: View {
     let book: Book
+    let isChecking: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -535,24 +664,19 @@ private struct BookshelfGridItem: View {
                 BookCoverArtwork(
                     title: book.name,
                     author: book.author,
-                    remoteURL: book.coverUrl,
+                    remoteURL: book.displayCoverURL,
                     width: geometry.size.width,
                     height: geometry.size.height
                 )
+                .overlay { if isChecking { BookUpdateIndicator() } }
             }
             .aspectRatio(0.70, contentMode: .fit)
             .frame(maxWidth: 180)
-            .frame(maxWidth: .infinity)
             .overlay(alignment: .topTrailing) {
-                if book.lastCheckCount > 0 {
-                    Circle()
-                        .fill(ReadingTheme.coral)
-                        .frame(width: 7, height: 7)
-                        .overlay { Circle().stroke(ReadingTheme.canvas, lineWidth: 2) }
-                        .offset(x: 3, y: -3)
-                        .accessibilityLabel("更新 \(book.lastCheckCount) 章")
-                }
+                ChapterUpdateBadge(count: book.lastCheckCount)
+                    .padding(3)
             }
+            .frame(maxWidth: .infinity)
             Text(book.name)
                 .font(.caption.weight(.semibold))
                 .lineLimit(2)
@@ -560,8 +684,9 @@ private struct BookshelfGridItem: View {
             Text(book.author.isEmpty ? "未知作者" : book.author)
                 .font(.caption2).foregroundStyle(.secondary).lineLimit(1)
                 .padding(.top, 3)
+            Spacer(minLength: 0)
             ReadingProgressLine(value: BookReadingPresentation.progress(book))
-                .padding(.top, 12)
+                .padding(.top, 8)
             Text(BookReadingPresentation.progressLabel(book))
                 .font(.caption2).foregroundStyle(.secondary).lineLimit(1)
                 .padding(.top, 7)
@@ -623,7 +748,7 @@ private struct ContinueReadingCard: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             if !dynamicTypeSize.isAccessibilitySize {
-                BookCoverArtwork(title: book.name, author: book.author, remoteURL: book.coverUrl, width: 94, height: 140)
+                BookCoverArtwork(title: book.name, author: book.author, remoteURL: book.displayCoverURL, width: 94, height: 140)
             }
         }
         .padding(20)
@@ -935,27 +1060,19 @@ struct BookshelfReadView: View {
 private struct BookshelfRow: View {
     let book: Book
     var compact = false
+    let isChecking: Bool
     @ScaledMetric(relativeTo: .body) private var coverWidth = 52
-
-    private var readingPosition: String {
-        if let title = book.durChapterTitle, !title.isEmpty { return title }
-        if book.durChapterIndex > 0 || book.durChapterPos > 0 || book.durChapterTime > 0 {
-            return book.totalChapterNum > 0
-                ? "第 \(book.durChapterIndex + 1) 章 / 共 \(book.totalChapterNum) 章"
-                : "已读至第 \(book.durChapterIndex + 1) 章"
-        }
-        return "尚未阅读"
-    }
 
     var body: some View {
         HStack(alignment: .center, spacing: 14) {
             BookCoverArtwork(
                 title: book.name,
                 author: book.author,
-                remoteURL: book.coverUrl,
+                remoteURL: book.displayCoverURL,
                 width: compact ? 40 : coverWidth,
                 height: compact ? 56 : coverWidth * 1.42
             )
+            .overlay { if isChecking { BookUpdateIndicator() } }
             VStack(alignment: .leading, spacing: 5) {
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
                     Text(book.name)
@@ -963,29 +1080,18 @@ private struct BookshelfRow: View {
                         .foregroundStyle(.primary)
                         .lineLimit(2)
                     Spacer(minLength: 0)
-                    if book.lastCheckCount > 0 {
-                        Text("+\(book.lastCheckCount)")
-                            .font(.caption.monospacedDigit())
-                            .foregroundStyle(ReadingTheme.accent)
-                            .fixedSize()
-                            .accessibilityLabel("更新 \(book.lastCheckCount) 章")
-                    }
+                    ChapterUpdateBadge(count: book.lastCheckCount)
                 }
                 Text(book.author.isEmpty ? "未知作者" : book.author)
                     .font(.caption).foregroundStyle(.secondary).lineLimit(1)
-                if !compact {
-                    Text(readingPosition)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
+                BookshelfChapters(book: book, lineLimit: compact ? 1 : 2)
+                    .font(.caption)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .padding(.vertical, compact ? 10 : 12)
         .contentShape(Rectangle())
         .accessibilityElement(children: .combine)
-        .accessibilityValue(book.latestChapterTitle.map { "最新章节：\($0)" } ?? "")
     }
 }
 
@@ -998,6 +1104,7 @@ struct SearchView: View {
     @State private var showsScope = false
     @State private var selectedGroups = Set<String>()
     @State private var selectedSourceID: String?
+    @State private var presentedBrowserPage: BrowserSearchPage?
     @State private var didStartInitialSearch = false
     @State private var searchIsPresented = false
     @State private var visibleResultIDs = Set<String>()
@@ -1023,6 +1130,12 @@ struct SearchView: View {
                     emptyResultsView
                 case .searching, .finished:
                     resultsContent
+                }
+                ForEach(model.browserPages) { page in
+                    Button { presentedBrowserPage = page } label: {
+                        Label(page.manualVerification == nil ? "在浏览器中打开 101 看书搜索" : "手动验证 · \(page.source.bookSourceName)", systemImage: "safari")
+                    }
+                    .buttonStyle(.bordered)
                 }
                 if model.state != .searching, !model.diagnostics.isEmpty { diagnosticsCard }
             }
@@ -1088,6 +1201,17 @@ struct SearchView: View {
                 .accessibilityLabel("搜索选项")
                 .accessibilityIdentifier("search.options")
             }
+        }
+        .onChange(of: model.browserPage?.id) { _ in
+            if let page = model.browserPage, page.page == 1, !showsScope {
+                searchIsPresented = false
+                presentedBrowserPage = page
+            }
+        }
+        .sheet(item: $presentedBrowserPage) { page in
+            BrowserBookPageView(url: page.url, action: .search(page) { html in
+                try await model.useBrowserResults(html, for: page)
+            })
         }
         .sheet(isPresented: $showsScope) {
             SearchScopeSheet(
@@ -1160,7 +1284,7 @@ struct SearchView: View {
                         Text("“\(model.submittedKeyword)”").font(.headline).lineLimit(1)
                         Text(model.isShowingCachedResults
                              ? (model.state == .searching ? "已显示缓存结果，正在更新书源" : "已显示缓存结果")
-                             : "找到 \(model.books.count) 本，已自动合并重复来源")
+                             : "找到 \(model.books.count) 条结果")
                             .font(.caption).foregroundStyle(.secondary)
                     }
                     Spacer()
@@ -1416,7 +1540,7 @@ private struct SearchBookRow: View {
                         .font(.caption).foregroundStyle(.secondary).lineLimit(1)
                 }
                 HStack(spacing: 6) {
-                    Text(book.origins.count > 1 ? "\(book.origins.count) 个来源" : book.originName)
+                    Text(book.originName)
                         .lineLimit(1)
                     if let wordCount = book.wordCount, !wordCount.isEmpty {
                         Text("·")
@@ -2187,6 +2311,13 @@ private struct SearchScopeSheet: View {
 }
 
 private struct ReadingPreferencesView: View {
+    @AppStorage("appTtsEngine") private var defaultVoice = ""
+    @AppStorage(OfflineVoicePack.preferenceKey) private var selectedVoicePack = ""
+    private var availableOfflineVoices: [OfflineVoice] {
+        guard let pack = OfflineVoicePack(rawValue: selectedVoicePack), pack.isInstalled else { return [] }
+        return OfflineVoice.allCases
+    }
+
     @AppStorage(EPUBReadingMode.preferenceKey) private var defaultEPUBMode = EPUBReadingMode.original
     @AppStorage("textSize") private var fontSize = 20.0
     @AppStorage("letterSpacing") private var letterSpacing = 0.1
@@ -2210,6 +2341,19 @@ private struct ReadingPreferencesView: View {
 
     var body: some View {
         Form {
+            Section("朗读") {
+                NavigationLink("离线语音包") { OfflineVoicePackView() }
+                Picker("默认朗读声音", selection: $defaultVoice) {
+                    ForEach(availableOfflineVoices, id: \.self) { voice in
+                        Text(voice.title).tag(voice.rawValue)
+                    }
+                    Text("系统 TTS").tag("")
+                    if !defaultVoice.isEmpty, OfflineVoice(rawValue: defaultVoice) == nil {
+                        Text(defaultVoice == AzureSpeechSettings.selection ? "微软自然语音" : "在线朗读引擎").tag(defaultVoice)
+                    }
+                }
+                NavigationLink("配置微软自然语音") { AzureSpeechSettingsView() }
+            }
             Section("EPUB") {
                 Picker("默认 EPUB 阅读模式", selection: $defaultEPUBMode) {
                     ForEach(EPUBReadingMode.allCases, id: \.self) { mode in

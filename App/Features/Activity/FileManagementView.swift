@@ -270,7 +270,11 @@ struct FileManagementView: View {
                         Label(book.name, systemImage: "doc.badge.ellipsis")
                         Spacer()
                         Button("移出书架", role: .destructive) {
-                            if let url = URL(string: book.bookUrl) { pendingDeletion = [url] }
+                            Task {
+                                await library.remove(bookURL: book.bookUrl)
+                                model.errorMessage = library.errorMessage
+                                library.clearError()
+                            }
                         }.buttonStyle(.borderless)
                     }
                 }

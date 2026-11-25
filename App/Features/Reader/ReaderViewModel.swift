@@ -3,6 +3,33 @@ import SwiftUI
 import LegadoCore
 #endif
 
+extension String {
+    /// Bookmarks, progress and text search all use UTF-16 offsets into the original chapter.
+    func readerText(simplified: Bool) -> String {
+        guard simplified, !isEmpty else { return self }
+        let transform = StringTransform("Traditional-Simplified")
+        guard let converted = applyingTransform(transform, reverse: false) else { return self }
+        if utf16.count == converted.utf16.count,
+           unicodeScalars.elementsEqual(converted.unicodeScalars, by: { $0.utf16.count == $1.utf16.count }) {
+            return converted
+        }
+        // A few rare ideographs change UTF-16 width. Keep those glyphs while retaining
+        // the phrase-level conversion for the surrounding text.
+        if unicodeScalars.count == converted.unicodeScalars.count {
+            var result = String.UnicodeScalarView()
+            for (original, simplified) in zip(unicodeScalars, converted.unicodeScalars) {
+                result.append(original.utf16.count == simplified.utf16.count ? simplified : original)
+            }
+            return String(result)
+        }
+        return reduce(into: "") { result, character in
+            let original = String(character)
+            let replacement = original.applyingTransform(transform, reverse: false) ?? original
+            result += replacement.utf16.count == original.utf16.count ? replacement : original
+        }
+    }
+}
+
 struct ReaderParagraph: Identifiable, Equatable {
     let id: Int
     let text: String
@@ -30,11 +57,11 @@ struct ReaderChapterDirectory {
         readableIndices = indices
     }
 
-    func rows(matching search: String, descending: Bool) -> [Row] {
-        let query = search.trimmingCharacters(in: .whitespacesAndNewlines)
+    func rows(matching search: String, descending: Bool, simplified: Bool = false) -> [Row] {
+        let query = search.trimmingCharacters(in: .whitespacesAndNewlines).readerText(simplified: simplified)
         let number = Int(query)
         let matches = query.isEmpty ? rows : rows.filter {
-            $0.title.localizedCaseInsensitiveContains(query) || (number != nil && $0.number == number)
+            $0.title.readerText(simplified: simplified).localizedCaseInsensitiveContains(query) || (number != nil && $0.number == number)
         }
         return descending ? Array(matches.reversed()) : matches
     }
@@ -148,7 +175,7 @@ final class ReaderViewModel: ObservableObject {
     }
     var onlineSourceID: String? { source?.id }
     let chapterCache: ChapterContentCache
-    private var source: BookSource?
+    private(set) var source: BookSource?
     private let localService: LocalBookService
     private var preloadTask: Task<Void, Never>?
     private var previousPreparation: Task<Void, Never>?
@@ -165,7 +192,6 @@ final class ReaderViewModel: ObservableObject {
     private var previousLoadedIndex: Int?
     private var continuationLoadedIndex: Int?
     @Published private(set) var scrollRetries: Set<Int> = []
-    private var sourceCacheNeedsInvalidation = false
     private var pendingSourceContent: ChapterContentReport?
 
     func bookmarks(at position: Int, in bookmarks: [Bookmark], pageRange: NSRange? = nil) -> [Bookmark] {
@@ -344,6 +370,13 @@ final class ReaderViewModel: ObservableObject {
     }
 
     var nextChapter: BookChapter? { nextReadableChapter(after: currentIndex) }
+    func adjacentPagePreview(direction: Int) -> (title: String, text: String?)? {
+        guard let index = navigationIndex(direction: direction) else { return nil }
+        let chapter = chapters[index]
+        if let prepared = preparedContent(for: chapter) { return (prepared.body.title, prepared.body.content) }
+        return (chapter.title, demoChapterContent)
+    }
+
     var canGoPrevious: Bool { navigationIndex(direction: -1) != nil }
     var canGoNext: Bool { navigationIndex(direction: 1) != nil }
     var hasPreviousWindow: Bool { previousLoadedIndex != nil }
@@ -355,11 +388,11 @@ final class ReaderViewModel: ObservableObject {
         guard hasLoadedCurrentChapter, !isLoading,
               currentChapter?.isVolume != true else { return nil }
         return scrollChapters.first(where: { $0.id == currentIndex })?.error
-            ?? diagnostics.first(where: { $0.severity == .error })?.message
+            ?? Self.chapterErrorMessage(diagnostics)
             ?? (source != nil && content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "当前书源没有返回正文。" : nil)
     }
 
-    func bookForSourceSwitch(position: Int) -> Book {
+    func bookAtReadingPosition(_ position: Int) -> Book {
         var current = book
         current.durChapterIndex = currentIndex
         current.durChapterTitle = currentChapter?.title
@@ -368,17 +401,29 @@ final class ReaderViewModel: ObservableObject {
         return current
     }
 
-    func applySourceSwitch(_ report: BookSourceSwitchReport, source: BookSource) {
+    func cacheChapters() {
+        guard let source else { return }
+        let jobs = ChapterCachePlanner.plan(chapters: chapters, startIndex: 0)
+        ChapterBatchCache.shared.start(book: book, source: source, jobs: jobs, coordinator: contentCoordinator)
+    }
+
+    func applySourceSwitch(_ report: BookSourceSwitchReport, source: BookSource) async {
+        stopBackgroundReading()
+        let cleanup = await ChapterBatchCache.shared.clearForSourceSwitch(from: book.bookUrl, to: report.book.bookUrl, cache: chapterCache)
+        replaceReadingDirectory(book: report.book, chapters: report.chapters, source: source)
+        diagnostics += cleanup
+        pendingSourceContent = report.verifiedContent
+    }
+
+    func replaceReadingDirectory(book: Book, chapters: [BookChapter], source: BookSource?) {
         stopBackgroundReading()
         preparedChapters.removeAll()
         lastDirectoryCheck = 0
-        book = report.book
-        chapters = report.chapters
+        self.book = book
+        self.chapters = chapters
         self.source = source
         demoChapterContent = nil
-        sourceCacheNeedsInvalidation = true
-        select(index: Self.validIndex(report.book.durChapterIndex, chapters: chapters), position: report.book.durChapterPos)
-        pendingSourceContent = report.verifiedContent
+        select(index: Self.validIndex(book.durChapterIndex, chapters: chapters), position: book.durChapterPos)
     }
 
     static func cachedOpening(book: Book, chapters: [BookChapter], source: BookSource, rules: [ReplaceRule],
@@ -433,6 +478,9 @@ final class ReaderViewModel: ObservableObject {
         loadedFromCache = cached
         title = processed.title
         content = processed.content
+        if requestedPosition == .max, !content.isEmpty {
+            requestedPosition = content.utf16.count - 1
+        }
         diagnostics = sourceDiagnostics + processed.diagnostics
         hasLoadedCurrentChapter = true
     }
@@ -473,11 +521,6 @@ final class ReaderViewModel: ObservableObject {
         let report: ChapterContentReport
         let fromCache: Bool
         var stamp: ChapterContentStamp?
-        if sourceCacheNeedsInvalidation {
-            await contentCoordinator.invalidate(bookURL: book.bookUrl)
-            guard requestedGeneration == chapterLoadGeneration, !Task.isCancelled else { return }
-            sourceCacheNeedsInvalidation = false
-        }
         if let demoChapterContent {
             fromCache = true
             report = .init(title: chapter.title, content: demoChapterContent)
@@ -617,13 +660,44 @@ final class ReaderViewModel: ObservableObject {
             }
         }
         let processed = await Self.process(report, book: book, chapter: chapter, rules: usesReplaceRules ? rules : [])
-        let error = (report.diagnostics + processed.diagnostics).first(where: { $0.severity == .error })?.message
+        let error = Self.chapterErrorMessage(report.diagnostics + processed.diagnostics)
             ?? (processed.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && source != nil && !chapter.isVolume
                 ? "当前书源没有返回正文。" : nil)
         if let stamp, error == nil, report.diagnostics.isEmpty, rules == readingRules {
             rememberPrepared(processed, chapter: chapter, stamp: stamp)
         }
         return (processed.title, processed.content, error)
+    }
+
+    private static func chapterErrorMessage(_ diagnostics: [RuleDiagnostic]) -> String? {
+        guard let failure = diagnostics.first(where: { $0.severity == .error }) else { return nil }
+        if failure.code == "rule.unsupported", failure.rule == "source.bookSourceComment" {
+            return "书源脚本需要在原站继续。请打开本章，等网页显示正文后再导入。"
+        }
+        return failure.message
+    }
+
+    func acceptBrowserChapter(_ report: ChapterContentReport, chapter: BookChapter, source: BookSource) async throws {
+        let generation = chapterLoadGeneration
+        guard self.source?.id == source.id, currentChapter == chapter else { throw CancellationError() }
+        let processed = await Self.process(report, book: book, chapter: chapter, rules: readingRules)
+        try Task.checkCancellation()
+        guard generation == chapterLoadGeneration, currentChapter == chapter else { throw CancellationError() }
+        if let error = (report.diagnostics + processed.diagnostics).first(where: { $0.severity == .error }) {
+            throw NSError(domain: "BrowserChapter", code: 1, userInfo: [NSLocalizedDescriptionKey: error.message])
+        }
+        guard !processed.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw NSError(domain: "BrowserChapter", code: 2, userInfo: [NSLocalizedDescriptionKey: "当前网页尚未显示正文。"])
+        }
+        display(processed, diagnostics: report.diagnostics, cached: false)
+        if let slot = scrollChapters.firstIndex(where: { $0.id == currentIndex }) {
+            scrollChapters[slot] = .init(id: currentIndex, title: title, content: content, error: nil,
+                                         hasComments: commentsTarget(at: currentIndex) != nil)
+        }
+        let stamp = await contentCoordinator.saveContent(report, book: book, chapter: chapter, source: source)
+        guard generation == chapterLoadGeneration, currentChapter == chapter else { return }
+        if let stamp { rememberPrepared(processed, chapter: chapter, stamp: stamp) }
+        schedulePreload()
     }
 
     func saveEditedContent(_ value: String) async throws {
@@ -766,9 +840,8 @@ final class ReaderViewModel: ObservableObject {
     func select(index: Int, position: Int = 0) {
         guard chapters.indices.contains(index), !chapters[index].isVolume else { return }
         var reusable = Set([chapters[index].url])
-        if !upcomingRequests.isEmpty, let number = directory.rows[index].number {
-            let upcoming = directory.readableIndices.dropFirst(number).prefix(preloadCount)
-            reusable.formUnion(upcoming.map { chapters[$0].url })
+        if !upcomingRequests.isEmpty {
+            reusable.formUnion(preloadIndices(around: index).map { chapters[$0].url })
         }
         cancelPreload(keeping: reusable)
         let target = chapters[index]
@@ -904,6 +977,19 @@ final class ReaderViewModel: ObservableObject {
         cancelPreload()
     }
 
+    private func preloadIndices(around index: Int) -> [Int] {
+        guard preloadCount > 0, directory.rows.indices.contains(index),
+              let number = directory.rows[index].number else { return [] }
+        let readable = directory.readableIndices
+        let center = number - 1
+        var indices: [Int] = []
+        for distance in 1...preloadCount {
+            if readable.indices.contains(center + distance) { indices.append(readable[center + distance]) }
+            if readable.indices.contains(center - distance) { indices.append(readable[center - distance]) }
+        }
+        return indices
+    }
+
     private func schedulePreload() {
         preloadTask?.cancel()
         previousPreparation?.cancel()
@@ -917,11 +1003,11 @@ final class ReaderViewModel: ObservableObject {
                 self.rememberPrepared(processed, chapter: previous, stamp: stamp)
             }
         }
-        let start = currentIndex + 1
-        guard let source, preloadCount > 0, start < chapters.count else { return }
-        preloadTask = Task.detached(priority: .utility) { [weak self, book, chapters, preloadCount, readingRules] in
-            guard !Task.isCancelled else { return }
-            let jobs = ChapterCachePlanner.plan(chapters: chapters, startIndex: start, limit: preloadCount)
+        guard let source, preloadCount > 0 else { return }
+        let jobs = preloadIndices(around: currentIndex).map {
+            ChapterCacheJob(chapter: chapters[$0], nextChapterURL: nextReadableChapter(after: $0)?.url)
+        }
+        preloadTask = Task.detached(priority: .utility) { [weak self, book, readingRules] in
             for job in jobs {
                 guard !Task.isCancelled, let self else { return }
                 if await self.preparedContent(for: job.chapter) != nil { continue }
@@ -949,13 +1035,9 @@ final class ReaderViewModel: ObservableObject {
         guard !Task.isCancelled, canReuseProcessedContent, chapterCache.isCurrent(stamp),
               !processed.content.isEmpty, processed.diagnostics.isEmpty else { return }
         preparedChapters[chapter] = (processed, stamp)
-        while preparedChapters.count > max(preloadCount, 1) + 2
+        while preparedChapters.count > 2 * max(preloadCount, 1) + 1
                 || preparedChapters.values.reduce(0, { $0 + $1.body.content.utf8.count }) > 4 * 1024 * 1024 {
-            let oldest = preparedChapters.keys.min { $0.index < $1.index }
-            let previousIndex = navigationIndex(direction: -1) ?? currentIndex
-            if let oldest, oldest.index < previousIndex {
-                preparedChapters.removeValue(forKey: oldest)
-            } else if let farthest = preparedChapters.keys.max(by: { abs($0.index - currentIndex) < abs($1.index - currentIndex) }) {
+            if let farthest = preparedChapters.keys.max(by: { abs($0.index - currentIndex) < abs($1.index - currentIndex) }) {
                 preparedChapters.removeValue(forKey: farthest)
             } else { break }
         }

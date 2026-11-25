@@ -25,35 +25,14 @@ private struct DelayedSearchTransport: HTTPTransport {
 }
 
 struct BookSearchServiceTests {
-    @Test func matchingBucketsRankBySourceCountAndKeepTiesStable() {
-        func book(_ id: String, name: String, author: String, kind: String? = nil, origins: Int) -> SearchBook {
-            var book = SearchBook(bookURL: id, origin: id, originName: id, type: 0, name: name, author: author)
-            book.kind = kind
-            book.origins = Set((0..<origins).map { "source-\($0)" })
-            return book
-        }
-        let books = [
-            book("exact-low", name: "key", author: "a", origins: 1),
-            book("exact-high", name: "key", author: "b", origins: 2),
-            book("exact-tie", name: "key", author: "c", origins: 2),
-            book("tag-low", name: "first", author: "a", kind: "key", origins: 1),
-            book("tag-high", name: "second", author: "b", kind: "key", origins: 3),
-            book("contains-low", name: "key-one", author: "a", origins: 1),
-            book("contains-high", name: "key-two", author: "b", origins: 2),
-            book("other-low", name: "other-one", author: "a", origins: 1),
-            book("other-high", name: "other-two", author: "b", origins: 4)
-        ]
+    @Test func equallyRelevantResultsKeepArrivalOrder() {
         var accumulator = BookSearchAccumulator()
+        let books = ["one", "two", "three"].map {
+            SearchBook(bookURL: $0, origin: $0, originName: $0, type: 0, name: "key")
+        }
         accumulator.add(books)
-
-        #expect(accumulator.results(keyword: "key").map(\.bookURL) == [
-            "exact-high", "exact-tie", "exact-low", "tag-high", "tag-low",
-            "contains-high", "contains-low", "other-low", "other-high"
-        ])
-        var extraOrigin = books[0]
-        extraOrigin.origins = ["source-1", "source-2", "source-3"]
-        accumulator.add([extraOrigin])
-        #expect(accumulator.results(keyword: "key").first?.bookURL == "exact-low")
+        accumulator.add([books[0]])
+        #expect(accumulator.results(keyword: "key") == books)
     }
 
     @Test func exposesEarlierMetadataAndVariablesToLaterSearchFields() async throws {
@@ -152,7 +131,7 @@ struct BookSearchServiceTests {
         #expect(report.outcomes[0].diagnostics.isEmpty)
     }
 
-    @Test func mergesSameBookAcrossSources() async throws {
+    @Test func keepsEachSourceEvenWhenBothReturnTheSameBookURL() async throws {
         let finalURL = try #require(URL(string: "https://api.example.test/search"))
         let data = Data(#"{"books":[{"name":"同一本书","author":"作者","url":"/book/1"}]}"#.utf8)
         let transport = SearchMockTransport(
@@ -169,11 +148,11 @@ struct BookSearchServiceTests {
 
         let report = await service.search(keyword: "同一本书", sources: [makeSource("https://one.test"), makeSource("https://two.test")])
 
-        #expect(report.books.count == 1)
-        #expect(report.books[0].origins.count == 2)
+        #expect(report.books.map(\.origin) == ["https://one.test", "https://two.test"])
+        #expect(Set(report.books.map(\.id)).count == 2)
     }
 
-    @Test func mergesDecoratedAuthorAndPunctuatedTitleAcrossSources() {
+    @Test func keepsDecoratedAuthorAndPunctuatedTitleAcrossSources() {
         let plain = SearchBook(bookURL: "one", origin: "one", originName: "一源", type: 0, name: "长夜里的灯", author: "林舟")
         let decorated = SearchBook(bookURL: "two", origin: "two", originName: "二源", type: 0, name: "长夜里的灯！", author: "作者：林舟 著")
         let outcomes = [
@@ -183,8 +162,7 @@ struct BookSearchServiceTests {
 
         let merged = BookSearchService().merge(outcomes: outcomes, keyword: "长夜里的灯")
 
-        #expect(merged.count == 1)
-        #expect(merged[0].origins == ["one", "two"])
+        #expect(merged == [plain, decorated])
     }
 
     @Test func distinctProgrammingTitlesKeepTheirSignificantSymbolsWhenMerging() {
@@ -220,13 +198,12 @@ struct BookSearchServiceTests {
             SearchBook(bookURL: "https://source.test/\(index)", origin: "source", originName: "源", type: 0,
                        name: "C++教程", author: author)
         }
-        books.append(.init(bookURL: "https://other.test/decorated", origin: "other", originName: "另一源", type: 0,
+        books.append(.init(bookURL: "https://source.test/decorated", origin: "source", originName: "源", type: 0,
                            name: "《C++教程！》", author: "作者：甲+乙 著"))
         let merged = BookSearchService().merge(outcomes: [.init(sourceID: "source", books: books, diagnostics: [])], keyword: "教程")
 
         #expect(merged.count == authors.count)
-        #expect(merged.first(where: { $0.author == "甲+乙" })?.origins == ["source", "other"])
-        #expect(merged.filter { $0.author != "甲+乙" }.allSatisfy { $0.origins == ["source"] })
+        #expect(Set(merged.map(\.author)) == Set(authors))
     }
 
     @Test func searchesHTMLSourceWithCSSRules() async throws {

@@ -5,6 +5,85 @@ import LegadoCore
 
 @MainActor
 struct BookDetailRegressionTests {
+    @Test func originalPageOpensBeforeLoadingWithoutSourceRequestOptions() {
+        let source = BookSource(bookSourceUrl: "https://101kks.com", bookSourceName: "101 看书")
+        let cases: [(String, String?)] = [
+            ("/book/13925.html", "https://101kks.com/book/13925.html"),
+            (#"https://books.example/b?q=a,b#chapters, {"webView":true}"#, "https://books.example/b?q=a,b#chapters"),
+            ("file:///private/book.txt", nil), ("javascript:void(0)", nil), ("@js:book.name", nil), ("", nil)
+        ]
+        for (address, expected) in cases {
+            let search = SearchBook(bookURL: address, origin: source.id, originName: source.bookSourceName, type: 0, name: "测试")
+            let model = BookDetailViewModel(searchBook: search, source: source, chapterRepository: InMemoryBookChapterRepository())
+            #expect(model.state == .idle)
+            #expect(model.originalWebPageURL?.absoluteString == expected)
+        }
+    }
+
+    @Test func automaticDirectoryUsesCanonicalPageForBookAndDirectoryLinks() {
+        let source = BookSource(bookSourceUrl: "https://101kks.com/", bookSourceName: "101 看书")
+        let expected = "https://101kks.com/book/40391/index.html"
+        for address in ["/book/40391.html?ref=search", expected, expected + "?order=asc#list"] {
+            let search = SearchBook(bookURL: address, origin: source.id, originName: source.bookSourceName, type: 0, name: "测试")
+            let model = BookDetailViewModel(searchBook: search, source: source, chapterRepository: InMemoryBookChapterRepository())
+            #expect(model.browserDirectoryURL?.absoluteString == expected)
+        }
+    }
+
+    @Test func canUseVisibleDirectoryAfterForbiddenResponse() async throws {
+        var source = BookSource(bookSourceUrl: "https://101kks.com", bookSourceName: "101 看书")
+        source.ruleBookInfo = .init()
+        var toc = TocRule()
+        toc.chapterList = "//a"
+        toc.chapterName = "text"
+        toc.chapterUrl = "href"
+        source.ruleToc = toc
+        let search = SearchBook(bookURL: source.id + "/book/40391.html", origin: source.id, originName: source.bookSourceName,
+                                type: 0, name: "東京1991")
+        let model = BookDetailViewModel(searchBook: search, source: source, service: .init(transport: ForbiddenDirectoryTransport()),
+                                        chapterRepository: InMemoryBookChapterRepository())
+        await model.load()
+        #expect(model.state == .failed)
+        let directory = try #require(model.browserDirectoryURL)
+        #expect(directory.absoluteString == "https://101kks.com/book/40391/index.html")
+        let first = ["url": source.id + "/txt/40391/14135616.html", "title": "第1章"]
+        let second = ["url": source.id + "/txt/40391/21350831.html", "title": "第2章"]
+        let unrelated = ["url": source.id + "/txt/123/456.html", "title": "别的书"]
+        #expect(throws: (any Error).self) { try model.useBrowserDirectory([unrelated], at: directory) }
+        #expect(model.state == .failed)
+        try model.useBrowserDirectory([first, first, unrelated, second], at: directory)
+        #expect(model.state == .ready)
+        #expect(model.chapters.map(\.index) == [0, 1])
+        #expect(model.chapters.map(\.title) == ["第1章", "第2章"])
+        #expect(model.book.totalChapterNum == 2)
+        #expect(model.book.latestChapterTitle == "第2章")
+    }
+
+    @Test(.timeLimit(.minutes(1))) func stalledDetailCanBeReplacedByWebDirectory() async throws {
+        var source = BookSource(bookSourceUrl: "https://101kks.com", bookSourceName: "101 看书")
+        source.ruleBookInfo = .init()
+        let result = SearchBook(bookURL: source.id + "/book/40391.html", origin: source.id,
+                                originName: source.bookSourceName, type: 0, name: "東京1991")
+        let transport = SuspendedDetailTransport()
+        let model = BookDetailViewModel(searchBook: result, source: source, service: .init(transport: transport),
+                                        chapterRepository: InMemoryBookChapterRepository())
+        let load = Task { await model.load() }
+        await transport.waitUntilRequested()
+        #expect(model.state == .loading)
+        let url = try #require(model.browserDirectoryURL)
+        let rows = [["url": source.id + "/txt/40391/14135616.html", "title": "第1章"]]
+        do { try model.useBrowserDirectory(rows, at: url) }
+        catch {
+            await transport.finish()
+            await load.value
+            throw error
+        }
+        await transport.finish()
+        await load.value
+        #expect(model.state == .ready)
+        #expect(model.chapters.map(\.title) == ["第1章"])
+    }
+
     @Test func shelvedSearchResultUsesStoredDirectoryUntilExplicitRefresh() async throws {
         var source = BookSource(bookSourceUrl: "https://detail-regression.test", bookSourceName: "源")
         var info = BookInfoRule()
@@ -75,7 +154,7 @@ struct BookDetailRegressionTests {
         let replacementSource = BookSource(bookSourceUrl: "https://new-detail.test", bookSourceName: "新源")
         let replacement = Book(bookUrl: replacementSource.id + "/book", name: "新书名", origin: replacementSource.id)
         let chapters = [BookChapter(url: "new/1", title: "新章", bookUrl: replacement.bookUrl, index: 0)]
-        model.applySourceSwitch(.init(book: replacement, chapters: chapters, exactChapterMatch: true), source: replacementSource)
+        await model.applySourceSwitch(.init(book: replacement, chapters: chapters, exactChapterMatch: true), source: replacementSource)
         await transport.finish()
         await load.value
         #expect(model.book == replacement)
@@ -194,7 +273,7 @@ struct BookDetailRegressionTests {
         var replacement = Book(bookUrl: newSource.id + "/book", name: "书", origin: newSource.id)
         replacement.tocUrl = newSource.id + "/toc"
         let chapters = [BookChapter(url: newSource.id + "/1", title: "第一章", bookUrl: replacement.bookUrl, index: 0)]
-        model.applySourceSwitch(.init(book: replacement, chapters: chapters, exactChapterMatch: true), source: newSource)
+        await model.applySourceSwitch(.init(book: replacement, chapters: chapters, exactChapterMatch: true), source: newSource)
         await model.refresh()
         #expect(model.state == .ready)
         #expect(model.book.bookUrl == replacement.bookUrl)
@@ -347,5 +426,11 @@ private actor CountingDetailTransport: HTTPTransport {
     func data(for request: URLRequest) async throws -> HTTPResponse {
         requestedPaths.append(request.url?.path ?? "")
         return try await DetailTransport().data(for: request)
+    }
+}
+
+private struct ForbiddenDirectoryTransport: HTTPTransport {
+    func data(for request: URLRequest) async throws -> HTTPResponse {
+        .init(data: Data(), statusCode: 403, headers: [:], finalURL: try #require(request.url))
     }
 }

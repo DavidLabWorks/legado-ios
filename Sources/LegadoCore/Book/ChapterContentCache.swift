@@ -74,7 +74,12 @@ public actor ChapterContentCache {
         return (entry, stamp(for: fileURL(bookURL: bookURL, chapterURL: chapterURL)))
     }
 
-    fileprivate func storeAndStamp(_ entry: CachedChapterContent) throws -> ChapterContentStamp? {
+    private var bookGenerations: [String: UInt64] = [:]
+
+    fileprivate func generation(for bookURL: String) -> UInt64 { bookGenerations[bookURL, default: 0] }
+
+    fileprivate func storeAndStamp(_ entry: CachedChapterContent, generation: UInt64?) throws -> ChapterContentStamp? {
+        guard !Task.isCancelled, generation == nil || generation == self.generation(for: entry.bookURL) else { return nil }
         try save(entry)
         let file = fileURL(bookURL: entry.bookURL, chapterURL: entry.chapterURL)
         return FileManager.default.fileExists(atPath: file.path) ? stamp(for: file) : nil
@@ -255,6 +260,7 @@ public actor ChapterContentCache {
     }
 
     public func remove(bookURL: String) throws {
+        bookGenerations[bookURL, default: 0] &+= 1
         try prepareStorage()
         guard FileManager.default.fileExists(atPath: directory.path) else { return }
         let prefix = digest(bookURL) + "-"
@@ -446,6 +452,7 @@ public actor ChapterContentCoordinator {
         maxPages: Int = 20,
         forceRefresh: Bool = false
     ) async -> CoordinatedChapterContent {
+        let generation = await cache.generation(for: book.bookUrl)
         if !forceRefresh, let cached = await cachedContent(book: book, chapter: chapter, source: source) {
             return cached
         }
@@ -457,12 +464,17 @@ public actor ChapterContentCoordinator {
             nextChapterURL: nextChapterURL,
             maxPages: maxPages
         )
-        let stamp = await saveContent(report, book: book, chapter: chapter, source: source)
+        let stamp = await storeContent(report, book: book, chapter: chapter, source: source, generation: generation)
         return .init(report: report, loadedFromCache: false, stamp: stamp)
     }
 
     @discardableResult
     public func saveContent(_ report: ChapterContentReport, book: Book, chapter: BookChapter, source: BookSource) async -> ChapterContentStamp? {
+        await storeContent(report, book: book, chapter: chapter, source: source, generation: nil)
+    }
+
+    private func storeContent(_ report: ChapterContentReport, book: Book, chapter: BookChapter, source: BookSource,
+                              generation: UInt64?) async -> ChapterContentStamp? {
         if !Task.isCancelled, !report.diagnostics.contains(where: { $0.severity == .error }),
            !report.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             return try? await cache.storeAndStamp(.init(
@@ -472,7 +484,7 @@ public actor ChapterContentCoordinator {
                 content: report.content,
                 supplementalContent: report.supplementalContent,
                 sourceID: source.id
-            ))
+            ), generation: generation)
         }
         return nil
     }

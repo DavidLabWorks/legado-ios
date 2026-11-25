@@ -1,9 +1,17 @@
 import Foundation
 
+public struct ManualSearchVerification: Sendable {
+    public let url: URL
+    public let listRule: String
+    public let variables: [String: String]
+}
+
 public struct SourceSearchOutcome: Sendable {
     public var sourceID: String
     public var books: [SearchBook]
     public var diagnostics: [RuleDiagnostic]
+    public var forbiddenGETURL: URL?
+    public var manualVerification: ManualSearchVerification?
 
     public init(sourceID: String, books: [SearchBook], diagnostics: [RuleDiagnostic]) {
         self.sourceID = sourceID
@@ -95,9 +103,7 @@ public struct BookSearchAccumulator: Sendable {
         for book in incoming {
             let identity = BookSearchService.mergeIdentity(for: book)
             if let index = indices[identity] {
-                let origins = books[index].origins.union(book.origins)
                 if replacingExisting { books[index] = book }
-                books[index].origins = origins
             } else {
                 indices[identity] = books.count
                 books.append(book)
@@ -114,16 +120,6 @@ public struct BookSearchAccumulator: Sendable {
             else if book.name.contains(keyword) || book.author.contains(keyword) { rank = 2 }
             else { rank = 3 }
             buckets[rank].append(book)
-        }
-        // Android ranks matching books by the number of available sources,
-        // retaining arrival order for ties and for unrelated results.
-        for index in 0..<3 {
-            buckets[index] = buckets[index].enumerated().sorted {
-                if $0.element.origins.count != $1.element.origins.count {
-                    return $0.element.origins.count > $1.element.origins.count
-                }
-                return $0.offset < $1.offset
-            }.map(\.element)
         }
         return buckets.flatMap { $0 }
     }
@@ -251,13 +247,19 @@ public struct BookSearchService: Sendable {
         guard let template = source.searchUrl else {
             return failure(source, code: "search.configuration", message: "书源缺少搜索地址或规则")
         }
-        let rules = source.ruleSearch ?? .init()
+        var getURL: URL?
         do {
-            var prepared = try await RuleExecutionWorker.run {
-                let headers = try BookSourceHeaderResolver().resolve(source)
-                return try urlBuilder.prepare(template, context: .init(key: keyword, page: page, source: source),
-                                              baseURL: URL(string: source.bookSourceUrl), defaultHeaders: headers)
-            }
+            let token = RuleExecutionCancellation()
+            var prepared = try await withTaskCancellationHandler {
+                try await RuleExecutionWorker.run {
+                    let headers = try BookSourceHeaderResolver().resolve(source)
+                    var context = URLTemplateContext(key: keyword, page: page, source: source)
+                    context.cancellation = token
+                    return try urlBuilder.prepare(template, context: context, baseURL: URL(string: source.bookSourceUrl),
+                                                  defaultHeaders: headers)
+                }
+            } onCancel: { token.cancel() }
+            if prepared.method == .get { getURL = prepared.url }
             if timeoutLimit < 30 { prepared.retry = min(prepared.retry, 1) }
             // respondTime is the last measured source-check duration used for
             // sorting. A previously fast response is not a request deadline.
@@ -271,87 +273,12 @@ public struct BookSearchService: Sendable {
                 snapshotRecorder: snapshotRecorder,
                 snapshotStage: .search
             )
-            let detailService = NetworkBookService(engine: engine)
             let detailURL = response.finalURL == prepared.url ? prepared.resolvedRuleURL : response.finalURL.absoluteString
-            func detailOutcome(variables: [String: String]) async -> SourceSearchOutcome {
-                await detailService.analyzeSearchDetail(
-                    response: response, bookURL: detailURL, source: source,
-                    context: .init(variables: variables, key: keyword, page: page)
-                )
-            }
-            if let pattern = source.bookUrlPattern, !pattern.isEmpty {
-                let matches = try await RuleExecutionWorker.run {
-                    try RegexEvaluator().captureGroups(pattern: "\\A(?:" + pattern + ")\\z", input: response.finalURL.absoluteString)
-                }
-                if !matches.isEmpty { return await detailOutcome(variables: response.requestVariables) }
-            }
-            let listRule = rules.bookList ?? ""
-            let root = response.decodedJSON
-            let body = response.decodedText
-            let listEvaluation = if listRule.isEmpty {
-                RuleEvaluation(variables: response.requestVariables)
-            } else if let root {
-                await engine.evaluate(
-                    listRule.trimmingListPrefix,
-                    in: root,
-                    listMode: true,
-                    context: .init(variables: response.requestVariables, baseURL: response.finalURL.absoluteString, key: keyword, page: page, source: source)
-                )
-            } else {
-                await engine.evaluate(
-                    listRule.trimmingListPrefix,
-                    inText: body,
-                    baseURL: response.finalURL.absoluteString,
-                    listMode: true,
-                    context: .init(variables: response.requestVariables, key: keyword, page: page, source: source)
-                )
-            }
-            var diagnostics = listEvaluation.diagnostics
-            let items = listEvaluation.listItems(rule: listRule.trimmingListPrefix)
-            if items.isEmpty, source.bookUrlPattern?.isEmpty != false,
-               !diagnostics.contains(where: { $0.severity == .error }) {
-                var outcome = await detailOutcome(variables: listEvaluation.variables)
-                outcome.diagnostics = diagnostics + outcome.diagnostics
-                return outcome
-            }
-            var books: [SearchBook] = []
-            for item in items {
-                try Task.checkCancellation()
-                let fields = await evaluateFields(
-                    rules,
-                    item: item,
-                    isHTML: root == nil,
-                    baseURL: response.finalURL.absoluteString,
-                    source: source,
-                    variables: listEvaluation.variables,
-                    keyword: keyword,
-                    page: page
-                )
-                diagnostics += fields.diagnostics
-                guard let name = fields.name?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty else { continue }
-                let bookURLValue = fields.bookURL?.nilIfEmpty ?? response.finalURL.absoluteString
-                let bookURL = resolve(bookURLValue, against: response.finalURL)
-                var book = SearchBook(
-                    bookURL: bookURL,
-                    origin: source.bookSourceUrl,
-                    originName: source.bookSourceName,
-                    type: source.bookSourceType,
-                    name: name,
-                    author: fields.author ?? ""
-                )
-                book.kind = fields.kind
-                book.coverURL = fields.coverURL.map { resolve($0, against: response.finalURL) }
-                book.intro = MetadataTextSanitizer().clean(fields.intro)
-                book.wordCount = fields.wordCount
-                book.latestChapterTitle = fields.lastChapter
-                book.originOrder = source.customOrder
-                book.variables = fields.variables
-                books.append(book)
-            }
-            if listRule.hasPrefix("-") { books.reverse() }
-            var seenURLs = Set<String>()
-            let unique = books.filter { seenURLs.insert($0.bookURL).inserted }
-            return .init(sourceID: source.id, books: unique, diagnostics: diagnostics)
+            return try await analyzeSearchPage(response, detailURL: detailURL, keyword: keyword, page: page, source: source)
+        } catch HTTPClientError.statusResponse(let response) where response.statusCode == 403 {
+            var outcome = failure(source, code: "search.request", message: HTTPClientError.statusCode(403).localizedDescription)
+            if response.finalURL == getURL { outcome.forbiddenGETURL = getURL }
+            return outcome
         } catch is CancellationError {
             return failure(source, code: "search.cancelled", message: "搜索已取消")
         } catch let error as RuleEngineError {
@@ -359,6 +286,114 @@ public struct BookSearchService: Sendable {
         } catch {
             return failure(source, code: "search.request", message: error.localizedDescription)
         }
+    }
+
+    public func analyzeSearchPage(_ response: HTTPResponse, detailURL: String, keyword: String,
+                                  page: Int, source: BookSource, verifiedListRule: String? = nil) async throws -> SourceSearchOutcome {
+        guard (200..<300).contains(response.statusCode) else { throw HTTPClientError.statusResponse(response) }
+        let rules = source.ruleSearch ?? .init()
+        let detailService = NetworkBookService(engine: engine)
+        func detailOutcome(variables: [String: String]) async -> SourceSearchOutcome {
+            await detailService.analyzeSearchDetail(
+                response: response, bookURL: detailURL, source: source,
+                context: .init(variables: variables, key: keyword, page: page)
+            )
+        }
+        if verifiedListRule == nil, let pattern = source.bookUrlPattern, !pattern.isEmpty {
+            let matches = try await RuleExecutionWorker.run {
+                try RegexEvaluator().captureGroups(pattern: "\\A(?:" + pattern + ")\\z", input: response.finalURL.absoluteString)
+            }
+            if !matches.isEmpty { return await detailOutcome(variables: response.requestVariables) }
+        }
+        let listRule = verifiedListRule ?? rules.bookList ?? ""
+        let root = response.decodedJSON
+        let body = response.decodedText
+        let listCancellation = RuleExecutionCancellation()
+        var listContext = RuleExecutionContext(variables: response.requestVariables, baseURL: response.finalURL.absoluteString,
+                                               key: keyword, page: page, source: source)
+        listContext.cancellation = listCancellation
+        let listEvaluation = if listRule.isEmpty {
+            RuleEvaluation(variables: response.requestVariables)
+        } else if let root {
+            await engine.evaluate(
+                listRule.trimmingListPrefix,
+                in: root,
+                listMode: true,
+                context: listContext
+            )
+        } else {
+            await engine.evaluate(
+                listRule.trimmingListPrefix,
+                inText: body,
+                baseURL: response.finalURL.absoluteString,
+                listMode: true,
+                context: listContext
+            )
+        }
+        try listCancellation.check()
+        var diagnostics = listEvaluation.diagnostics
+        let items = listEvaluation.listItems(rule: listRule.trimmingListPrefix)
+        if items.isEmpty, verifiedListRule == nil,
+           diagnostics.contains(where: { $0.code == "rule.unsupported" && $0.rule == "source.bookSourceComment" }),
+           let remainingRule = engine.listRuleAfterManualVerification(listRule),
+           let origin = URL(string: source.id) {
+            // Use the results URL reached by this request. Some sources save the
+            // GET redirect in their rule variables before making the final POST.
+            let final = response.finalURL
+            let redirect = listEvaluation.variables["url"].flatMap(URL.init(string:))
+            let target = final.query == nil && redirect?.path == final.path ? redirect ?? final : final
+            if target.scheme == "https", origin.scheme == target.scheme,
+               origin.host?.lowercased() == target.host?.lowercased(), target.host != nil,
+               (origin.port ?? 443) == (target.port ?? 443), target.user == nil, target.password == nil {
+                var outcome = SourceSearchOutcome(sourceID: source.id, books: [], diagnostics: diagnostics)
+                outcome.manualVerification = .init(url: target, listRule: remainingRule, variables: listEvaluation.variables)
+                return outcome
+            }
+        }
+        if items.isEmpty, verifiedListRule == nil, source.bookUrlPattern?.isEmpty != false,
+           !diagnostics.contains(where: { $0.severity == .error }) {
+            var outcome = await detailOutcome(variables: listEvaluation.variables)
+            outcome.diagnostics = diagnostics + outcome.diagnostics
+            return outcome
+        }
+        var books: [SearchBook] = []
+        for item in items {
+            try Task.checkCancellation()
+            let fields = await evaluateFields(
+                rules,
+                item: item,
+                isHTML: root == nil,
+                baseURL: response.finalURL.absoluteString,
+                source: source,
+                variables: listEvaluation.variables,
+                keyword: keyword,
+                page: page
+            )
+            diagnostics += fields.diagnostics
+            guard let name = fields.name?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty else { continue }
+            let bookURLValue = fields.bookURL?.nilIfEmpty ?? response.finalURL.absoluteString
+            let bookURL = resolve(bookURLValue, against: response.finalURL)
+            var book = SearchBook(
+                bookURL: bookURL,
+                origin: source.bookSourceUrl,
+                originName: source.bookSourceName,
+                type: source.bookSourceType,
+                name: name,
+                author: fields.author ?? ""
+            )
+            book.kind = fields.kind
+            book.coverURL = fields.coverURL.map { resolve($0, against: response.finalURL) }
+            book.intro = MetadataTextSanitizer().clean(fields.intro)
+            book.wordCount = fields.wordCount
+            book.latestChapterTitle = fields.lastChapter
+            book.originOrder = source.customOrder
+            book.variables = fields.variables
+            books.append(book)
+        }
+        if listRule.hasPrefix("-") { books.reverse() }
+        var seenURLs = Set<String>()
+        let unique = books.filter { seenURLs.insert($0.bookURL).inserted }
+        return .init(sourceID: source.id, books: unique, diagnostics: diagnostics)
     }
 
     private func evaluateFields(
@@ -456,7 +491,7 @@ public struct BookSearchService: Sendable {
     }
 
     public static func mergeIdentity(for book: SearchBook) -> String {
-        "\(normalizedIdentityText(book.name))\u{0}\(normalizedAuthor(book.author))"
+        "\(book.origin)\u{0}\(normalizedIdentityText(book.name))\u{0}\(normalizedAuthor(book.author))"
     }
 
     private static func normalizedIdentityText(_ value: String) -> String {

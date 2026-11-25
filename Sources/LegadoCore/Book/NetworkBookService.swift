@@ -377,7 +377,7 @@ public struct NetworkBookService: Sendable {
             if Task.isCancelled {
                 return .init(book: book, diagnostics: [diagnostic(code: "toc.cancelled", message: "目录更新准备已取消", rule: book.bookUrl)])
             }
-            return .init(book: book, diagnostics: [diagnostic(code: "toc.pre_update", message: error.localizedDescription,
+            return .init(book: book, diagnostics: [diagnostic(code: "toc.pre_update", message: requestErrorMessage(error),
                                                             rule: source.ruleToc?.preUpdateJs ?? book.bookUrl)])
         }
     }
@@ -453,6 +453,7 @@ public struct NetworkBookService: Sendable {
                 let list = await evaluate(listRule, in: document, listMode: true, context: pageContext)
                 diagnostics += list.diagnostics
                 pageContext.variables = list.variables
+                let previousChapterCount = chapters.count
                 for item in list.listItems(rule: listRule) {
                     try Task.checkCancellation()
                     let fragment = PageDocument(value: item, baseURL: document.baseURL, isFragment: true)
@@ -498,11 +499,21 @@ public struct NetworkBookService: Sendable {
                     let absolute = resolve(value, against: response.finalURL)
                     if !requested.contains(absolute), !queue.contains(absolute) { queue.append(absolute) }
                 }
+                if let host = response.finalURL.host {
+                    DiagnosticLog.shared.record(category: "目录", message:
+                        "《\(book.name)》\(host) 第 \(visited.count) 页解析到 \(chapters.count - previousChapterCount) 条，待加载 \(queue.count) 页")
+                }
             } catch is CancellationError {
                 diagnostics.append(diagnostic(code: "toc.cancelled", message: "目录加载已取消", rule: pageURL))
                 break
             } catch {
-                diagnostics.append(diagnostic(error, stage: "toc", rule: pageURL))
+                if case HTTPClientError.statusResponse(let response) = error,
+                   response.statusCode == 403,
+                   response.headers.contains(where: { $0.key.lowercased() == "cf-mitigated" && $0.value.lowercased() == "challenge" }) {
+                    diagnostics.append(diagnostic(code: "toc.verification", message: "网站要求网页验证。", rule: pageURL))
+                } else {
+                    diagnostics.append(diagnostic(error, stage: "toc", rule: pageURL))
+                }
             }
         }
 
@@ -541,6 +552,13 @@ public struct NetworkBookService: Sendable {
         nextChapterURL: String? = nil,
         maxPages: Int = 20
     ) async -> ChapterContentReport {
+        await loadContent(book: book, chapter: chapter, source: source, nextChapterURL: nextChapterURL,
+                          maxPages: maxPages, readBrowserPage: nil)
+    }
+
+    /// A reader can supply rendered pages from a user-visible chapter browser, including pagination.
+    public func loadContent(book: Book, chapter: BookChapter, source: BookSource, nextChapterURL: String?,
+                            maxPages: Int = 20, readBrowserPage: (@Sendable (URL) async throws -> String)?) async -> ChapterContentReport {
         if chapter.isVolume, chapter.url.hasPrefix(chapter.title) {
             return .init(content: chapter.tag ?? "")
         }
@@ -570,19 +588,20 @@ public struct NetworkBookService: Sendable {
             queue.removeFirst()
             guard pageURL != stopURL, requested.insert(pageURL).inserted else { continue }
             do {
-                let response = try await request(
-                    pageURL,
-                    source: source,
-                    stage: .content,
-                    baseURL: URL(string: chapter.baseUrl),
-                    context: .init(
-                        variables: contentVariables,
-                        source: source,
-                        book: book,
-                        chapter: chapter
-                    ),
-                    contentRules: rules
-                )
+                let prepared = try prepareRequest(pageURL, source: source, baseURL: URL(string: chapter.baseUrl),
+                    context: .init(variables: contentVariables, source: source, book: book, chapter: chapter), contentRules: rules)
+                let response: HTTPResponse
+                if let readBrowserPage {
+                    let url = prepared.url
+                    guard prepared.method == .get, let origin = URL(string: source.id), url.scheme == "https",
+                          origin.scheme == url.scheme, url.host == origin.host, (url.port ?? 443) == (origin.port ?? 443),
+                          url.user == nil, url.password == nil else { throw URLError(.unsupportedURL) }
+                    let html = try await readBrowserPage(url)
+                    response = .init(data: Data(html.utf8), statusCode: 200, headers: [:], finalURL: url,
+                                     requestedCharset: "utf-8", requestVariables: prepared.variables)
+                } else {
+                    response = try await execute(prepared, source: source, stage: .content)
+                }
                 let canonicalURL = response.finalURL.absoluteString
                 guard canonicalURL != stopURL,
                       visited.insert(pageIdentity(pageURL, finalURL: canonicalURL)).inserted else { continue }
@@ -605,6 +624,10 @@ public struct NetworkBookService: Sendable {
                 if source.bookSourceType == 0 || source.bookSourceType == 2 {
                     pageContent = ChapterHTMLFormatter().format(pageContent, baseURL: response.finalURL)
                 }
+                if readBrowserPage != nil, pageContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    diagnostics.append(diagnostic(code: "content.empty", message: "当前网页尚未显示能用书源规则识别的正文。", rule: contentRule))
+                }
+                if readBrowserPage != nil, diagnostics.contains(where: { $0.severity == .error }) { break }
                 if !pageContent.isEmpty { contents.append(pageContent) }
                 let next = await evaluate(rules.nextContentUrl, in: document, context: execution)
                 diagnostics += next.diagnostics
@@ -851,6 +874,12 @@ public struct NetworkBookService: Sendable {
         context: URLTemplateContext? = nil,
         contentRules: ContentRule? = nil
     ) async throws -> HTTPResponse {
+        let prepared = try prepareRequest(value, source: source, baseURL: baseURL, context: context, contentRules: contentRules)
+        return try await execute(prepared, source: source, stage: stage)
+    }
+
+    private func prepareRequest(_ value: String, source: BookSource, baseURL: URL?, context: URLTemplateContext?,
+                                contentRules: ContentRule?) throws -> PreparedRequest {
         var prepared = try urlBuilder.prepare(
             value,
             context: context ?? .init(source: source),
@@ -861,7 +890,7 @@ public struct NetworkBookService: Sendable {
             if prepared.webJavaScript == nil { prepared.webJavaScript = contentRules?.webJs }
             prepared.sourceRegex = nonempty(contentRules?.sourceRegex)
         }
-        return try await execute(prepared, source: source, stage: stage)
+        return prepared
     }
 
     private func execute(_ prepared: PreparedRequest, source: BookSource, stage: DifferentialStage) async throws -> HTTPResponse {
@@ -934,7 +963,12 @@ public struct NetworkBookService: Sendable {
 
     private func diagnostic(_ error: Error, stage: String, rule: String) -> RuleDiagnostic {
         if let error = error as? RuleEngineError { return error.diagnostic }
-        return diagnostic(code: "\(stage).request", message: error.localizedDescription, rule: rule)
+        return diagnostic(code: "\(stage).request", message: requestErrorMessage(error), rule: rule)
+    }
+
+    private func requestErrorMessage(_ error: Error) -> String {
+        if (error as? URLError)?.code == .timedOut { return "书源请求超时，请稍后重试。" }
+        return error.localizedDescription
     }
 
     private func diagnostic(code: String, message: String, rule: String) -> RuleDiagnostic {

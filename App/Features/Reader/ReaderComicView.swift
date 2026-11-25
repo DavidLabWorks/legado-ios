@@ -4,6 +4,7 @@ import ImageIO
 
 /// Reusable rows keep long image chapters from retaining every decoded page.
 struct ReaderComicView: UIViewRepresentable {
+    var simplifiedChinese = false
     let blocks: [ChapterContentBlock]
     let source: BookSource
     let book: Book
@@ -40,6 +41,7 @@ struct ReaderComicView: UIViewRepresentable {
         let coordinator = context.coordinator
         let changed = coordinator.owner.chapter != chapter || coordinator.owner.blocks != blocks
         let styleChanged = coordinator.owner.fontSize != fontSize || coordinator.owner.foreground != foreground
+            || coordinator.owner.simplifiedChinese != simplifiedChinese
         coordinator.owner = self
         table.backgroundColor = background
         if changed || !coordinator.configured {
@@ -93,7 +95,7 @@ struct ReaderComicView: UIViewRepresentable {
             case .image:
                 return max(100, tableView.bounds.width * (ratios[indexPath.row] ?? 1.4))
             case .text(let text):
-                let rect = (text as NSString).boundingRect(with: CGSize(width: max(1, tableView.bounds.width - 32), height: .greatestFiniteMagnitude),
+                let rect = (text.readerText(simplified: owner.simplifiedChinese) as NSString).boundingRect(with: CGSize(width: max(1, tableView.bounds.width - 32), height: .greatestFiniteMagnitude),
                     options: [.usesLineFragmentOrigin, .usesFontLeading],
                     attributes: [.font: UIFont.systemFont(ofSize: owner.fontSize)], context: nil)
                 return ceil(rect.height) + 24
@@ -107,7 +109,7 @@ struct ReaderComicView: UIViewRepresentable {
             cell.caption.textColor = owner.foreground
             cell.caption.font = .systemFont(ofSize: owner.fontSize)
             switch owner.blocks[indexPath.row].content {
-            case .text(let text): cell.caption.text = text
+            case .text(let text): cell.caption.text = text.readerText(simplified: owner.simplifiedChinese)
             case .image(let address):
                 let page = owner.blocks.prefix(indexPath.row + 1).filter { if case .image = $0.content { return true }; return false }.count
                 cell.picture.accessibilityLabel = "漫画第\(page)张"

@@ -10,6 +10,15 @@ struct LegadoURLBuilderTests {
     }
     private let builder = LegadoURLBuilder()
 
+    @Test func separatesDirectoryAnchorFromHTTPPathAndQuery() throws {
+        let base = URL(string: "https://reader.example/2132/")
+        let page = try builder.prepare("p-2.html#dir", baseURL: base)
+        #expect(page.url.path == "/2132/p-2.html")
+        #expect(page.url.fragment == "dir")
+        let query = try builder.prepare(#"x%23y?q=旧城%23a#目录,{"charset":"gb18030"}"#, baseURL: base)
+        #expect(query.url.absoluteString == "https://reader.example/2132/x%23y?q=%BE%C9%B3%C7%23a#%E7%9B%AE%E5%BD%95")
+    }
+
     @Test func relativeRequestOptionsAndHeaderCasingSurviveResolution() throws {
         let base = try #require(URL(string: "https://example.test/book/1"))
         let resolved = LegadoURLBuilder.resolve(#"../chapter,{"method":"POST","headers":{"referer":"custom"},"body":"id=1"}"#, against: base)

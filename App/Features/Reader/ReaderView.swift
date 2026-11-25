@@ -19,7 +19,7 @@ struct ReaderView: View {
     @State private var sourceSwitchBook: Book?
     @StateObject private var speech = ReaderSpeechController()
     private enum ReaderSheet: String, Identifiable {
-        case bookmarks, autoRead, appearance, search, settings, clickActions, editor
+        case bookmarks, autoRead, appearance, search, settings, clickActions, editor, bookInfo
         var id: Self { self }
     }
 
@@ -27,6 +27,7 @@ struct ReaderView: View {
     @State private var showsTableOfContents = false
     @State private var readerSessionActive = false
     @State private var chapterCommentsTarget: ReaderChapterCommentsTarget?
+    @State private var browserChapter: BookChapter?
     @State private var illustrationChapter: BookChapter?
     @State private var isAutoReading = false
     @State private var showsReaderMenu = false
@@ -53,6 +54,7 @@ struct ReaderView: View {
     @State private var isWaitingForNextChapter = false
     @State private var isWaitingForPreviousChapter = false
     @State private var httpTTSEngines: [HttpTTS] = []
+    @State private var azureEngine: HttpTTS?
     @State private var resumesSpeechAfterChapterLoad = false
     @State private var speechTimerTask: Task<Void, Never>?
     @State private var progressSaveTask: Task<Void, Never>?
@@ -110,6 +112,7 @@ struct ReaderView: View {
     @AppStorage("pauseReadAloudWhilePhoneCalls") private var pauseReadAloudWhilePhoneCalls = false
     @AppStorage("mediaButtonPerNext") private var mediaButtonPerNext = false
     @AppStorage("ttsTimer") private var ttsTimer = 0
+    @AppStorage("readerSimplifiedChinese") private var simplifiedChinese = false
     @AppStorage("readerFullJustify") private var fullJustify = true
     @AppStorage("readerKeepScreenOn") private var keepScreenOn = false
     @AppStorage("readerHideHomeIndicator") private var hideHomeIndicator = false
@@ -232,10 +235,6 @@ struct ReaderView: View {
         .preferredColorScheme(resolvedStyle.id == "night" ? .dark : .light)
         .readingTabBarHidden()
         .navigationBarBackButtonHidden(true)
-        .background {
-            ReaderInteractivePopEnabler()
-                .frame(width: 0, height: 0)
-        }
         .statusBarHidden(hideStatusBar)
         .readingHomeIndicatorHidden(hideHomeIndicator)
         .overlay(alignment: .top) {
@@ -305,6 +304,7 @@ struct ReaderView: View {
                     .transition(.move(edge: .bottom).combined(with: .opacity))
             }
         }
+        .modifier(ReaderMenuBackGesture(menuVisible: showsReaderMenu) { dismiss() })
         .sheet(item: $activeSheet) { sheet in
             switch sheet {
             case .bookmarks: bookmarksSheet
@@ -314,12 +314,24 @@ struct ReaderView: View {
             case .settings: readerSettings
             case .clickActions: clickActionSettings
             case .editor: contentEditor
+            case .bookInfo:
+                ReaderBookInfoSheet(book: model.bookAtReadingPosition(readerPosition),
+                                    source: model.source ?? sourceLibrary.sources.first { $0.id == book.origin },
+                                    chapters: model.chapters)
+                    .environment(\.resumeBookReading, resumeFromBookInfo)
             }
         }
         .fullScreenCover(isPresented: $showsTableOfContents) { tableOfContents }
         .sheet(item: $chapterCommentsTarget) { target in
             ReaderChapterCommentsView(target: target)
                 .id(target.id)
+        }
+        .sheet(item: $browserChapter) { chapter in
+            if let source = model.source {
+                BrowserChapterView(book: book, chapter: chapter, source: source, nextChapterURL: model.nextChapter?.url) { report in
+                    try await model.acceptBrowserChapter(report, chapter: chapter, source: source)
+                }
+            }
         }
         .sheet(item: $illustrationChapter) { chapter in
             EPUBIllustrationsView(book: book, chapter: chapter)
@@ -332,7 +344,7 @@ struct ReaderView: View {
                         guard await library.commitSourceSwitch(oldBookURL: book.bookUrl, report: report) else { return false }
                     }
                     await activity.endReading(book)
-                    model.applySourceSwitch(report, source: source)
+                    await model.applySourceSwitch(report, source: source)
                     readerPosition = report.book.durChapterPos
                     readerJumpPosition = nil
                     readerPageRanges = []
@@ -358,7 +370,7 @@ struct ReaderView: View {
             guard !Task.isCancelled else { return }
             readerJumpPosition = nil
             readerPageRanges = []
-            if needsInitialPosition { readerPosition = model.requestedPosition }
+            if needsInitialPosition, model.requestedPosition != .max { readerPosition = model.requestedPosition }
             await model.load(rules: model.usesReplaceRules ? replaceRules.rules : [])
             guard !Task.isCancelled else { return }
             if needsInitialPosition {
@@ -386,6 +398,9 @@ struct ReaderView: View {
             await model.prepareContinuousReading(rules: model.usesReplaceRules ? replaceRules.rules : [])
         }
         .task { await loadHTTPEngines() }
+        .onReceive(NotificationCenter.default.publisher(for: AzureSpeechSettings.didChange)) { _ in
+            azureEngine = try? AzureSpeechSettings.load()?.engine()
+        }
         .task {
             let storedImage = await Task.detached(priority: .utility) { ReaderBackgroundStore.load() }.value
             if !Task.isCancelled, backgroundImage == nil { backgroundImage = storedImage }
@@ -520,7 +535,7 @@ struct ReaderView: View {
             .frame(maxWidth: .infinity)
             .overlay {
                 if waitingForChapter, model.isWaitingForSource || model.onlineSourceID == nil {
-                    ReaderChapterLoadingOverlay(title: model.title, foreground: foregroundColor, background: backgroundColor)
+                    ReaderChapterLoadingOverlay(title: model.title.readerText(simplified: simplifiedChinese))
                         .id(model.chapterLoadGeneration)
                         .onTapGesture { showsReaderMenu.toggle() }
                 }
@@ -543,7 +558,7 @@ struct ReaderView: View {
         }
     }
 
-    private var readerRecoveryActions: some View {
+    @ViewBuilder private var readerRecoveryActions: some View {
         HStack(spacing: 16) {
             Button {
                 Task {
@@ -566,6 +581,34 @@ struct ReaderView: View {
             }
         }
         .readingSecondaryButtonStyle()
+        if model.source?.ruleContent?.content?.contains("source.bookSourceComment") == true, let chapter = model.currentChapter {
+            Button("在原站打开本章") { browserChapter = chapter }
+        }
+    }
+
+    private func resumeFromBookInfo(_ selectedBook: Book, _ chapters: [BookChapter], _ source: BookSource?, _ index: Int?) {
+        activeSheet = nil
+        if book.bookUrl != selectedBook.bookUrl || book.origin != selectedBook.origin || model.chapters != chapters {
+            let previous = book
+            var updated = selectedBook
+            if let index {
+                updated.durChapterIndex = index
+                updated.durChapterPos = 0
+            }
+            stopSpeechForContentChange()
+            model.replaceReadingDirectory(book: updated, chapters: chapters, source: source)
+            readerPosition = model.requestedPosition
+            readerJumpPosition = nil
+            readerRenderRevision &+= 1
+            if previous.bookUrl != updated.bookUrl || previous.origin != updated.origin {
+                Task {
+                    await activity.endReading(previous)
+                    activity.beginReading(updated)
+                }
+            }
+        } else if let index, index != model.currentIndex {
+            navigate(to: index)
+        }
     }
 
     private func openSourceSwitch() {
@@ -573,7 +616,7 @@ struct ReaderView: View {
         isAutoReading = false
         saveProgress(immediate: true)
         showsReaderMenu = false
-        sourceSwitchBook = model.bookForSourceSwitch(position: readerPosition)
+        sourceSwitchBook = model.bookAtReadingPosition(readerPosition)
     }
 
     private func openChapterComments(at index: Int) {
@@ -612,7 +655,7 @@ struct ReaderView: View {
     @ViewBuilder private var readerSurface: some View {
         if model.hasImageContent, let chapter = model.currentChapter {
             VStack(spacing: 0) {
-                ReaderComicView(blocks: model.imageBlocks, source: model.imageSource, book: model.book, chapter: chapter,
+                ReaderComicView(simplifiedChinese: simplifiedChinese, blocks: model.imageBlocks, source: model.imageSource, book: model.book, chapter: chapter,
                     background: activeBackgroundImage == nil ? resolvedStyle.background : .clear,
                     foreground: resolvedStyle.foreground, fontSize: CGFloat(fontSize),
                     requestedPosition: model.requestedPosition, jumpPosition: readerJumpPosition,
@@ -664,6 +707,8 @@ struct ReaderView: View {
 
     private var readerTextConfiguration: ReaderTextView {
         ReaderTextView(
+            simplifiedChinese: simplifiedChinese,
+            adjacentPagePreview: model.adjacentPagePreview(direction:),
             text: readerDisplayText,
             title: model.title,
             previousTitle: pageAnimation == 3 ? model.previousTitle : nil,
@@ -770,7 +815,7 @@ struct ReaderView: View {
             Color.black
                 .opacity(resolvedStyle.id == "night" ? 0.08 : 0.03)
                 .ignoresSafeArea()
-                .contentShape(ReaderMenuDismissShape())
+                .contentShape(Rectangle())
                 .onTapGesture { showsReaderMenu = false }
                 .accessibilityHidden(true)
         }
@@ -853,17 +898,23 @@ struct ReaderView: View {
     }
 
     private func readerTipRow(_ values: [Int], date: Date, showDivider: Bool, isHeader: Bool) -> some View {
-        HStack(spacing: 8) {
-            Text(readerTipText(values[0], date: date))
-                .frame(maxWidth: .infinity, alignment: .leading)
-            Text(readerTipText(values[1], date: date))
-                .frame(maxWidth: .infinity, alignment: .center)
-            Text(readerTipText(values[2], date: date))
-                .frame(maxWidth: .infinity, alignment: .trailing)
+        let left = readerTipText(values[0], date: date)
+        let middle = readerTipText(values[1], date: date)
+        let right = readerTipText(values[2], date: date)
+        return HStack(spacing: 0) {
+            if !left.isEmpty { Text(left) }
+            Spacer(minLength: !left.isEmpty && (!middle.isEmpty || !right.isEmpty) ? 8 : 0)
+            if !middle.isEmpty {
+                Text(middle)
+                Spacer(minLength: right.isEmpty ? 0 : 8)
+            }
+            if !right.isEmpty { Text(right) }
         }
+        .frame(maxWidth: .infinity)
         .font(.system(size: 12))
         .foregroundStyle(foregroundColor)
         .lineLimit(1)
+        .truncationMode(.tail)
         .padding(.leading, isHeader ? headerPaddingLeft : footerPaddingLeft)
         .padding(.trailing, isHeader ? headerPaddingRight : footerPaddingRight)
         .overlay(alignment: .bottom) {
@@ -879,13 +930,13 @@ struct ReaderView: View {
         }
         var progressText: String { String(format: "%.1f%%", chapterProgress * 100) }
         switch value {
-        case 1: return model.title
+        case 1: return model.title.readerText(simplified: simplifiedChinese)
         case 2: return time
         case 3: return "▰"
         case 4: return "\(currentPage)/\(totalPages)"
         case 5: return progressText
         case 6: return "\(currentPage)/\(totalPages)  \(progressText)"
-        case 7: return book.name
+        case 7: return book.name.readerText(simplified: simplifiedChinese)
         case 8: return "\(time) ▰"
         case 9: return "\(time) \(battery)%"
         case 10: return "\(battery)%"
@@ -923,11 +974,11 @@ struct ReaderView: View {
         HStack(spacing: 4) {
             readerChromeIconButton("chevron.backward", label: "返回") { dismiss() }
             VStack(alignment: .leading, spacing: 3) {
-                Text(book.name)
+                Text(book.name.readerText(simplified: simplifiedChinese))
                     .font(.subheadline.weight(.medium))
                     .lineLimit(1)
                 HStack(spacing: 4) {
-                    Text(model.title).lineLimit(1)
+                    Text(model.title.readerText(simplified: simplifiedChinese)).lineLimit(1)
                     if model.loadedFromCache {
                         Image(systemName: "arrow.down.circle")
                             .accessibilityLabel("已缓存")
@@ -963,6 +1014,10 @@ struct ReaderView: View {
                     openChapterComments(at: model.currentIndex)
                 }
                 .accessibilityIdentifier("reader.chapterComments")
+            }
+            Button("书籍信息", systemImage: "info.circle") {
+                showsReaderMenu = false
+                activeSheet = .bookInfo
             }
             Button("搜索正文", systemImage: "magnifyingglass") {
                 showsReaderMenu = false
@@ -1054,7 +1109,7 @@ struct ReaderView: View {
             readerChromeIconButton("chevron.left", label: "上一章") { moveChapter(-1) }
                 .disabled(!model.canGoPrevious)
                 .opacity(model.canGoPrevious ? 1 : 0.25)
-            ReaderChapterSlider(directory: model.directory, currentNumber: model.currentChapterNumber,
+            ReaderChapterSlider(directory: model.directory, simplifiedChinese: simplifiedChinese, currentNumber: model.currentChapterNumber,
                                 progress: chapterProgress) { index in
                 if index != model.currentIndex { navigate(to: index) }
             }
@@ -1118,8 +1173,12 @@ struct ReaderView: View {
         showsReaderMenu = false
         saveProgress(immediate: true)
         readerJumpPosition = nil
-        if direction < 0 { model.goPrevious() } else { model.goNext() }
-        readerPosition = model.requestedPosition
+        if direction < 0 {
+            model.goPrevious(position: pageAnimation == 3 || model.hasImageContent ? 0 : .max)
+        } else {
+            model.goNext()
+        }
+        if model.requestedPosition != .max { readerPosition = model.requestedPosition }
     }
 
     private func requestNextChapter() {
@@ -1271,6 +1330,8 @@ struct ReaderView: View {
                         readerChoiceChip("标准", selected: lineSpacing > 7 && lineSpacing < 18) { lineSpacing = 12 }
                         readerChoiceChip("宽松", selected: lineSpacing >= 18) { lineSpacing = 22 }
                     }
+                    Toggle("繁体转简体", isOn: $simplifiedChinese)
+                        .accessibilityIdentifier("reader.simplifiedChinese")
                     Toggle("两端对齐", isOn: $fullJustify)
                 }
 
@@ -1366,14 +1427,14 @@ struct ReaderView: View {
                     Button(fontPath.isEmpty ? "选择字体文件" : "更换字体文件", systemImage: "textformat") {
                         showsFontImporter = true
                     }
+                    HStack {
+                        Text("当前字体")
+                        Spacer()
+                        Text(fontPath.isEmpty ? "系统字体" : URL(fileURLWithPath: fontPath).lastPathComponent)
+                            .foregroundStyle(.secondary)
+                    }
                     if !fontPath.isEmpty {
-                        HStack {
-                            Text("当前字体")
-                            Spacer()
-                            Text(URL(fileURLWithPath: fontPath).lastPathComponent)
-                                .foregroundStyle(.secondary)
-                        }
-                        Button("恢复默认字体", role: .destructive) { fontPath = "" }
+                        Button("使用系统字体") { fontPath = "" }
                     }
                     if let fontError {
                         Text(fontError).font(.footnote).foregroundStyle(.red)
@@ -1682,6 +1743,8 @@ struct ReaderView: View {
         ReadingNavigationStack {
             Form {
                 Section {
+                    Toggle("繁体转简体", isOn: $simplifiedChinese)
+                        .accessibilityIdentifier("reader.simplifiedChinese")
                     Toggle("两端对齐", isOn: $fullJustify)
                     Toggle("重新分段", isOn: Binding(
                         get: { model.usesParagraphResegmentation },
@@ -1737,15 +1800,28 @@ struct ReaderView: View {
                 }
 
                 Section("朗读") {
+                    NavigationLink("离线语音包") { OfflineVoicePackView() }
                     Picker("全局朗读引擎", selection: $appTTSEngine) {
+                        ForEach(availableOfflineVoices, id: \.self) { voice in
+                            Text(voice.title).tag(voice.rawValue)
+                        }
                         Text("系统 TTS").tag("")
+                        if azureEngine != nil {
+                            Text("微软自然语音").tag(AzureSpeechSettings.selection)
+                        }
                         ForEach(httpTTSEngines) { engine in
                             Text(engine.name).tag(String(engine.id))
                         }
                     }
                     Picker("本书朗读引擎", selection: bookTTSEngineBinding) {
                         Text("跟随全局").tag("__global__")
+                        ForEach(availableOfflineVoices, id: \.self) { voice in
+                            Text(voice.title).tag(voice.rawValue)
+                        }
                         Text("系统 TTS").tag("")
+                        if azureEngine != nil {
+                            Text("微软自然语音").tag(AzureSpeechSettings.selection)
+                        }
                         ForEach(httpTTSEngines) { engine in
                             Text(engine.name).tag(String(engine.id))
                         }
@@ -1867,8 +1943,9 @@ struct ReaderView: View {
 
     private var tableOfContents: some View {
         ReaderTableOfContents(
-            directory: model.directory, currentIndex: model.currentIndex, bookTitle: book.name,
-            bookURL: model.book.bookUrl, sourceID: model.onlineSourceID, cache: model.chapterCache, descending: $tocDescending
+            directory: model.directory, simplifiedChinese: simplifiedChinese, currentIndex: model.currentIndex, bookTitle: book.name.readerText(simplified: simplifiedChinese),
+            bookURL: model.book.bookUrl, sourceID: model.onlineSourceID, cache: model.chapterCache, descending: $tocDescending,
+            onCache: model.cacheChapters
         ) { index in
             if index != model.currentIndex { navigate(to: index) }
             showsTableOfContents = false
@@ -1908,9 +1985,12 @@ struct ReaderView: View {
     }
 
     private var contentSearchResults: [ReaderParagraph] {
-        let query = contentSearchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        let query = contentSearchQuery.trimmingCharacters(in: .whitespacesAndNewlines).readerText(simplified: simplifiedChinese)
         guard !query.isEmpty else { return [] }
-        return model.paragraphs.filter { $0.text.localizedCaseInsensitiveContains(query) }
+        return model.paragraphs.compactMap { paragraph in
+            let text = paragraph.text.readerText(simplified: simplifiedChinese)
+            return text.localizedCaseInsensitiveContains(query) ? ReaderParagraph(id: paragraph.id, text: text) : nil
+        }
     }
 
     private var bookmarksSheet: some View {
@@ -2083,7 +2163,7 @@ struct ReaderView: View {
             )
             prefetchNextChapterSpeech(engine: engine)
         } else {
-            speech.speak(text, continuesAcrossChapters: true, segmentIndexOffset: start)
+            speech.speak(text, continuesAcrossChapters: true, segmentIndexOffset: start, voice: selectedOfflineVoice)
         }
     }
 
@@ -2108,7 +2188,7 @@ struct ReaderView: View {
                 segmentIndexOffset: 0
             )
         } else {
-            speech.speak(pageText, continuesAcrossChapters: true, segmentIndexOffset: 0)
+            speech.speak(pageText, continuesAcrossChapters: true, segmentIndexOffset: 0, voice: selectedOfflineVoice)
         }
     }
 
@@ -2216,8 +2296,20 @@ struct ReaderView: View {
         return defaults.integer(forKey: "pageAnim")
     }
 
+    @AppStorage(OfflineVoicePack.preferenceKey) private var selectedVoicePack = ""
+    private var availableOfflineVoices: [OfflineVoice] {
+        guard let pack = OfflineVoicePack(rawValue: selectedVoicePack), pack.isInstalled else { return [] }
+        return OfflineVoice.allCases
+    }
+
+    private var selectedOfflineVoice: OfflineVoice? {
+        guard OfflineVoicePack.selected != nil else { return nil }
+        return OfflineVoice(rawValue: model.book.readConfig?.ttsEngine ?? appTTSEngine)
+    }
+
     private var selectedHTTPEngine: HttpTTS? {
         let value = model.book.readConfig?.ttsEngine ?? appTTSEngine
+        if value == AzureSpeechSettings.selection { return azureEngine }
         guard let id = Int64(value) else { return nil }
         return httpTTSEngines.first { $0.id == id }
     }
@@ -2253,10 +2345,13 @@ struct ReaderView: View {
     }
 
     private func loadHTTPEngines() async {
+        azureEngine = try? AzureSpeechSettings.load()?.engine()
         let values = await Self.storedHTTPEngines()
         guard !Task.isCancelled, let values else { return }
         httpTTSEngines = values
-        if !appTTSEngine.isEmpty, selectedHTTPEngine == nil { appTTSEngine = "" }
+        if let id = Int64(appTTSEngine), !values.contains(where: { $0.id == id }) {
+            appTTSEngine = ""
+        }
     }
 
     private nonisolated static func storedHTTPEngines() async -> [HttpTTS]? {

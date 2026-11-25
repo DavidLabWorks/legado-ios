@@ -46,7 +46,11 @@ struct OtherSettingsView: View {
                 Toggle("记录运行日志", isOn: Binding(get: { settings.recordLog }, set: { enabled in
                     var value = ApplicationSettingsStore.shared.settings
                     value.recordLog = enabled
-                    do { try ApplicationSettingsStore.shared.save(value); settings = value }
+                    do {
+                        try ApplicationSettingsStore.shared.save(value)
+                        settings = value
+                        if enabled { DiagnosticLog.shared.record(category: "诊断", message: "已开启运行日志") }
+                    }
                     catch { message = error.localizedDescription }
                 }))
                 NavigationLink {
@@ -144,7 +148,7 @@ struct NetworkSettingsView: View {
                         Text($0 >= 1024 ? "\($0 / 1024) GB" : "\($0) MB").tag($0)
                     }
                 }
-                Stepper(settings.prefetchChapters == 0 ? "已关闭自动预读" : "向后自动预读 \(settings.prefetchChapters) 章", value: $settings.prefetchChapters, in: 0...20)
+                Stepper(settings.prefetchChapters == 0 ? "已关闭自动预读" : "前后各预读 \(settings.prefetchChapters) 章", value: $settings.prefetchChapters, in: 0...20)
                 Text("超出上限时清理最久未读取的章节；容量调整在保存时生效。")
                     .font(.footnote).foregroundStyle(.secondary)
             }

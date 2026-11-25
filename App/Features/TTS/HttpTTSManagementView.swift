@@ -112,11 +112,6 @@ struct HttpTTSManagementView: View {
             }
             .onDelete { offsets in Task { await model.delete(at: offsets) } }
         }
-        .overlay {
-            if model.engines.isEmpty {
-                ReadingUnavailableView("没有在线朗读引擎", systemImage: "waveform", description: Text("可恢复内置引擎或导入 HTTP TTS JSON。"))
-            }
-        }
         .navigationTitle("在线朗读引擎")
         .toolbar {
             ToolbarItemGroup(placement: .topBarTrailing) {
@@ -327,13 +322,15 @@ private struct HttpTTSLoginView: View {
                 Button(isRunning ? "执行中…" : "登录") { saveAndLogin() }.disabled(isRunning)
             }
         }
-        .task { loadRows() }
+        .task {
+            values = decodeLoginInfo()
+            loadRows()
+        }
         .onDisappear { pendingFieldAction?.cancel() }
     }
 
     private func loadRows() {
         do {
-            values = decodeLoginInfo()
             let json = try renderedLoginUI()
             rows = try JSONDecoder().decode([HttpTTSLoginRow].self, from: Data(json.utf8))
             for row in rows where row.type != "button" && values[row.name] == nil {
@@ -395,6 +392,7 @@ private struct HttpTTSLoginView: View {
         errorMessage = nil
         let engine = engine
         let values = values
+        let savedBeforeAction = decodeLoginInfo()
         Task { @MainActor in
             defer { isRunning = false }
             do {
@@ -405,7 +403,14 @@ private struct HttpTTSLoginView: View {
                         executionContext: .init(source: engine.bookSourceAdapter)
                     )
                 }.value
-                if engine.loginUi?.hasPrefix("@js:") == true { loadRows() }
+                if engine.loginUi?.hasPrefix("@js:") == true {
+                    let savedAfterAction = decodeLoginInfo()
+                    for key in Set(savedBeforeAction.keys).union(savedAfterAction.keys)
+                        where savedBeforeAction[key] != savedAfterAction[key] && self.values[key] == values[key] {
+                        self.values[key] = savedAfterAction[key]
+                    }
+                    loadRows()
+                }
             } catch {
                 errorMessage = error.localizedDescription
             }

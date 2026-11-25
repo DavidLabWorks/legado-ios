@@ -531,9 +531,11 @@ public final class PersistentRuntimeCache: @unchecked Sendable {
 public actor InMemorySearchBookRepository: SearchBookRepository {
     private var values: [String: SearchBook] = [:]
     public init(values: [SearchBook] = []) {
-        self.values = Dictionary(uniqueKeysWithValues: values.map { ($0.bookURL, $0) })
+        self.values = Dictionary(values.map { ($0.id, $0) }, uniquingKeysWith: { _, latest in latest })
     }
-    public func get(bookURL: String) -> SearchBook? { values[bookURL] }
+    public func get(bookURL: String) -> SearchBook? {
+        values.values.filter { $0.bookURL == bookURL }.max { $0.time < $1.time }
+    }
     public func cachedMatches(keyword: String) async throws -> [SearchBook] {
         guard !keyword.isEmpty else { return [] }
         return Array(values.values.filter {
@@ -561,7 +563,7 @@ public actor InMemorySearchBookRepository: SearchBookRepository {
         values.values.filter { $0.name == name && $0.author == author && !($0.coverURL ?? "").isEmpty }
             .sorted { $0.originOrder < $1.originOrder }
     }
-    public func put(_ books: [SearchBook]) { for book in books { values[book.bookURL] = book } }
+    public func put(_ books: [SearchBook]) { for book in books { values[book.id] = book } }
     public func clear(name: String, author: String) {
         values = values.filter { $0.value.name != name || $0.value.author != author }
     }

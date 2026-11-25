@@ -249,12 +249,13 @@ struct LegadoDatabaseTests {
         var one = SearchBook(bookURL: "https://one/book", origin: firstSource.bookSourceUrl, originName: "一号", type: 0, name: "书", author: "作者")
         one.latestChapterTitle = "第一章"
         one.originOrder = 20
-        var two = SearchBook(bookURL: "https://two/book", origin: secondSource.bookSourceUrl, originName: "二号", type: 0, name: "书", author: "作者")
+        var two = SearchBook(bookURL: one.bookURL, origin: secondSource.bookSourceUrl, originName: "二号", type: 0, name: "书", author: "作者")
         two.coverURL = "cover"
         two.originOrder = 10
         try await repository.put([one, two])
 
-        #expect(try await repository.first(name: "书", author: "作者")?.bookURL == two.bookURL)
+        #expect(Set(try await repository.cachedMatches(keyword: "书").map(\.origin)) == [one.origin, two.origin])
+        #expect(try await repository.first(name: "书", author: "作者")?.origin == two.origin)
         let changed = try await repository.changeSources(name: "书", author: "作", sourceGroup: "文字", key: "二号")
         #expect(changed.map(\.bookURL) == [two.bookURL])
         #expect(changed.first?.originOrder == 10)

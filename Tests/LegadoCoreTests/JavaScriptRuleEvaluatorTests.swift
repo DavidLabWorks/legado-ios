@@ -513,3 +513,100 @@ private struct InactiveWebScriptNetworkMock: JavaScriptNetworkLoading {
         return .init(data: Data("HTTP".utf8), statusCode: 200, headers: [:], finalURL: url)
     }
 }
+
+private struct VerificationNetworkFixture: JavaScriptNetworkLoading {
+    var host: String
+    func load(_ request: URLRequest) throws -> HTTPResponse {
+        let url = try #require(request.url)
+        #expect(request.value(forHTTPHeaderField: "X-Source") == "reader")
+        if url.path == "/image" {
+            #expect(request.value(forHTTPHeaderField: "Referer") == host + "/search")
+            #expect(request.cachePolicy == .reloadIgnoringLocalCacheData)
+            return .init(data: Data([17, 42]), statusCode: 200,
+                         headers: ["Set-Cookie": "image_session=test; Path=/"], finalURL: url)
+        }
+        #expect(url.path == "/submit")
+        #expect(request.value(forHTTPHeaderField: "Cookie")?.contains("image_session=test") == true)
+        #expect(String(decoding: request.httpBody ?? Data(), as: UTF8.self) == "answer=Test7")
+        return .init(data: Data("found".utf8), statusCode: 200, headers: [:], finalURL: url)
+    }
+}
+
+extension JavaScriptRuleEvaluatorTests {
+    @Test func sourceCommentRunsInTheRuleAndCanUpdateItsResult() throws {
+        var source = BookSource(bookSourceUrl: "https://comment.example", bookSourceName: "备注测试")
+        source.bookSourceComment = "result = result + source.bookSourceName; java.put('seen', result);"
+        let output = try JavaScriptRuleEvaluator().evaluate(
+            script: "eval(String(source.bookSourceComment));\nresult", result: .string("原文"),
+            executionContext: .init(source: source))
+        #expect(output.value == .string("原文备注测试"))
+        #expect(output.variables["seen"] == "原文备注测试")
+    }
+
+    @Test func dynamicEvalInSourceCommentReportsAnErrorOnlyWhenReached() throws {
+        var source = BookSource(bookSourceUrl: "https://comment.example", bookSourceName: "备注测试")
+        source.bookSourceComment = """
+            if (result.length > 0) {
+                try { eval(result); } catch (_) { result = 'caught'; }
+            }
+            """
+        let evaluator = JavaScriptRuleEvaluator()
+        let script = "eval(source.bookSourceComment); result"
+        let context = RuleExecutionContext(source: source)
+        let skipped = try evaluator.evaluate(script: script, result: .string(""), executionContext: context)
+        #expect(skipped.value == .string(""))
+        #expect(throws: RuleEngineError.unsupportedRule(rule: "source.bookSourceComment",
+                                                     feature: "书源备注调用了动态 eval，当前无法执行运行时取得的脚本")) {
+            try evaluator.evaluate(script: script, result: .string("42"), executionContext: context)
+        }
+    }
+
+    @Test func verificationResumesTheRuleAndCancelsOnlyItsSource() async throws {
+        let host = "https://\(UUID().uuidString.lowercased()).example.test"
+        var source = BookSource(bookSourceUrl: host, bookSourceName: "验证测试")
+        source.header = #"{"X-Source":"reader"}"#
+        let verification = SourceVerification()
+        verification.register { name, data in
+            #expect(name == "验证测试")
+            #expect(data == Data([17, 42]))
+            return "Test7"
+        }
+        var evaluator = JavaScriptRuleEvaluator(networkLoader: VerificationNetworkFixture(host: host))
+        evaluator.verification = verification
+        let context = RuleExecutionContext(baseURL: host + "/search", source: source)
+        defer {
+            LegadoCookieStore.shared.removeCookies(for: host)
+            BookSourceRuntimeStore.shared.put(sourceID: host, key: "variable", value: "")
+        }
+        let value = try await evaluator.evaluateAsync(script: """
+            eval(String(source.bookSourceComment))
+            var answer = java.getVerificationCode('/image');
+            var result = java.post('/submit','answer='+answer,{}).body();
+            source.setVariable(result);
+            source.getVariable() + ':' + java.encodeURI('中','gbk')
+            """, result: .null, executionContext: context)
+        #expect(value.value == .string("found:%D6%D0"))
+
+        await #expect(throws: RuleEngineError.self) {
+            try await evaluator.evaluateAsync(script: """
+                eval(String(source.bookSourceComment))
+                eval(java.getVerificationCode('/image'))
+                """, result: .null, executionContext: context)
+        }
+
+        verification.register { _, _ in throw CancellationError() }
+        let engine = RuleEngine(javaScript: evaluator)
+        source.ruleSearch = SearchRule()
+        source.ruleSearch?.bookList = """
+            <js>try { java.getVerificationCode('/image') } catch(e) { java.ajax('/must-never-submit') }</js>.row
+            """
+        let service = BookSearchService(engine: engine)
+        let response = HTTPResponse(data: Data("<html></html>".utf8), statusCode: 200,
+                                    headers: [:], finalURL: try #require(URL(string: host + "/search")))
+        await #expect(throws: CancellationError.self) {
+            try await service.analyzeSearchPage(response, detailURL: host, keyword: "书", page: 1, source: source)
+        }
+        let unrelated = await engine.evaluate("@js: 'another source'", in: .null)
+        #expect(unrelated.firstString == "another source")
+    }
+}

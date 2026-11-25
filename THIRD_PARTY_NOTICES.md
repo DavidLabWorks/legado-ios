@@ -40,3 +40,9 @@
 测试中的规则样本仅用于兼容验证，不打包为 App 默认书源。具体说明见 [测试样本说明](Tests/LegadoCoreTests/Fixtures/README.md)。演示模式使用虚构书籍元数据和项目内演示文本；发布截图不使用个人书架、登录信息或付费章节。
 
 第三方材料继续遵循其各自许可。GPL 覆盖软件的使用和分发，不提供第三方网站、书籍、封面或服务的内容授权。
+
+## Qwen3-TTS offline voices
+
+The optional voice packs use the Qwen3-TTS CustomVoice 0.6B model and 12 Hz codec from Qwen under Apache-2.0, distributed in GGUF format by cstr. The high-quality pack contains the Q8_0 talker and full codec. The medium and compact packs contain requantized weights and a decoder-only codec. Each archive includes the model license and is stored in 48 MB parts under `OfflineVoicePacks/v1`. Users download or import a pack into Application Support.
+
+The native runtime and C interface come from CrispStrobe/CrispASR v0.8.55. The app includes the runtime license, third-party notices and model license in its Licenses directory.

@@ -84,7 +84,8 @@ struct SearchRegressionTests {
         #expect(requests.filter { $0.url?.host == "fast.example" }.count == 1)
         #expect(requests.allSatisfy { URLComponents(url: $0.url!, resolvingAgainstBaseURL: false)?.queryItems?.first(where: { $0.name == "page" })?.value == "1" })
         #expect(model.completedSourceCount == 2)
-        #expect(model.books.first?.origins == [fast.id, slow.id])
+        #expect(model.books.map(\.origin) == [fast.id, slow.id])
+        #expect(model.books.map(\.bookURL) == [fast.id + "/fresh", slow.id + "/fresh"])
         model.loadMore()
         try await waitUntil("second page completion") { !model.isLoadingMore }
         #expect(!model.hasMore)
@@ -112,6 +113,84 @@ struct SearchRegressionTests {
         #expect(model.books.isEmpty)
     }
 
+    @Test func forbiddenSearchCanImportVisibleBookLinksAndRejectStaleResults() async throws {
+        let transport = GatedModelSearchTransport(statusCode: 403)
+        await transport.release()
+        let model = model(transport: transport, repository: InMemorySearchBookRepository())
+        var source = BookSource(bookSourceUrl: "https://101kks.com", bookSourceName: "101 看书")
+        source.searchUrl = "/search/{{key}}/{{page}}.html"
+        source.bookUrlPattern = #"https://101kks\.com/book/[0-9]+\.html"#
+        source.ruleSearch = .init(bookList: "//a", name: "text", bookUrl: "href", coverUrl: "href@js:result + '.jpg'")
+        model.search(keyword: "东京 1991", sources: [source])
+        try await waitUntil { model.state == .empty }
+        let page = try #require(model.browserPage)
+        #expect(page.url.path == "/search/东京 1991/1.html")
+        let html = #"<div><a href="https://101kks.com/book/40391.html">東京1991</a></div>"#
+        try await model.useBrowserResults(html, for: page)
+        #expect(model.state == .finished)
+        #expect(model.diagnostics.isEmpty)
+        #expect(model.books.first?.coverURL == "https://101kks.com/book/40391.html.jpg")
+        #expect(model.browserPage == nil)
+        #expect(await transport.requests().count == 1)
+        model.search(keyword: "重生之", sources: [source])
+        try await waitUntil { model.state == .empty }
+        await #expect(throws: CancellationError.self) { try await model.useBrowserResults(html, for: page) }
+        #expect(model.books.isEmpty)
+        model.cancel(reset: true)
+    }
+
+    @Test func unsupportedRuleIsReportedOnceWhileOtherSourcesKeepPaging() async throws {
+        let transport = GatedModelSearchTransport()
+        await transport.release()
+        let model = model(transport: transport, repository: InMemorySearchBookRepository())
+        defer { model.cancel(reset: true) }
+        var failing = source("unsupported")
+        failing.ruleSearch?.bookList = "<js>eval(String(source.bookSourceComment)); result</js>"
+        // A string argument reaches the dynamic-eval error for this JSON fixture.
+        failing.bookSourceComment = "eval(String(result))"
+        let working = source("working")
+        model.search(keyword: "书", sources: [failing, working])
+        try await waitUntil { model.state == .finished }
+        #expect(model.diagnostics.map(\.code) == ["rule.unsupported"])
+        model.loadMore()
+        try await waitUntil { !model.isLoadingMore }
+        #expect(model.diagnostics.map(\.code) == ["rule.unsupported"])
+        let requests = await transport.requests()
+        #expect(requests.filter { $0.url?.host == "unsupported.example" }.count == 1)
+        #expect(requests.filter { $0.url?.host == "working.example" }.count == 2)
+        model.search(keyword: "新搜索", sources: [failing])
+        try await waitUntil { model.state == .empty }
+        #expect(await transport.requests().filter { $0.url?.host == "unsupported.example" }.count == 2)
+    }
+
+    @Test func manualVerificationResumesTheOriginalListAndFieldRules() async throws {
+        let transport = GatedModelSearchTransport()
+        await transport.release()
+        let model = model(transport: transport, repository: InMemorySearchBookRepository())
+        var source = source("manual")
+        source.bookSourceComment = "eval(String(result))"
+        source.ruleSearch = .init(bookList: """
+            <js>eval(String(source.bookSourceComment)); if (!result) java.getVerificationCode('/image'); result</js>.B
+            """, name: "a.1@text", author: "span.author@text", bookUrl: "a.0@href")
+        model.search(keyword: "祥子", sources: [source])
+        try await waitUntil { model.state == .empty }
+        let page = try #require(model.browserPages.first)
+        #expect(page.manualVerification?.listRule == ".B")
+        #expect(page.source == source)
+        #expect(model.browserPage == nil)
+        await #expect(throws: NSError.self) { try await model.useBrowserResults("<html>等待验证</html>", for: page) }
+        #expect(model.browserPages.first?.id == page.id)
+        let html = #"<dl class="B"><dd><a href="/book/42"><img></a></dd><dt><a href="/book/42">祥子</a></dt><dd><span class="author">作者甲</span></dd></dl>"#
+        try await model.useBrowserResults(html, for: page)
+        #expect(model.books.first?.name == "祥子")
+        #expect(model.books.first?.author == "作者甲")
+        #expect(model.books.first?.bookURL == source.id + "/book/42")
+        #expect(model.books.first?.origin == source.id)
+        #expect(model.browserPages.isEmpty && model.diagnostics.isEmpty)
+        #expect(await transport.requests().count == 1)
+        await #expect(throws: CancellationError.self) { try await model.useBrowserResults(html, for: page) }
+    }
+
     private func source(_ name: String) -> BookSource {
         var value = BookSource(bookSourceUrl: "https://\(name).example", bookSourceName: name)
         value.searchUrl = "/search?q={{key}}&page={{page}}"
@@ -136,11 +215,13 @@ struct SearchRegressionTests {
 private actor GatedModelSearchTransport: HTTPTransport {
     nonisolated let started: AsyncStream<Void>
     private let continuation: AsyncStream<Void>.Continuation
+    private let statusCode: Int
     private let fastHost: String?
     private var released = false
     private var pending: [UUID: (URLRequest, CheckedContinuation<HTTPResponse, Error>)] = [:]
     private var recorded: [URLRequest] = []
-    init(fastHost: String? = nil) {
+    init(fastHost: String? = nil, statusCode: Int = 200) {
+        self.statusCode = statusCode
         self.fastHost = fastHost
         (started, continuation) = AsyncStream.makeStream(of: Void.self)
     }
@@ -167,6 +248,6 @@ private actor GatedModelSearchTransport: HTTPTransport {
     func requests() -> [URLRequest] { recorded }
     private func response(_ request: URLRequest) -> HTTPResponse {
         .init(data: Data(#"{"books":[{"name":"书","author":"作者","url":"/fresh"}]}"#.utf8),
-              statusCode: 200, headers: [:], finalURL: request.url!)
+              statusCode: statusCode, headers: [:], finalURL: request.url!)
     }
 }

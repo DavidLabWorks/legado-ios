@@ -269,14 +269,20 @@ private final class JavaScriptRedirectBlocker: NSObject, URLSessionTaskDelegate,
 public struct JavaScriptRuleEvaluator: Sendable {
     public var maximumScriptLength: Int
     public var maximumResultLength: Int
+    var verification = SourceVerification.shared
     private let networkLoader: any JavaScriptNetworkLoading
     private let urlBuilder: LegadoURLBuilder
     private let rssVariableStore: RSSVariableStore
 
     public func evaluateAsync(script: String, result: JSONValue, executionContext: RuleExecutionContext) async throws -> JavaScriptRuleResult {
-        try await RuleExecutionWorker.run {
-            try evaluate(script: script, result: result, executionContext: executionContext)
-        }
+        let token = executionContext.cancellation ?? RuleExecutionCancellation()
+        return try await withTaskCancellationHandler {
+            try await RuleExecutionWorker.run {
+                var current = executionContext
+                current.cancellation = token
+                return try evaluate(script: script, result: result, executionContext: current)
+            }
+        } onCancel: { token.cancel() }
     }
 
     public init(
@@ -428,7 +434,19 @@ public struct JavaScriptRuleEvaluator: Sendable {
         guard script.utf8.count <= maximumScriptLength else {
             throw RuleEngineError.resourceLimit(rule: script, detail: "JavaScript 规则超过长度上限")
         }
-        try rejectUnboundedExecution(script)
+        // Only the literal source-comment call is exempt from the static eval check.
+        let commentCall = script.range(of: #"(?:^|(?<=\n))[ \t]*eval\(\s*(?:String\(\s*source\.bookSourceComment\s*\)|source\.bookSourceComment)\s*\)[ \t]*(?:;|\r?\n|$)"#,
+                                       options: .regularExpression)
+        if let commentCall {
+            let comment = executionContext.source?.bookSourceComment ?? ""
+            guard comment.utf8.count <= maximumScriptLength else {
+                throw RuleEngineError.resourceLimit(rule: "source.bookSourceComment", detail: "书源备注脚本超过长度上限")
+            }
+            try rejectUnboundedExecution(comment, guardsEvalAtRuntime: true)
+            try rejectUnboundedExecution(script.replacingCharacters(in: commentCall, with: "\n"))
+        } else {
+            try rejectUnboundedExecution(script)
+        }
 
         let box = JSVariableBox(executionContext.rssArticle?.variableMap.merging(executionContext.variables) { _, current in current }
             ?? executionContext.variables)
@@ -459,10 +477,21 @@ public struct JavaScriptRuleEvaluator: Sendable {
         context.setObject(executionContext.baseURL, forKeyedSubscript: "baseUrl" as NSString)
         context.setObject(executionContext.key ?? "", forKeyedSubscript: "key" as NSString)
         context.setObject(executionContext.page ?? 0, forKeyedSubscript: "page" as NSString)
+        if executionContext.source?.bookSourceUrl.hasPrefix("httpTts:") == true {
+            if let text = executionContext.variables["speakText"] {
+                context.setObject(text, forKeyedSubscript: "speakText" as NSString)
+            }
+            if let speed = executionContext.variables["speakSpeed"].flatMap(Int.init) {
+                context.setObject(speed, forKeyedSubscript: "speakSpeed" as NSString)
+            }
+        }
         installJava(in: context, variables: box, result: result, executionContext: executionContext)
         installCookie(in: context)
         installJavaImporterCompatibility(in: context)
         installSource(in: context, source: executionContext.source, variables: box)
+        if commentCall != nil {
+            installSourceCommentEvaluation(in: context, variables: box)
+        }
         installBook(in: context, book: executionContext.book)
         if let bookRefresher, let book = executionContext.book {
             try installUpdatableBook(in: context, book: book, variables: box, refresher: bookRefresher)
@@ -496,6 +525,7 @@ public struct JavaScriptRuleEvaluator: Sendable {
         }
 
         let evaluated = context.evaluateScript(script)
+        if let error = box.error { throw error }
         if let exceptionMessage {
             throw RuleEngineError.malformedRule(rule: script, detail: "JavaScript 执行失败：\(exceptionMessage)")
         }
@@ -538,6 +568,45 @@ public struct JavaScriptRuleEvaluator: Sendable {
         return .init(value: value, variables: box.values, rssArticle: article)
     }
 
+    private func requestVerification(_ rawURL: String, executionContext: RuleExecutionContext) throws -> String {
+        guard !Thread.isMainThread else {
+            throw RuleEngineError.invalidInput(rule: "java.getVerificationCode", expected: "验证码需要在后台规则任务中调用")
+        }
+        try executionContext.checkCancellation()
+        let base = URL(string: executionContext.baseURL.isEmpty ? executionContext.source?.bookSourceUrl ?? "" : executionContext.baseURL)
+        guard let source = executionContext.source,
+              let url = URL(string: rawURL, relativeTo: base)?.absoluteURL,
+              ["http", "https"].contains(url.scheme?.lowercased() ?? ""), url.host != nil else {
+            throw RuleEngineError.invalidInput(rule: "java.getVerificationCode", expected: "验证码图片地址无效")
+        }
+        var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 30)
+        func origin(_ url: URL?) -> String? {
+            guard let scheme = url?.scheme?.lowercased(), let host = url?.host?.lowercased() else { return nil }
+            return "\(scheme)://\(host):\(url?.port ?? (scheme == "https" ? 443 : 80))"
+        }
+        if origin(url) == origin(URL(string: source.bookSourceUrl)) {
+            request.allHTTPHeaderFields = try BookSourceHeaderResolver().resolve(source)
+        }
+        if let base, origin(base) == origin(url) {
+            request.setValue(base.absoluteString, forHTTPHeaderField: "Referer")
+        }
+        request.httpShouldHandleCookies = source.enabledCookieJar == true
+        if request.httpShouldHandleCookies {
+            let cookie = Self.mergeCookieHeaders(LegadoCookieStore.shared.cookieHeader(for: url.absoluteString),
+                                                 request.value(forHTTPHeaderField: "Cookie") ?? "")
+            if !cookie.isEmpty { request.setValue(cookie, forHTTPHeaderField: "Cookie") }
+        }
+        let response = try self.networkLoader.load(request)
+        guard (200..<300).contains(response.statusCode) else { throw HTTPClientError.statusResponse(response) }
+        if request.httpShouldHandleCookies, let cookie = response.headers.first(where: {
+            $0.key.caseInsensitiveCompare("Set-Cookie") == .orderedSame
+        })?.value {
+            LegadoCookieStore.shared.setCookie(cookie, for: response.finalURL.absoluteString)
+        }
+        try executionContext.checkCancellation()
+        return try verification.request(source: source.bookSourceName, image: response.data, context: executionContext)
+    }
+
     private func installJava(
         in context: JSContext,
         variables: AnyObject,
@@ -545,8 +614,21 @@ public struct JavaScriptRuleEvaluator: Sendable {
         executionContext: RuleExecutionContext
     ) {
         guard let box = variables as? JSVariableBox else { return }
+        let verify: @convention(block) (String) -> String = { [weak context] rawURL in
+            do {
+                if let error = box.error { throw error }
+                return try self.requestVerification(rawURL, executionContext: executionContext)
+            } catch {
+                // A source can catch JS exceptions. Never continue a protected request with an empty answer.
+                if error is CancellationError { executionContext.cancellation?.cancel() }
+                box.error = error
+                context?.exception = JSValue(newErrorFromMessage: error.localizedDescription, in: context)
+                return ""
+            }
+        }
         installJavaBlocks(
             in: context,
+            verification: verify,
             get: { key in
                 if key == "bookName", let book = executionContext.book { return book.name }
                 if key == "title", let chapter = executionContext.chapter { return chapter.title }
@@ -556,6 +638,7 @@ public struct JavaScriptRuleEvaluator: Sendable {
             result: result,
             executionContext: executionContext,
             currentContext: { [weak context] in
+                if let error = box.error { throw error }
                 try executionContext.checkCancellation()
                 var current = executionContext
                 current.variables = box.values
@@ -687,6 +770,7 @@ public struct JavaScriptRuleEvaluator: Sendable {
 
     private func installJavaBlocks(
         in context: JSContext,
+        verification: @escaping @convention(block) (String) -> String,
         get: @escaping (String) -> String,
         put: @escaping (String, String) -> String,
         result: JSONValue,
@@ -782,8 +866,8 @@ public struct JavaScriptRuleEvaluator: Sendable {
         }
         context.setObject(logValue, forKeyedSubscript: "__legadoLog" as NSString)
         context.evaluateScript("var console = { log: function() { __legadoLog(Array.prototype.join.call(arguments, ' ')); }, warn: function() { __legadoLog(Array.prototype.join.call(arguments, ' ')); }, error: function() { __legadoLog(Array.prototype.join.call(arguments, ' ')); } };")
-        let urlEncode: @convention(block) (String) -> String = {
-            Self.formURLEncode($0)
+        let urlEncode: @convention(block) (String, String?) -> String = { text, charset in
+            Self.formURLEncode(text, encoding: charset.flatMap(HTTPTextDecoder.encoding(named:)) ?? .utf8)
         }
         let getCookieHeader: @convention(block) (String) -> String = {
             LegadoCookieStore.shared.cookieHeader(for: $0)
@@ -914,6 +998,8 @@ public struct JavaScriptRuleEvaluator: Sendable {
         java?.setObject(logValue, forKeyedSubscript: "log" as NSString)
         java?.setObject(logValue, forKeyedSubscript: "logType" as NSString)
         java?.setObject(logValue, forKeyedSubscript: "toast" as NSString)
+        java?.setObject(verification, forKeyedSubscript: "getVerificationCode" as NSString)
+        java?.setObject(logValue, forKeyedSubscript: "longToast" as NSString)
         java?.setObject(urlEncode, forKeyedSubscript: "encodeURI" as NSString)
         java?.setObject(getCookieHeader, forKeyedSubscript: "getCookieHeader" as NSString)
         java?.setObject(getCookieValue, forKeyedSubscript: "__getCookieValue" as NSString)
@@ -949,6 +1035,7 @@ public struct JavaScriptRuleEvaluator: Sendable {
                 }
                 return responseOf(java.__directRequest('GET', target, null, headers || {}, timeout));
               };
+              java.setContent = function (content) { src = content; return java; };
               function extractRule(rule, content, mode, isUrl, unescape) {
                 var fragment = content && typeof content === 'object' && typeof content.__legadoHTML === 'string';
                 var response = java.__getRule(String(rule == null ? '' : rule), fragment ? content.__legadoHTML : content == null ? src : content,
@@ -1049,7 +1136,7 @@ public struct JavaScriptRuleEvaluator: Sendable {
             request.httpBody = Data((body ?? "").utf8)
         }
         if executionContext.source?.enabledCookieJar == true {
-            let stored = LegadoCookieStore.shared.cookieHeader(for: rawURL)
+            let stored = LegadoCookieStore.shared.cookieHeader(for: url.absoluteString)
             let explicit = request.value(forHTTPHeaderField: "Cookie") ?? ""
             let merged = Self.mergeCookieHeaders(stored, explicit)
             if !merged.isEmpty { request.setValue(merged, forHTTPHeaderField: "Cookie") }
@@ -1154,6 +1241,27 @@ public struct JavaScriptRuleEvaluator: Sendable {
         throw lastError
     }
 
+    private func installSourceCommentEvaluation(in context: JSContext, variables: JSVariableBox) {
+        let rejected: @convention(block) () -> String = {
+            let message = "书源备注调用了动态 eval，当前无法执行运行时取得的脚本"
+            variables.error = RuleEngineError.unsupportedRule(rule: "source.bookSourceComment", feature: message)
+            DiagnosticLog.shared.record(.error, category: "JS", message: message)
+            return message
+        }
+        context.setObject(rejected, forKeyedSubscript: "__legadoRejectDynamicEval" as NSString)
+        context.evaluateScript("""
+            (function (evaluate, comment, reject) {
+                var used = false;
+                Object.defineProperty(this, 'eval', { value: function (code) {
+                    if (typeof code !== 'string') return code;
+                    if (used || code !== comment) throw new Error(reject());
+                    used = true;
+                    return evaluate(code);
+                }, writable: false, configurable: false });
+            })(eval, String(source.bookSourceComment), __legadoRejectDynamicEval);
+            """)
+    }
+
     private func installSource(in context: JSContext, source: BookSource?, variables: AnyObject) {
         guard variables is VariableBoxProxy else { return }
         let sourceID = source?.bookSourceUrl ?? ""
@@ -1206,6 +1314,7 @@ public struct JavaScriptRuleEvaluator: Sendable {
         object?.setObject(getLoginInfo, forKeyedSubscript: "__getLoginInfoMap" as NSString)
         object?.setObject(putLoginInfo, forKeyedSubscript: "putLoginInfo" as NSString)
         object?.setObject(getHeaderMap, forKeyedSubscript: "getHeaderMap" as NSString)
+        object?.setObject(source?.bookSourceComment ?? NSNull() as Any, forKeyedSubscript: "bookSourceComment" as NSString)
         object?.setObject(source?.bookSourceName ?? "", forKeyedSubscript: "bookSourceName" as NSString)
         object?.setObject(source?.bookSourceUrl ?? "", forKeyedSubscript: "bookSourceUrl" as NSString)
         object?.setObject(source?.bookSourceGroup ?? "", forKeyedSubscript: "bookSourceGroup" as NSString)
@@ -1223,6 +1332,8 @@ public struct JavaScriptRuleEvaluator: Sendable {
         context.setObject(object, forKeyedSubscript: "source" as NSString)
         context.evaluateScript("""
             (function () {
+              source.getVariable = function () { return source.get("variable"); };
+              source.setVariable = function (value) { return source.put("variable", value); };
               source.getKey = function () { return source.bookSourceUrl; };
               source.getTag = function () { return source.bookSourceName; };
               source.getLoginInfoMap = function () {
@@ -1589,9 +1700,10 @@ public struct JavaScriptRuleEvaluator: Sendable {
         return absolute.absoluteString
     }
 
-    private func rejectUnboundedExecution(_ script: String) throws {
+    private func rejectUnboundedExecution(_ script: String, guardsEvalAtRuntime: Bool = false) throws {
         let compact = script.replacingOccurrences(of: #"\s+"#, with: "", options: .regularExpression).lowercased()
-        let rejected = ["while(true)", "while(1)", "for(;;)", "eval(", "functionconstructor("]
+        var rejected = ["while(true)", "while(1)", "for(;;)", "functionconstructor("]
+        if !guardsEvalAtRuntime { rejected.append("eval(") }
         if let token = rejected.first(where: compact.contains) {
             throw RuleEngineError.resourceLimit(rule: script, detail: "JavaScript 包含未受控执行结构：\(token)")
         }
@@ -1812,12 +1924,14 @@ public struct JavaScriptRuleEvaluator: Sendable {
         })(this);
         """#
 
-    private static func formURLEncode(_ value: String) -> String {
-        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-._*"))
-        return value.unicodeScalars.map { scalar in
-            if scalar == " " { return "+" }
-            if scalar.isASCII, allowed.contains(scalar) { return String(scalar) }
-            return String(scalar).utf8.map { String(format: "%%%02X", $0) }.joined()
+    private static func formURLEncode(_ value: String, encoding: String.Encoding = .utf8) -> String {
+        let bytes = value.data(using: encoding, allowLossyConversion: true) ?? Data(value.utf8)
+        return bytes.map { byte -> String in
+            switch byte {
+            case 32: return "+"
+            case 48...57, 65...90, 97...122, 45, 46, 95, 42: return String(UnicodeScalar(byte))
+            default: return String(format: "%%%02X", byte)
+            }
         }.joined()
     }
 

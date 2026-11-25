@@ -52,6 +52,37 @@ struct SourceNetworkPolicyTests {
         #expect(!cookie.contains("shared=stored"))
     }
 
+    @MainActor @Test func webViewRefreshKeepsCookiesWithinTheirOriginalPathsAndDomains() async throws {
+        let url = URL(string: "https://directory-cookie.example/book/42734/index.html")!
+        let host = try #require(url.host)
+        let source = BookSource(bookSourceUrl: url.absoluteString, bookSourceName: "目录")
+        let policy = SourceNetworkPolicy()
+        func cookie(_ name: String, path: String, domain: String) throws -> HTTPCookie {
+            try #require(HTTPCookie(properties: [.name: name, .value: "ok", .path: path, .domain: domain]))
+        }
+        let book = try cookie("book", path: "/book", domain: host)
+        let account = try cookie("account", path: "/account", domain: host)
+        let external = try cookie("external", path: "/", domain: "unrelated.example")
+        defer {
+            HTTPCookieStorage.shared.deleteCookie(book)
+            HTTPCookieStorage.shared.deleteCookie(account)
+        }
+        var response = HTTPResponse(data: Data(), statusCode: 200, headers: [:], finalURL: url)
+        response.webViewCookies = [book, account, external]
+        let browser = RecordingWebViewExecutor(response: response)
+        let transport = RecordingPolicyTransport(results: [])
+        var request = try LegadoURLBuilder().prepare(url.absoluteString)
+        request.useWebView = true
+        for _ in 0..<2 {
+            _ = try await policy.execute(request, source: source, transport: transport, timeout: 2, webViewExecutor: browser)
+        }
+        #expect(browser.lastPrepared?.headers["Cookie"] == "book=ok")
+        #expect(browser.lastPrepared?.webViewCookies.map(\.path) == ["/book"])
+        #expect(await policy.cookieHeader(sourceID: source.id, url: URL(string: "https://\(host)/account/me")!) == "account=ok")
+        #expect(await policy.cookieHeader(sourceID: source.id, url: URL(string: "https://\(host)/bookmarks")!).isEmpty)
+        #expect(await policy.cookieHeader(sourceID: source.id, url: URL(string: "https://unrelated.example/")!).isEmpty)
+    }
+
     @Test func retriesFailedHTTPResponsesConfiguredNumberAndHonorsDisabledCookieJar() async throws {
         let policy = SourceNetworkPolicy()
         let url = URL(string: "https://retry.example/data")!
@@ -387,6 +418,113 @@ struct SourceNetworkPolicyTests {
         #expect(String(decoding: request.httpBody ?? Data(), as: UTF8.self).contains("speed=7"))
         #expect(request.value(forHTTPHeaderField: "X-Engine") == "legado")
         #expect(requests.count == 1)
+    }
+
+    @Test func httpTTSBindsSpeechGlobalsForScriptedEngine() async throws {
+        let endpoint = try #require(URL(string: "https://tts.example/audio"))
+        let transport = RecordingPolicyTransport(results: [.success(.init(
+            data: Data([1, 2]), statusCode: 200, headers: ["Content-Type": "audio/mpeg"], finalURL: endpoint
+        ))])
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let service = HttpTTSService(networkPolicy: .init(), transport: transport, cache: .init(directory: directory))
+        var engine = HttpTTS(id: 42, name: "脚本朗读", url: "@js:apiurl(speakText,speakSpeed);")
+        engine.jsLib = """
+            function apiurl(text, speed) {
+                return 'https://tts.example/audio?t=' + encodeURIComponent(text) + '&next=' + (speed + 1);
+            }
+            """
+        engine.loginCheckJs = """
+            if (speakText !== java.get('speakText') || speakSpeed !== 15) throw 'missing request values';
+            """
+
+        _ = try await service.audioStream(engine: engine, text: "你好 & '世界'", speechRate: 15)
+        let request = try #require(await transport.requests().first)
+        let query = try #require(request.url.flatMap { URLComponents(url: $0, resolvingAgainstBaseURL: false)?.queryItems })
+        #expect(query == [URLQueryItem(name: "t", value: "你好 & '世界'"), URLQueryItem(name: "next", value: "16")])
+    }
+
+    @Test func azureCatalogUsesSavedCredentialsAndRegionalVoices() async throws {
+        let saved = #"{"region":"eastasia","key":"test-key","voice":"zh-CN-XiaoxiaoNeural"}"#
+        let settings = try JSONDecoder().decode(AzureSpeechSettings.self, from: Data(saved.utf8))
+        #expect(settings.voice == "zh-CN-XiaoxiaoNeural")
+        let url = try #require(URL(string: "https://eastasia.tts.speech.microsoft.com/cognitiveservices/voices/list"))
+        let catalog = #"[{"ShortName":"en-GB-SoniaNeural","LocalName":"Sonia","Locale":"en-GB"},{"ShortName":"zh-TW-YunJheNeural","LocalName":"雲哲","Locale":"zh-TW"}]"#
+        let transport = RecordingPolicyTransport(results: [.success(.init(data: Data(catalog.utf8), statusCode: 200, headers: [:], finalURL: url))])
+        let voices = try await settings.availableVoices(transport: transport)
+        #expect(voices.map(\.name) == ["雲哲", "Sonia"])
+        let request = try #require(await transport.requests().first)
+        #expect(request.url == url)
+        #expect(request.value(forHTTPHeaderField: "Ocp-Apim-Subscription-Key") == "test-key")
+        let markdown = "| 东亚 | `https://eastasia.tts.speech.microsoft.com/cognitiveservices/v1` |\r\n| 测试 | `https://example.com/cognitiveservices/v1` |"
+        #expect(try AzureSpeechSettings.regionNames(in: markdown) == ["eastasia": "东亚"])
+    }
+
+    @Test func naturalSpeechPresetSendsSelectedVoiceAndKeepsPreviewsSeparate() async throws {
+        var settings = AzureSpeechSettings(region: " eastasia ", key: "test-key")
+        let endpoint = try #require(URL(string: "https://eastasia.tts.speech.microsoft.com/cognitiveservices/v1"))
+        let transport = RecordingPolicyTransport(results: [1, 2].map { byte in
+            .success(.init(data: Data([byte]), statusCode: 200, headers: ["Content-Type": "audio/mpeg"], finalURL: endpoint))
+        })
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let service = HttpTTSService(networkPolicy: .init(), transport: transport, cache: .init(directory: directory))
+        let voices = ["zh-CN-YunjianNeural", "en-US-JennyNeural"]
+        for voice in voices {
+            settings.voice = voice
+            settings.locale = String(voice.prefix(5))
+            _ = try await service.audio(engine: settings.engine(), text: "中文 & <雨> {{123}}", speechRate: 15)
+        }
+        let requests = await transport.requests()
+        #expect(requests.count == 2)
+        for (request, voice) in zip(requests, voices) {
+            #expect(request.url == endpoint)
+            #expect(request.httpMethod == "POST")
+            #expect(request.value(forHTTPHeaderField: "Ocp-Apim-Subscription-Key") == "test-key")
+            let body = String(decoding: try #require(request.httpBody), as: UTF8.self)
+            #expect(body.contains(voice))
+            #expect(body.contains("xml:lang='\(voice.prefix(5))'"))
+            #expect(body.contains("rate='+50%'"))
+            #expect(body.contains("中文 &amp; &lt;雨&gt; {{123}}"))
+        }
+        settings.region = "example.org/path?"
+        #expect(throws: RuleEngineError.self) { try settings.engine() }
+    }
+
+    @Test func bundledNextTTSRequiresAConfiguredEndpoint() async throws {
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+        let data = try Data(contentsOf: root.appendingPathComponent("App/Resources/httpTTS.json"))
+        let engines = try JSONDecoder().decode([HttpTTS].self, from: data)
+        var engine = try #require(engines.first { $0.name.contains("Next引擎") })
+        engine.id = Int64.random(in: 1...Int64.max)
+        engine.concurrentRate = nil
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let cache = HttpTTSAudioCache(directory: directory)
+        let unconfiguredTransport = RecordingPolicyTransport(results: [])
+        let service = HttpTTSService(networkPolicy: .init(), transport: unconfiguredTransport, cache: cache)
+        do {
+            _ = try await service.audioStream(engine: engine, text: "试音", speechRate: 10)
+            Issue.record("缺少接口时应提示配置")
+        } catch {
+            #expect(error.localizedDescription.contains("登录表单"))
+        }
+        #expect(await unconfiguredTransport.requests().isEmpty)
+
+        let endpoint = try #require(URL(string: "https://tts.example/tts"))
+        let info = #"{"api":"https://tts.example/tts","发言人":"云间","风格":"无风格"}"#
+        let store = BookSourceRuntimeStore.shared
+        store.put(sourceID: engine.sourceKey, key: "loginInfo", value: info)
+        defer { store.put(sourceID: engine.sourceKey, key: "loginInfo", value: "") }
+        let transport = RecordingPolicyTransport(results: [.success(.init(
+            data: Data([1]), statusCode: 200, headers: ["Content-Type": "audio/mpeg"], finalURL: endpoint
+        ))])
+        let configured = HttpTTSService(networkPolicy: .init(), transport: transport, cache: cache)
+        _ = try await configured.audioStream(engine: engine, text: "试音", speechRate: 10)
+        let request = try #require(await transport.requests().first)
+        #expect(request.url?.host == endpoint.host)
+        #expect(request.url?.query?.contains("v=zh-CN-YunjianNeural") == true)
     }
 
     @Test func httpTTSStreamsChunksAndStoresCompletedResponseInCache() async throws {

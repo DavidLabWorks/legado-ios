@@ -86,6 +86,39 @@ final class ReaderPagingGeometryTests: XCTestCase {
         XCTAssertEqual(view.contentOffset.y, pages[pages.count - 2].offset, accuracy: 0.5)
     }
 
+    func testFourRapidBackwardTurnsKeepBothPageImagesThroughTheLastAnimation() async throws {
+        try XCTSkipIf(UIAccessibility.isReduceMotionEnabled)
+        let text = String(repeating: "连续往回翻页时，左侧应一直能看到上一页的正文。\n", count: 160)
+        let reader = pagedReader(text: text, title: "连续翻页", animation: 0)
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 844))
+        let host = UIHostingController(rootView: reader)
+        window.rootViewController = host
+        window.makeKeyAndVisible()
+        defer { window.isHidden = true }
+        host.view.layoutIfNeeded()
+        let view = try XCTUnwrap(findTextView(host.view))
+        let coordinator = try XCTUnwrap(view.delegate as? ReaderTextView.Coordinator)
+        defer { coordinator.invalidate() }
+        let pages = ReaderTextPage.layout(in: view, height: view.bounds.height - 32)
+        XCTAssertGreaterThan(pages.count, 5)
+        view.setContentOffset(CGPoint(x: 0, y: pages[5].offset), animated: false)
+        for _ in 0..<4 { coordinator.turnPage(-1) }
+
+        var sawLastPreview = false
+        for _ in 0..<120 {
+            try await Task.sleep(nanoseconds: 10_000_000)
+            if abs(view.contentOffset.y - pages[2].offset) < 0.5 {
+                let hasBothImages = view.superview?.subviews.contains { overlay in
+                    overlay !== view && overlay.subviews.compactMap { ($0 as? UIImageView)?.image }.count == 2
+                } ?? false
+                sawLastPreview = sawLastPreview || hasBothImages
+            }
+            if abs(view.contentOffset.y - pages[1].offset) < 0.5 { break }
+        }
+        XCTAssertTrue(sawLastPreview)
+        XCTAssertEqual(view.contentOffset.y, pages[1].offset, accuracy: 0.5)
+    }
+
     func testCoverTurnKeepsNewChapterHeadingVisibleDuringReflow() async throws {
         let text = String(repeating: "这是一段用来测试覆盖翻页的正文。\n", count: 100)
         let first = pagedReader(text: text, title: "第一章 雨夜", animation: 0)
@@ -134,7 +167,7 @@ final class ReaderPagingGeometryTests: XCTestCase {
                              currentPage: Binding<Int> = .constant(1),
                              totalPages: Binding<Int> = .constant(1)) -> ReaderTextView {
         ReaderTextView(
-            text: text, title: title, previousTitle: nil, previousText: "", isPreviousReady: false,
+            adjacentPagePreview: { _ in nil }, text: text, title: title, previousTitle: nil, previousText: "", isPreviousReady: false,
             continuationTitle: nil, continuationText: "", isContinuationReady: false, isVolume: false,
             fontSize: 32, fontPath: "", letterSpacing: 0, lineSpacing: 8, paragraphSpacing: 12,
             paragraphIndent: "　　", paddingLeft: 18, paddingRight: 18, paddingTop: 16, paddingBottom: 16,

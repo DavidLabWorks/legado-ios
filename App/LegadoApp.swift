@@ -11,8 +11,14 @@ struct LegadoApp: App {
     @StateObject private var ruleSubscriptions: RuleSubscriptionModel
 
     init() {
+        if UserDefaults.standard.string(forKey: "systemTtsVoice") == "auto-mandarin" {
+            UserDefaults.standard.removeObject(forKey: "systemTtsVoice")
+        }
         AppDiagnostics.shared.start()
         SourceWebViewExecutorRegistry.shared.register(WKSourceWebViewExecutor())
+        SourceVerification.shared.register { source, image in
+            try await SourceVerificationPresenter.shared.request(source: source, data: image)
+        }
         let demo = ProcessInfo.processInfo.arguments.contains("-uiDemo")
         _sourceLibrary = StateObject(wrappedValue: demo
             ? SourceLibraryModel.demo(sources: DemoContent.sources)

@@ -466,6 +466,12 @@ public struct RuleEngine: Sendable {
         return evaluateSynchronously(rule, in: input, listMode: listMode, context: context)
     }
 
+    func listRuleAfterManualVerification(_ rule: String) -> String? {
+        guard let pipeline = splitJavaScriptPipeline(rule.trimmingListPrefix), pipeline.prefix.isEmpty,
+              pipeline.script.contains("java.getVerificationCode"), !pipeline.suffix.isEmpty else { return nil }
+        return rule.hasPrefix("-") ? "-" + pipeline.suffix : pipeline.suffix
+    }
+
     private func splitJavaScriptPipeline(_ rule: String) -> JavaScriptPipeline? {
         // @put values can themselves contain JS rules. They belong to the put
         // operation, not to the surrounding rule's pipeline.

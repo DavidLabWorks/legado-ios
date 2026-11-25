@@ -7,6 +7,59 @@ import LegadoCore
 struct BookLibraryRegressionTests {
     private let source = BookSource(bookSourceUrl: "https://source.test", bookSourceName: "测试源")
 
+    @Test(arguments: ["local", "https://source.test"])
+    func selectedCoverSurvivesReopeningAndStaleBookSaves(origin: String) async throws {
+        var book = Book(bookUrl: "book", name: "目标书", origin: origin)
+        book.coverUrl = "https://source.test/original.jpg"
+        let other = Book(bookUrl: "other", name: "另一本", origin: origin)
+        let repository = InMemoryBookRepository(books: [book, other])
+        let model = BookLibraryModel(repository: repository)
+        await model.load()
+        let pixel = try #require(Data(base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC"))
+        try await model.setCover(for: book, imageData: pixel)
+        let selected = try #require(model.books.first?.customCoverUrl)
+        #expect(selected.hasPrefix("data:image/png;base64,"))
+        #expect(await model.addOrUpdate(book))
+        await #expect(throws: (any Error).self) { try await model.setCover(for: book, imageData: Data()) }
+
+        let reopened = BookLibraryModel(repository: repository)
+        await reopened.load()
+        let saved = try #require(reopened.books.first)
+        #expect(saved.displayCoverURL == selected)
+        func fields(of book: Book) throws -> [String: JSONValue] {
+            try JSONDecoder().decode([String: JSONValue].self, from: JSONEncoder().encode(book))
+        }
+        var expected = try fields(of: book)
+        expected["customCoverUrl"] = .string(selected)
+        #expect(try fields(of: saved) == expected)
+        #expect(reopened.books.last == other)
+    }
+
+    @Test func webDirectoryRefreshPreservesProgressAndRejectsPreviewOnTheShelf() async throws {
+        let base = "https://101kks.com"
+        var book = Book(bookUrl: base + "/book/42734.html", name: "我在1984當祥子", origin: base)
+        book.totalChapterNum = 2
+        book.durChapterIndex = 1
+        book.durChapterTitle = "第2章"
+        book.durChapterPos = 42
+        let directory = try #require(book.browserDirectoryURL)
+        let rows = (1...3).map { ["title": "第\($0)章", "url": base + "/txt/42734/\($0).html"] }
+        let original = try book.chapters(fromBrowserRows: Array(rows.prefix(2)), at: directory)
+        let chapters = InMemoryBookChapterRepository(values: [book.bookUrl: original])
+        let model = BookLibraryModel(repository: InMemoryBookRepository(books: [book]), chapterRepository: chapters)
+        await model.load()
+
+        await #expect(throws: (any Error).self) {
+            try await model.refreshFromBrowser([rows[0]], book: book, directory: directory)
+        }
+        #expect(await chapters.load(bookURL: book.bookUrl) == original)
+        try await model.refreshFromBrowser(rows, book: book, directory: directory)
+        #expect(await chapters.load(bookURL: book.bookUrl).map(\.title) == ["第1章", "第2章", "第3章"])
+        #expect(model.books.first?.latestChapterTitle == "第3章")
+        #expect(model.books.first?.durChapterPos == 42)
+        #expect(model.books.first?.durChapterIndex == 1)
+    }
+
     private func fixture() -> (Book, [BookChapter]) {
         var book = Book(bookUrl: "https://source.test/book", name: "书", origin: source.bookSourceUrl)
         book.totalChapterNum = 2
@@ -285,6 +338,69 @@ struct BookLibraryRegressionTests {
         #expect(Set(await loader.requestedURLs) == Set([caughtUp.bookUrl, oneChapter.bookUrl, noChapters.bookUrl]))
     }
 
+    @Test(arguments: [true, false])
+    func manualDirectoryVerificationRequiresAnExplicitChallenge(challenged: Bool) async throws {
+        let base = "https://101kks.com"
+        var book = Book(bookUrl: base + "/book/42734.html", name: "测试书", origin: base)
+        let url = try #require(book.browserDirectoryURL)
+        book.tocUrl = url.absoluteString
+        var source = BookSource(bookSourceUrl: base, bookSourceName: "101")
+        var toc = TocRule()
+        toc.chapterList = "@CSS:a"
+        source.ruleToc = toc
+        let transport = ShelfDirectoryResponse(challenged: challenged)
+        let chapters = InMemoryBookChapterRepository()
+        let service = NetworkBookService(transport: transport)
+        let model = BookLibraryModel(repository: InMemoryBookRepository(books: [book]),
+                                     updateCoordinator: .init(repository: chapters, loader: service),
+                                     chapterRepository: chapters)
+        await model.load()
+        await model.checkForUpdates(sources: [source], bookURL: book.bookUrl)
+        #expect(model.booksRequiringVerification.map(\.bookUrl) == (challenged ? [book.bookUrl] : []))
+        #expect(model.updateMessage?.contains(challenged ? "网页验证" : "403") == true)
+        #expect(await chapters.load(bookURL: book.bookUrl).isEmpty)
+        model.clearUpdateMessage()
+        #expect(model.booksRequiringVerification.isEmpty)
+        if challenged {
+            try await model.refreshFromBrowser([["title": "第一章", "url": base + "/txt/42734/1.html"]], book: book, directory: url)
+            #expect(await chapters.load(bookURL: book.bookUrl).first?.title == "第一章")
+        }
+    }
+
+    @Test func manualRefreshOnlyRequestsTheSelectedBook() async throws {
+        var (selected, _) = fixture()
+        selected.canUpdate = false
+        var other = selected
+        other.bookUrl += "/other"
+        let loader = RecordingShelfChapterLoader()
+        let directory = InMemoryBookChapterRepository()
+        let model = BookLibraryModel(repository: InMemoryBookRepository(books: [selected, other]),
+                                     updateCoordinator: .init(repository: directory, loader: loader),
+                                     chapterRepository: directory)
+        await model.load()
+        await model.checkForUpdates(sources: [source], bookURL: selected.bookUrl)
+        #expect(await loader.requestedURLs == [selected.bookUrl])
+        #expect(try await directory.load(bookURL: selected.bookUrl).count == 3)
+        #expect(try await directory.load(bookURL: other.bookUrl).isEmpty)
+        #expect(model.updateMessage?.contains("新增 1 章") == true)
+    }
+
+    @Test func manualLocalRefreshReadsTheChangedFile() async throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".txt")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let firstChapter = "第一章 起点\n正文。\n"
+        try firstChapter.write(to: url, atomically: true, encoding: .utf8)
+        let directory = InMemoryBookChapterRepository()
+        let model = BookLibraryModel(repository: InMemoryBookRepository(), chapterRepository: directory)
+        try await model.addLocalFile(at: url)
+        let book = try #require(model.books.first)
+        try (firstChapter + "第二章 归途\n新正文。").write(to: url, atomically: true, encoding: .utf8)
+        await model.checkForUpdates(sources: [], bookURL: book.bookUrl)
+        #expect(try await directory.load(bookURL: book.bookUrl).last?.title.contains("归途") == true)
+        #expect(model.books.first?.totalChapterNum == 2)
+        #expect(model.updateMessage?.contains("新增 1 章") == true)
+    }
+
     @Test func groupUpdateHonorsMembershipAndCaughtUpSetting() async {
         var caughtUp = fixture().0
         caughtUp.bookUrl += "/group"
@@ -321,28 +437,77 @@ struct BookLibraryRegressionTests {
         await model.load()
         await model.checkForUpdates(sources: [source])
         #expect(model.books == [book])
-        #expect(model.updateMessage?.contains("1 本因") == true)
+        #expect(model.updateMessage?.contains("1 本未更新") == true)
         #expect(model.updateMessage?.contains("发现 0 个新章节") == true)
         #expect(model.errorMessage != nil)
     }
 
-    @Test func cancelledShelfRefreshDoesNotStartRemainingBooks() async {
+    @Test func pullRefreshCompletesWhenGestureTaskIsCancelled() async {
         let (book, chapters) = fixture()
-        var other = book
-        other.bookUrl += "/other"
         let loader = DelayedChapterLoader(chapters: chapters)
-        let model = BookLibraryModel(repository: InMemoryBookRepository(books: [book, other]),
-                                     updateCoordinator: .init(repository: InMemoryBookChapterRepository(), loader: loader),
-                                     chapterRepository: InMemoryBookChapterRepository())
+        let directory = InMemoryBookChapterRepository()
+        let model = BookLibraryModel(repository: InMemoryBookRepository(books: [book]),
+                                     updateCoordinator: .init(repository: directory, loader: loader),
+                                     chapterRepository: directory)
+        await model.load()
+        let group = BookGroup(groupId: BookGroup.idAll, groupName: "全部")
+        let gesture = Task { await model.startGroupUpdate(sources: [source], group: group).value }
+        await loader.waitForRequest()
+        gesture.cancel()
+        await loader.finish()
+        await gesture.value
+        #expect(await directory.load(bookURL: book.bookUrl) == chapters)
+        #expect(model.updateMessage?.hasPrefix("更新完成") == true)
+    }
+
+    @Test(arguments: [false, true]) func parallelRefreshTracksActiveBooksAndStopsSchedulingOnCancel(cancel: Bool) async {
+        let (book, chapters) = fixture()
+        let books = (0..<6).map { index in
+            var candidate = book
+            candidate.bookUrl += "/\(index)"
+            candidate.name = "书\(index)"
+            if index == 2 { candidate.totalChapterNum = chapters.count }
+            if index == 3 { candidate.totalChapterNum = 1 }
+            return candidate
+        }
+        let loader = DelayedChapterLoader(chapters: chapters, failingURL: books[1].bookUrl)
+        let directory = InMemoryBookChapterRepository()
+        let model = BookLibraryModel(repository: InMemoryBookRepository(books: books),
+                                     updateCoordinator: .init(repository: directory, loader: loader),
+                                     chapterRepository: directory)
         await model.load()
         let update = Task { await model.checkForUpdates(sources: [source]) }
-        await loader.waitForRequest()
-        update.cancel()
+        await loader.waitForRequest(count: 4)
+        let initial = Set(books.prefix(4).map(\.bookUrl))
+        #expect(Set(await loader.requestedURLs) == initial)
+        #expect(model.checkingBookURLs == initial)
+        if cancel {
+            update.cancel()
+        } else {
+            await loader.finishRequest(for: books[1].bookUrl)
+            await loader.waitForRequest(count: 5)
+            #expect(model.checkingBookURLs == initial.subtracting([books[1].bookUrl]).union([books[4].bookUrl]))
+        }
         await loader.finish()
         await update.value
-        #expect(model.books == [book, other])
-        #expect(model.updateMessage?.hasPrefix("更新已取消") == true)
+        #expect(model.checkingBookURLs.isEmpty)
         #expect(!model.isCheckingUpdates)
+        if cancel {
+            #expect(Set(await loader.requestedURLs) == initial)
+            #expect(model.books == books)
+            #expect(model.updateMessage?.hasPrefix("更新已取消") == true)
+        } else {
+            #expect(await loader.requestedURLs.count == books.count)
+            let additions = model.updateMessage?.components(separatedBy: "\n").filter { $0.contains("》新增") }
+            #expect(additions == ["《书0》新增 1 章", "《书3》新增 2 章", "《书4》新增 1 章", "《书5》新增 1 章"])
+            #expect(model.updateMessage?.contains("《书1》") == true)
+            #expect(model.updateMessage?.contains("服务器返回 HTTP 503") == true)
+            #expect(model.updateMessage?.contains("p-2.html") == true)
+            for book in books {
+                let stored = await directory.load(bookURL: book.bookUrl)
+                #expect(stored.count == (book.bookUrl == books[1].bookUrl ? 0 : chapters.count))
+            }
+        }
     }
 
     @Test func groupSortingSupportsEveryAndroidModeAndGlobalFallback() async {
@@ -690,16 +855,38 @@ private actor DelayedReloadGroupRepository: BookGroupRepository {
 
 private actor DelayedChapterLoader: ChapterListLoading {
     let chapters: [BookChapter]
-    private var requested = false
-    private var continuation: CheckedContinuation<Void, Never>?
-    init(chapters: [BookChapter]) { self.chapters = chapters }
+    let failingURL: String?
+    private(set) var requestedURLs: [String] = []
+    private var pending: [String: CheckedContinuation<Void, Never>] = [:]
+    private var released = false
+
+    init(chapters: [BookChapter], failingURL: String? = nil) {
+        self.chapters = chapters
+        self.failingURL = failingURL
+    }
+
     func loadChapters(book: Book, source: BookSource, maxPages: Int) async -> ChapterListReport {
-        requested = true
-        await withCheckedContinuation { continuation = $0 }
+        requestedURLs.append(book.bookUrl)
+        if !released { await withCheckedContinuation { pending[book.bookUrl] = $0 } }
+        if book.bookUrl == failingURL {
+            return .init(chapters: [], diagnostics: [.init(severity: .error, code: "toc.request",
+                message: "服务器返回 HTTP 503", rule: book.bookUrl + "/p-2.html")])
+        }
         return .init(chapters: chapters)
     }
-    func waitForRequest() async { while !requested { await Task.yield() } }
-    func finish() { continuation?.resume(); continuation = nil }
+
+    func waitForRequest(count: Int = 1) async {
+        let deadline = ContinuousClock.now + .seconds(3)
+        while requestedURLs.count < count, ContinuousClock.now < deadline { await Task.yield() }
+    }
+
+    func finishRequest(for url: String) { pending.removeValue(forKey: url)?.resume() }
+
+    func finish() {
+        released = true
+        for continuation in pending.values { continuation.resume() }
+        pending.removeAll()
+    }
 }
 
 private actor SuspendedBookRepository: BookRepository {
@@ -758,4 +945,13 @@ private actor SuspendedGroupRepository: BookGroupRepository {
     }
     func waitForSave() async { while !started { await Task.yield() } }
     func finishSave() { pending?.resume(); pending = nil }
+}
+
+private struct ShelfDirectoryResponse: HTTPTransport {
+    let challenged: Bool
+
+    func data(for request: URLRequest) async throws -> HTTPResponse {
+        .init(data: Data(), statusCode: 403, headers: challenged ? ["Cf-Mitigated": "challenge"] : [:],
+              finalURL: try #require(request.url))
+    }
 }

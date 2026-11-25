@@ -139,23 +139,15 @@ public actor HttpTTSService {
         for attempt in 0..<6 {
             try Task.checkCancellation()
             do {
-                let prepared = try urlBuilder.prepare(
-                    engine.url,
-                    context: context,
-                    defaultHeaders: try BookSourceHeaderResolver().resolve(source)
-                )
+                let prepared = try prepareRequest(engine: engine, context: context)
                 var response = try await networkPolicy.execute(
                     prepared,
                     source: source,
                     transport: transport,
                     timeout: 300
                 )
-                if try evaluateLoginCheckIfNeeded(engine: engine, source: source, response: response) {
-                    let rebuilt = try urlBuilder.prepare(
-                        engine.url,
-                        context: context,
-                        defaultHeaders: try BookSourceHeaderResolver().resolve(source)
-                    )
+                if try evaluateLoginCheckIfNeeded(engine: engine, context: context, response: response) {
+                    let rebuilt = try prepareRequest(engine: engine, context: context)
                     response = try await networkPolicy.execute(
                         rebuilt,
                         source: source,
@@ -172,12 +164,8 @@ public actor HttpTTSService {
             } catch is CancellationError {
                 throw CancellationError()
             } catch HTTPClientError.statusResponse(let response) {
-                if try evaluateLoginCheckIfNeeded(engine: engine, source: source, response: response) {
-                    let rebuilt = try urlBuilder.prepare(
-                        engine.url,
-                        context: context,
-                        defaultHeaders: try BookSourceHeaderResolver().resolve(source)
-                    )
+                if try evaluateLoginCheckIfNeeded(engine: engine, context: context, response: response) {
+                    let rebuilt = try prepareRequest(engine: engine, context: context)
                     let recovered = try await networkPolicy.execute(
                         rebuilt,
                         source: source,
@@ -224,11 +212,7 @@ public actor HttpTTSService {
             variables: ["speakText": text, "speakSpeed": String(speechRate)],
             source: source
         )
-        let prepared = try urlBuilder.prepare(
-            engine.url,
-            context: context,
-            defaultHeaders: try BookSourceHeaderResolver().resolve(source)
-        )
+        let prepared = try prepareRequest(engine: engine, context: context)
         if prepared.bodyJavaScript != nil || prepared.responseType != nil || prepared.proxy != nil || prepared.useWebView {
             let value = try await audio(engine: engine, text: text, speechRate: speechRate)
             return Self.bufferedStream(data: value.data, contentType: value.contentType, finalURL: value.finalURL)
@@ -272,6 +256,20 @@ public actor HttpTTSService {
         )
     }
 
+    private func prepareRequest(engine: HttpTTS, context: URLTemplateContext) throws -> PreparedRequest {
+        let request = try urlBuilder.prepare(
+            engine.url, context: context,
+            defaultHeaders: try BookSourceHeaderResolver().resolve(engine.bookSourceAdapter)
+        )
+        guard let scheme = request.url.scheme?.lowercased(), ["http", "https"].contains(scheme),
+              let host = request.url.host, !host.isEmpty else {
+            let hasForm = engine.loginUi?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+            let hint = hasForm ? "请打开登录表单，选择接口并点「登录」保存。" : "请检查引擎的 URL 配置。"
+            throw RuleEngineError.invalidInput(rule: engine.url, expected: "朗读接口缺少有效的 HTTP 或 HTTPS 地址。" + hint)
+        }
+        return request
+    }
+
     private static func cacheKey(engine: HttpTTS, text: String, speechRate: Int) throws -> String {
         struct CacheInput: Encodable {
             let engine: HttpTTS
@@ -309,7 +307,7 @@ public actor HttpTTSService {
             ?? URL(fileURLWithPath: "/httpTTS-cache")
     }
 
-    private func evaluateLoginCheckIfNeeded(engine: HttpTTS, source: BookSource, response: HTTPResponse) throws -> Bool {
+    private func evaluateLoginCheckIfNeeded(engine: HttpTTS, context: URLTemplateContext, response: HTTPResponse) throws -> Bool {
         guard let script = engine.loginCheckJs?.trimmingCharacters(in: .whitespacesAndNewlines),
               !script.isEmpty else { return false }
         let headers = response.headers.mapValues(JSONValue.string)
@@ -352,9 +350,9 @@ public actor HttpTTSService {
             script: wrapped,
             result: input,
             executionContext: .init(
-                variables: ["speakSpeed": "", "speakText": ""],
+                variables: context.variables,
                 baseURL: response.finalURL.absoluteString,
-                source: source
+                source: context.source
             )
         )
         if case .object(let object) = result.value,
@@ -411,5 +409,99 @@ public extension HttpTTS {
         source.loginCheckJs = loginCheckJs
         source.lastUpdateTime = lastUpdateTime
         return source
+    }
+}
+
+/// A personal Azure Speech preset. The reader builds the HTTP engine in memory
+/// so the credential never becomes part of an exported engine definition.
+struct AzureSpeechSettings: Codable {
+    struct Voice: Decodable, Identifiable {
+        let id: String
+        let name: String
+        let locale: String
+
+        enum CodingKeys: String, CodingKey {
+            case id = "ShortName", name = "LocalName", locale = "Locale"
+        }
+    }
+
+    static let selection = "azure-speech"
+    var region = ""
+    var key = ""
+    var voice = "zh-CN-YunjianNeural"
+    var locale: String?
+
+    // Microsoft publishes the public-cloud endpoints alongside their localized region names.
+    static func regionNames(in markdown: String) throws -> [String: String] {
+        let pattern = #"(?m)^\|\s*([^|\r\n]+?)\s*\|\s*`https://([a-z0-9]+)\.tts\.speech\.microsoft\.com/cognitiveservices/v1`\s*\|"#
+        let regex = try NSRegularExpression(pattern: pattern)
+        let source = markdown as NSString
+        var names: [String: String] = [:]
+        for match in regex.matches(in: markdown, range: NSRange(location: 0, length: source.length)) {
+            names[source.substring(with: match.range(at: 2))] = source.substring(with: match.range(at: 1))
+        }
+        return names
+    }
+
+    private func credentials() throws -> (region: String, key: String) {
+        let region = region.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let key = key.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard region.range(of: #"^[a-z][a-z0-9]*\z"#, options: .regularExpression) != nil else {
+            throw RuleEngineError.invalidInput(rule: "", expected: "请选择 Azure 区域。")
+        }
+        guard !key.isEmpty, !key.contains(where: \.isWhitespace) else {
+            throw RuleEngineError.invalidInput(rule: "", expected: "请输入 Azure Speech 资源的密钥。")
+        }
+        return (region, key)
+    }
+
+    func availableVoices(transport: any HTTPTransport = URLSessionHTTPTransport.shared) async throws -> [Voice] {
+        let (region, key) = try credentials()
+        let url = URL(string: "https://\(region).tts.speech.microsoft.com/cognitiveservices/voices/list")!
+        var request = URLRequest(url: url, timeoutInterval: 20)
+        request.setValue(key, forHTTPHeaderField: "Ocp-Apim-Subscription-Key")
+        let response: HTTPResponse
+        do {
+            response = try await transport.data(for: request)
+        } catch HTTPClientError.statusResponse(let response) where [401, 403].contains(response.statusCode) {
+            throw RuleEngineError.invalidInput(rule: "", expected: "请检查密钥和所选区域是否与同一个 Azure Speech 资源一致。")
+        }
+        let voices = try JSONDecoder().decode([Voice].self, from: response.data)
+        guard !voices.isEmpty else {
+            throw RuleEngineError.invalidInput(rule: "", expected: "此区域没有返回可用声音。")
+        }
+        return voices.sorted {
+            let lhs = $0.locale.hasPrefix("zh-"), rhs = $1.locale.hasPrefix("zh-")
+            if lhs != rhs { return lhs }
+            return $0.id < $1.id
+        }
+    }
+
+    func engine() throws -> HttpTTS {
+        let (region, key) = try credentials()
+        let language = locale ?? "zh-CN"
+        guard voice.range(of: #"^[A-Za-z0-9][A-Za-z0-9:._-]*\z"#, options: .regularExpression) != nil,
+              language.range(of: #"^[A-Za-z0-9-]+\z"#, options: .regularExpression) != nil else {
+            throw RuleEngineError.invalidInput(rule: "", expected: "请选择可用的声音。")
+        }
+        let endpoint = "https://\(region).tts.speech.microsoft.com/cognitiveservices/v1"
+        var engine = HttpTTS(id: -187501, name: "微软自然语音", url: endpoint + #",{"method":"POST","body":{{JSON.stringify(speechBody())}}}"#)
+        engine.jsLib = """
+            function speechBody() {
+                var text = java.get('speakText').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/searchKey/g, 'search&#75;ey');
+                var rate = (Number(java.get('speakSpeed')) - 10) * 10;
+                return "<speak version='1.0' xmlns='http://www.w3.org/2001/10/synthesis' xml:lang='\(language)'><voice name='\(voice)'><prosody rate='" + (rate >= 0 ? '+' : '') + rate + "%'>" + text + "</prosody></voice></speak>";
+            }
+            """
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = .sortedKeys
+        engine.header = String(decoding: try encoder.encode([
+            "Ocp-Apim-Subscription-Key": key,
+            "Content-Type": "application/ssml+xml",
+            "X-Microsoft-OutputFormat": "audio-24khz-48kbitrate-mono-mp3",
+            "User-Agent": "Legado-iOS"
+        ]), as: UTF8.self)
+        engine.contentType = "audio/.*"
+        return engine
     }
 }

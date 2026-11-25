@@ -2,7 +2,32 @@ import Foundation
 import Testing
 @testable import LegadoCore
 
+private struct TimedOutShelfTransport: HTTPTransport {
+    func data(for request: URLRequest) async throws -> HTTPResponse {
+        throw URLError(.timedOut)
+    }
+}
+
 struct BookUpdateCoordinatorTests {
+    @Test(arguments: [false, true]) func timedOutShelfRequestReportsReasonAndKeepsDirectory(hasTOC: Bool) async {
+        let base = "https://shelf-timeout.test"
+        var source = BookSource(bookSourceUrl: base, bookSourceName: "书源")
+        source.ruleBookInfo = .init()
+        var toc = TocRule()
+        toc.chapterList = "//a"
+        source.ruleToc = toc
+        var book = Book(bookUrl: base + "/book", name: "书", origin: base)
+        book.tocUrl = hasTOC ? base + "/toc" : ""
+        let stored = [BookChapter(url: base + "/1", title: "第一章", bookUrl: book.bookUrl, index: 0)]
+        let repository = InMemoryBookChapterRepository(values: [book.bookUrl: stored])
+        let coordinator = BookUpdateCoordinator(repository: repository, loader: NetworkBookService(transport: TimedOutShelfTransport()))
+
+        let report = await coordinator.refresh(book: book, source: source)
+        #expect(!report.refreshed)
+        #expect(report.diagnostics.first?.message.contains("请求超时") == true)
+        #expect(await repository.load(bookURL: book.bookUrl) == stored)
+    }
+
     @Test func failedDirectorySaveKeepsPersistedProgressAndReportsFailure() async throws {
         let old = [BookChapter(url: "1", title: "第一章", bookUrl: "book", index: 0)]
         let incoming = old + [BookChapter(url: "2", title: "第二章", bookUrl: "book", index: 1)]

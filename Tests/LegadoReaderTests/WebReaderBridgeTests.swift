@@ -35,6 +35,16 @@ final class WebReaderBridgeTests: XCTestCase {
         XCTAssertEqual(response.decodedText, "data:text/plain,resource-match")
     }
 
+    func testSlowDirectoryCanFinishWithinTheWebViewRequestTimeout() async throws {
+        let source = BookSource(bookSourceUrl: "https://web-content.test", bookSourceName: "网页目录")
+        let prepared = try webPrepared(script: """
+            window.polls = (window.polls || 0) + 1;
+            window.polls < 33 ? null : '完整目录'
+            """)
+        let response = try await WKSourceWebViewExecutor().execute(prepared, source: source, timeout: 60)
+        XCTAssertEqual(response.decodedText, "完整目录")
+    }
+
     func testBackgroundWebViewLoadsPOSTResponseHTMLAndReportsMissingResource() async throws {
         let source = BookSource(bookSourceUrl: "https://web-content.test", bookSourceName: "资源网页")
         var prepared = try webPrepared(script: "document.querySelector('p').textContent")

@@ -17,7 +17,7 @@ public enum LegadoDatabaseError: Error, LocalizedError, Sendable {
 }
 
 public actor LegadoDatabase {
-    public static let schemaVersion: Int32 = 7
+    public static let schemaVersion: Int32 = 8
 
     // SQLite is opened with FULLMUTEX and every operational access remains
     // actor-isolated. `nonisolated(unsafe)` only permits closing the handle
@@ -442,8 +442,7 @@ public actor LegadoDatabase {
             let statement = try prepare("""
                 INSERT INTO searchBooks(book_url, origin, name, author, time, payload)
                 VALUES(?, ?, ?, ?, ?, ?)
-                ON CONFLICT(book_url) DO UPDATE SET
-                    origin = excluded.origin,
+                ON CONFLICT(origin, book_url) DO UPDATE SET
                     name = excluded.name,
                     author = excluded.author,
                     time = excluded.time,
@@ -1100,6 +1099,33 @@ public actor LegadoDatabase {
                 if version > 0, try scalarInt32(database, "SELECT COUNT(*) FROM chapters") > 0 {
                     try execute(database, "INSERT INTO legacy_imports(key) VALUES('chapters')")
                 }
+                try execute(database, "COMMIT")
+            } catch {
+                try? execute(database, "ROLLBACK")
+                throw error
+            }
+        }
+        if version < 8 {
+            try execute(database, "BEGIN IMMEDIATE")
+            do {
+                try execute(database, """
+                    ALTER TABLE searchBooks RENAME TO searchBooks_old;
+                    CREATE TABLE searchBooks(
+                        book_url TEXT NOT NULL,
+                        origin TEXT NOT NULL REFERENCES book_sources(book_source_url) ON DELETE CASCADE,
+                        payload BLOB NOT NULL,
+                        name TEXT NOT NULL DEFAULT '',
+                        author TEXT NOT NULL DEFAULT '',
+                        time INTEGER NOT NULL DEFAULT 0,
+                        PRIMARY KEY(origin, book_url)
+                    );
+                    INSERT INTO searchBooks(book_url, origin, payload, name, author, time)
+                        SELECT book_url, origin, payload, name, author, time FROM searchBooks_old;
+                    DROP TABLE searchBooks_old;
+                    CREATE INDEX searchBooks_name_author ON searchBooks(name, author);
+                    CREATE INDEX searchBooks_time ON searchBooks(time);
+                    PRAGMA user_version = 8;
+                    """)
                 try execute(database, "COMMIT")
             } catch {
                 try? execute(database, "ROLLBACK")

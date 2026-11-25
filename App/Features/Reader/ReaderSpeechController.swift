@@ -123,6 +123,11 @@ final class ReaderSpeechController: NSObject, ObservableObject, @preconcurrency 
     private var httpSegments: [String] = []
     private var httpSegmentIndex = 0
     private var httpEngine: HttpTTS?
+    private var offlineVoice: OfflineVoice?
+    private var offlineParagraphIndices: [Int] = []
+    private var offlinePrefetch: (index: Int, audio: Task<Data, Error>)?
+
+    private var usesAudioSegments: Bool { httpEngine != nil || offlineVoice != nil }
     private var systemSegments: [String] = []
     private var systemSegmentIndex = 0
     private var segmentIndexOffset = 0
@@ -187,6 +192,10 @@ final class ReaderSpeechController: NSObject, ObservableObject, @preconcurrency 
         httpSegments = []
         httpSegmentIndex = 0
         httpEngine = nil
+        offlinePrefetch?.audio.cancel()
+        offlinePrefetch = nil
+        offlineVoice = nil
+        offlineParagraphIndices.removeAll()
         systemSegments = []
         systemSegmentIndex = 0
         segmentIndexOffset = 0
@@ -226,7 +235,7 @@ final class ReaderSpeechController: NSObject, ObservableObject, @preconcurrency 
         self.author = author
     }
 
-    func speak(_ text: String, continuesAcrossChapters: Bool = false, segmentIndexOffset: Int = 0) {
+    func speak(_ text: String, continuesAcrossChapters: Bool = false, segmentIndexOffset: Int = 0, voice: OfflineVoice? = nil) {
         stop()
         errorMessage = nil
         activateAudioSession()
@@ -235,6 +244,19 @@ final class ReaderSpeechController: NSObject, ObservableObject, @preconcurrency 
             synthesizer.stopSpeaking(at: .immediate)
         }
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        if let voice {
+            offlineVoice = voice
+            for (index, paragraph) in segments(for: text).enumerated() {
+                let phrases = OfflineSpeech.phrases(in: paragraph)
+                httpSegments.append(contentsOf: phrases)
+                offlineParagraphIndices.append(contentsOf: repeatElement(index, count: phrases.count))
+            }
+            guard !httpSegments.isEmpty else { finishNaturally(); return }
+            self.segmentIndexOffset = max(segmentIndexOffset, 0)
+            isSpeaking = true
+            playCurrentAudioSegment()
+            return
+        }
         systemSegments = segments(for: text)
         guard !systemSegments.isEmpty else { return }
         systemSegmentIndex = 0
@@ -258,7 +280,7 @@ final class ReaderSpeechController: NSObject, ObservableObject, @preconcurrency 
         httpSegmentIndex = 0
         self.segmentIndexOffset = max(segmentIndexOffset, 0)
         isSpeaking = true
-        playCurrentHTTPSegment()
+        playCurrentAudioSegment()
         prefetchHTTP(engine: engine, texts: Array(httpSegments.dropFirst()))
     }
 
@@ -287,7 +309,7 @@ final class ReaderSpeechController: NSObject, ObservableObject, @preconcurrency 
         } else if isPaused, httpEngine != nil {
             isPaused = false
             isSpeaking = true
-            playCurrentHTTPSegment()
+            playCurrentAudioSegment()
         } else {
             speakHTTP(engine: engine, text: text, continuesAcrossChapters: continuesAcrossChapters)
         }
@@ -337,9 +359,9 @@ final class ReaderSpeechController: NSObject, ObservableObject, @preconcurrency 
         } else if let synthesizer, synthesizer.isPaused {
             synthesizer.continueSpeaking()
             isSpeaking = true
-        } else if httpEngine != nil, httpSegments.indices.contains(httpSegmentIndex) {
+        } else if usesAudioSegments, httpSegments.indices.contains(httpSegmentIndex) {
             isSpeaking = true
-            playCurrentHTTPSegment()
+            playCurrentAudioSegment()
         } else {
             return
         }
@@ -463,10 +485,10 @@ final class ReaderSpeechController: NSObject, ObservableObject, @preconcurrency 
     private func skipForward(usesChapterPreference: Bool) {
         if usesChapterPreference && mediaButtonPerNext {
             onNextChapter?()
-        } else if httpEngine != nil, httpSegmentIndex + 1 < httpSegments.count {
+        } else if usesAudioSegments, httpSegmentIndex + 1 < httpSegments.count {
             stopCurrentHTTPPlayback()
             httpSegmentIndex += 1
-            playCurrentHTTPSegment()
+            playCurrentAudioSegment()
         } else if !systemSegments.isEmpty, systemSegmentIndex + 1 < systemSegments.count {
             changeSystemSegment(to: systemSegmentIndex + 1)
         } else {
@@ -477,10 +499,10 @@ final class ReaderSpeechController: NSObject, ObservableObject, @preconcurrency 
     private func skipBackward(usesChapterPreference: Bool) {
         if usesChapterPreference && mediaButtonPerNext {
             onPreviousChapter?()
-        } else if httpEngine != nil, httpSegmentIndex > 0 {
+        } else if usesAudioSegments, httpSegmentIndex > 0 {
             stopCurrentHTTPPlayback()
             httpSegmentIndex -= 1
-            playCurrentHTTPSegment()
+            playCurrentAudioSegment()
         } else if !systemSegments.isEmpty, systemSegmentIndex > 0 {
             changeSystemSegment(to: systemSegmentIndex - 1)
         } else {
@@ -489,6 +511,8 @@ final class ReaderSpeechController: NSObject, ObservableObject, @preconcurrency 
     }
 
     private func stopCurrentHTTPPlayback() {
+        offlinePrefetch?.audio.cancel()
+        offlinePrefetch = nil
         audioPlayer?.stop()
         audioPlayer = nil
         streamPlayer?.pause()
@@ -524,19 +548,37 @@ final class ReaderSpeechController: NSObject, ObservableObject, @preconcurrency 
         ]
     }
 
-    private func playCurrentHTTPSegment() {
-        guard let engine = httpEngine, httpSegments.indices.contains(httpSegmentIndex) else {
+    private func playCurrentAudioSegment() {
+        guard usesAudioSegments, httpSegments.indices.contains(httpSegmentIndex) else {
             stop()
             return
         }
         let text = httpSegments[httpSegmentIndex]
-        currentSegmentIndex = segmentIndexOffset + httpSegmentIndex
+        currentSegmentIndex = segmentIndexOffset + (offlineVoice == nil ? httpSegmentIndex : offlineParagraphIndices[httpSegmentIndex])
         let rate = speechRate + 5
         httpTask?.cancel()
         httpTask = Task { [weak self] in
             guard let self else { return }
             do {
-                if streamsHTTPAudio {
+                if let voice = offlineVoice {
+                    let data: Data
+                    if let prefetched = offlinePrefetch, prefetched.index == httpSegmentIndex {
+                        data = try await prefetched.audio.value
+                    } else {
+                        data = try await OfflineSpeech.shared.audio(text: text, voice: voice)
+                    }
+                    try Task.checkCancellation()
+                    try playBufferedHTTPAudio(data)
+                    let next = httpSegmentIndex + 1
+                    if httpSegments.indices.contains(next) {
+                        let nextText = httpSegments[next]
+                        offlinePrefetch = (next, Task {
+                            try await OfflineSpeech.shared.audio(text: nextText, voice: voice)
+                        })
+                    } else {
+                        offlinePrefetch = nil
+                    }
+                } else if let engine = httpEngine, streamsHTTPAudio {
                     let stream = try await httpService.audioStream(engine: engine, text: text, speechRate: rate)
                     try Task.checkCancellation()
                     if stream.isIncremental, stream.expectedContentLength ?? 0 > 0 {
@@ -547,7 +589,7 @@ final class ReaderSpeechController: NSObject, ObservableObject, @preconcurrency 
                         try Task.checkCancellation()
                         try playBufferedHTTPAudio(data)
                     }
-                } else {
+                } else if let engine = httpEngine {
                     let audio = try await httpService.audio(engine: engine, text: text, speechRate: rate)
                     try Task.checkCancellation()
                     try playBufferedHTTPAudio(audio.data)
@@ -558,6 +600,7 @@ final class ReaderSpeechController: NSObject, ObservableObject, @preconcurrency 
             } catch is CancellationError {
                 return
             } catch {
+                guard !Task.isCancelled else { return }
                 errorMessage = error.localizedDescription
                 stop()
             }
@@ -566,6 +609,10 @@ final class ReaderSpeechController: NSObject, ObservableObject, @preconcurrency 
 
     private func playBufferedHTTPAudio(_ data: Data) throws {
         let player = try AVAudioPlayer(data: data)
+        if offlineVoice != nil && !followsSystemRate {
+            player.enableRate = true
+            player.rate = min(2, max(0.5, Float(speechRate + 5) / 10))
+        }
         player.delegate = self
         player.prepareToPlay()
         audioPlayer = player
@@ -595,7 +642,7 @@ final class ReaderSpeechController: NSObject, ObservableObject, @preconcurrency 
     private func incrementalPlayerDidFinish() {
         stopCurrentHTTPPlayback()
         httpSegmentIndex += 1
-        if httpSegmentIndex < httpSegments.count { playCurrentHTTPSegment() }
+        if httpSegmentIndex < httpSegments.count { playCurrentAudioSegment() }
         else { finishNaturally() }
     }
 
@@ -613,15 +660,16 @@ final class ReaderSpeechController: NSObject, ObservableObject, @preconcurrency 
     }
 
     func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
+        guard player === audioPlayer else { return }
         audioPlayer = nil
         guard flag else {
-            errorMessage = "HTTP TTS 音频播放失败"
+            errorMessage = "朗读音频播放失败"
             stop()
             return
         }
         httpSegmentIndex += 1
         if httpSegmentIndex < httpSegments.count {
-            playCurrentHTTPSegment()
+            playCurrentAudioSegment()
         } else {
             finishNaturally()
         }

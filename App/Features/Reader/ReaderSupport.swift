@@ -57,7 +57,7 @@ struct ReaderChapterCommentsView: View {
         .readingPresentationDragIndicator()
         .sheet(isPresented: $showsSourcePage) {
             if case .page(let url) = state {
-                ReaderCommentsBrowser(url: url, close: { showsSourcePage = false })
+                InAppWebBrowser(url: url, close: { showsSourcePage = false })
                     .ignoresSafeArea()
             }
         }
@@ -165,7 +165,7 @@ struct ReaderChapterCommentsView: View {
     }
 }
 
-private struct ReaderCommentsBrowser: UIViewControllerRepresentable {
+struct InAppWebBrowser: UIViewControllerRepresentable {
     let url: URL
     let close: () -> Void
 
@@ -186,62 +186,25 @@ private struct ReaderCommentsBrowser: UIViewControllerRepresentable {
     }
 }
 
-struct ReaderInteractivePopEnabler: UIViewControllerRepresentable {
-    func makeUIViewController(context: Context) -> Controller {
-        Controller()
+struct ReaderMenuBackGesture: ViewModifier {
+    let menuVisible: Bool
+    let goBack: () -> Void
+
+    static func shouldGoBack(startX: CGFloat, displacement: CGSize) -> Bool {
+        startX >= 0 && startX <= 28 && displacement.width >= 56
+            && displacement.width > abs(displacement.height) * 1.5
     }
 
-    func updateUIViewController(_ uiViewController: Controller, context: Context) {
-        uiViewController.enableInteractivePopIfAvailable()
-    }
-
-    static func dismantleUIViewController(_ uiViewController: Controller, coordinator: Void) {
-        uiViewController.restoreInteractivePopDelegate()
-    }
-
-    final class Controller: UIViewController {
-        private weak var popGesture: UIGestureRecognizer?
-        private var previousDelegate: (any UIGestureRecognizerDelegate)?
-        private var releasedDelegate = false
-
-        override func viewDidAppear(_ animated: Bool) {
-            super.viewDidAppear(animated)
-            enableInteractivePopIfAvailable()
-        }
-
-        func enableInteractivePopIfAvailable() {
-            guard let navigationController,
-                  navigationController.viewControllers.count > 1,
-                  let gesture = navigationController.interactivePopGestureRecognizer else { return }
-            if gesture.delegate != nil {
-                previousDelegate = gesture.delegate
-                gesture.delegate = nil
-                releasedDelegate = true
-            }
-            gesture.isEnabled = true
-            popGesture = gesture
-        }
-
-        func restoreInteractivePopDelegate() {
-            guard releasedDelegate, let popGesture, popGesture.delegate == nil else { return }
-            popGesture.delegate = previousDelegate
-            previousDelegate = nil
-            releasedDelegate = false
-        }
-
-    }
-}
-
-struct ReaderMenuDismissShape: Shape {
-    var leadingExclusion: CGFloat = 24
-
-    func path(in rect: CGRect) -> Path {
-        Path(CGRect(
-            x: min(max(leadingExclusion, 0), rect.width),
-            y: 0,
-            width: max(rect.width - leadingExclusion, 0),
-            height: rect.height
-        ))
+    func body(content: Content) -> some View {
+        content.simultaneousGesture(
+            DragGesture(minimumDistance: 12, coordinateSpace: .global)
+                .onEnded { value in
+                    if menuVisible, Self.shouldGoBack(startX: value.startLocation.x, displacement: value.translation) {
+                        goBack()
+                    }
+                },
+            including: menuVisible ? .all : .subviews
+        )
     }
 }
 
@@ -274,6 +237,7 @@ struct ReaderMenuDismissShape: Shape {
 
 struct ReaderChapterSlider: View {
     let directory: ReaderChapterDirectory
+    let simplifiedChinese: Bool
     let currentNumber: Int
     let progress: Double
     let onSelect: (Int) -> Void
@@ -285,7 +249,7 @@ struct ReaderChapterSlider: View {
         VStack(alignment: .leading, spacing: 2) {
             HStack(spacing: 6) {
                 if let previewNumber, directory.readableIndices.indices.contains(previewNumber - 1) {
-                    Text(directory.rows[directory.readableIndices[previewNumber - 1]].title)
+                    Text(directory.rows[directory.readableIndices[previewNumber - 1]].title.readerText(simplified: simplifiedChinese))
                         .foregroundStyle(.primary)
                     Spacer(minLength: 0)
                     Text("\(previewNumber)/\(count)")
@@ -331,14 +295,76 @@ struct ReaderChapterSlider: View {
     }
 }
 
+// A details sheet opened by a reader sends chapter selections back to that session.
+typealias ResumeBookReading = @MainActor (Book, [BookChapter], BookSource?, Int?) -> Void
+
+private struct ResumeBookReadingKey: EnvironmentKey {
+    static let defaultValue: ResumeBookReading? = nil
+}
+
+extension EnvironmentValues {
+    var resumeBookReading: ResumeBookReading? {
+        get { self[ResumeBookReadingKey.self] }
+        set { self[ResumeBookReadingKey.self] = newValue }
+    }
+}
+
+struct BookChapterLink<Label: View>: View {
+    let book: Book
+    let chapters: [BookChapter]
+    var source: BookSource?
+    let index: Int
+    @ViewBuilder let label: () -> Label
+    @Environment(\.resumeBookReading) private var resume
+
+    var body: some View {
+        if let resume {
+            Button { resume(book, chapters, source, index) } label: { label().contentShape(Rectangle()) }
+        } else {
+            NavigationLink {
+                if let source {
+                    ReaderView(book: book, chapters: chapters, initialIndex: index, source: source)
+                } else {
+                    ReaderView(book: book, chapters: chapters, initialIndex: index)
+                }
+            } label: { label() }
+        }
+    }
+}
+
+struct ReaderBookInfoSheet: View {
+    let book: Book
+    let source: BookSource?
+    let chapters: [BookChapter]
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        ReadingNavigationStack {
+            Group {
+                if let source {
+                    BookDetailView(book: book, source: source, chapters: chapters)
+                } else {
+                    LocalBookDetailView(book: book)
+                }
+            }
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("关闭") { dismiss() } }
+            }
+        }
+    }
+}
+
 struct ReaderTableOfContents: View {
     let directory: ReaderChapterDirectory
+    let simplifiedChinese: Bool
     let currentIndex: Int
     let bookTitle: String
     let bookURL: String
     let sourceID: String?
     let cache: ChapterContentCache
     @Binding var descending: Bool
+    let onCache: () -> Void
+    @ObservedObject private var batchCache = ChapterBatchCache.shared
     let onSelect: (Int) -> Void
     @Environment(\.dismiss) private var dismiss
     @State private var search = ""
@@ -346,7 +372,7 @@ struct ReaderTableOfContents: View {
     var body: some View {
         ReadingNavigationStack {
             ScrollViewReader { proxy in
-                let rows = directory.rows(matching: search, descending: descending)
+                let rows = directory.rows(matching: search, descending: descending, simplified: simplifiedChinese)
                 List {
                     Section {
                         ForEach(rows) { row in
@@ -362,14 +388,30 @@ struct ReaderTableOfContents: View {
                     }
                 }
                 .listStyle(.plain)
+                .safeAreaInset(edge: .top, spacing: 0) {
+                    if sourceID != nil, let progress = batchCache.progress[bookURL] {
+                        HStack {
+                            Text(progress.title)
+                            Text("\(progress.processed)/\(progress.total)").monospacedDigit()
+                            Spacer()
+                            if progress.isActive {
+                                Button("停止缓存") { batchCache.cancel(bookURL: bookURL) }
+                            }
+                        }
+                        .font(.footnote)
+                        .padding(.horizontal)
+                        .padding(.vertical, 8)
+                        .background(.bar)
+                    }
+                }
                 .overlay {
                     if rows.isEmpty && !search.isEmpty { ReadingUnavailableView.search(text: search) }
                 }
                 .onAppear {
-                    DispatchQueue.main.async { proxy.scrollTo(currentIndex, anchor: .center) }
+                    if !descending { DispatchQueue.main.async { proxy.scrollTo(currentIndex, anchor: .center) } }
                 }
                 .onChange(of: descending) { _ in
-                    if rows.contains(where: { $0.id == currentIndex }) { proxy.scrollTo(currentIndex, anchor: .center) }
+                    if let first = rows.first { proxy.scrollTo(first.id, anchor: .top) }
                 }
                 .onChange(of: search) { query in
                     if query.isEmpty { proxy.scrollTo(currentIndex, anchor: .center) }
@@ -377,6 +419,12 @@ struct ReaderTableOfContents: View {
                 .toolbar {
                     ToolbarItem(placement: .cancellationAction) { Button("关闭") { dismiss() } }
                     ToolbarItemGroup(placement: .topBarTrailing) {
+                        if sourceID != nil {
+                            Button(action: onCache) { Image(systemName: "arrow.down.circle") }
+                                .disabled(directory.readableIndices.isEmpty || batchCache.progress[bookURL]?.isActive == true)
+                                .accessibilityLabel("缓存全书章节")
+                                .accessibilityIdentifier("reader.toc.cache")
+                        }
                         Button {
                             if search.isEmpty { proxy.scrollTo(currentIndex, anchor: .center) }
                             else { search = "" }
@@ -402,7 +450,7 @@ struct ReaderTableOfContents: View {
                         .foregroundStyle(current ? ReadingTheme.accent : .secondary)
                         .frame(minWidth: 28, alignment: .trailing)
                     VStack(alignment: .leading, spacing: 4) {
-                        Text(row.title).lineLimit(2)
+                        Text(row.title.readerText(simplified: simplifiedChinese)).lineLimit(2)
                         if current {
                             Text("正在阅读")
                                 .font(.caption)
@@ -422,7 +470,7 @@ struct ReaderTableOfContents: View {
             .accessibilityIdentifier("reader.toc.\(row.id)")
             .listRowBackground(current ? ReadingTheme.accent.opacity(0.08) : Color.clear)
         } else {
-            Label(row.title, systemImage: "books.vertical")
+            Label(row.title.readerText(simplified: simplifiedChinese), systemImage: "books.vertical")
                 .font(.headline)
                 .foregroundStyle(.secondary)
                 .padding(.vertical, 4)
@@ -460,32 +508,33 @@ struct ChapterAvailabilityIcon: View {
 
 struct ReaderChapterLoadingOverlay: View {
     let title: String
-    let foreground: Color
-    let background: Color
     @State private var showsIndicator = false
 
     var body: some View {
         ZStack {
             if showsIndicator {
-                HStack(spacing: 12) {
-                    ProgressView().tint(foreground)
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text("正在打开本章").font(.subheadline.weight(.semibold))
-                        Text(title).font(.caption).lineLimit(1)
+                HStack(spacing: 14) {
+                    ProgressView()
+                        .tint(.white)
+                        .accessibilityHidden(true)
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text("正在打开本章").font(.headline)
+                        Text(title)
+                            .font(.subheadline)
+                            .foregroundStyle(.white.opacity(0.85))
+                            .lineLimit(2)
                     }
                 }
-                .foregroundStyle(foreground)
-                .padding(.horizontal, 18)
-                .padding(.vertical, 13)
+                .foregroundStyle(.white)
+                .padding(.horizontal, 20)
+                .padding(.vertical, 16)
                 .background {
                     RoundedRectangle(cornerRadius: 16, style: .continuous)
-                        .fill(background.opacity(0.82))
-                        .shadow(color: .black.opacity(0.16), radius: 8, y: 3)
+                        .fill(Color(white: 0.14))
+                        .shadow(color: .black.opacity(0.2), radius: 10, y: 3)
                 }
-                .overlay {
-                    RoundedRectangle(cornerRadius: 16, style: .continuous)
-                        .strokeBorder(foreground.opacity(0.14))
-                }
+                .frame(maxWidth: 320)
+                .padding(.horizontal, 24)
                 .accessibilityElement(children: .combine)
                 .accessibilityIdentifier("reader.chapterLoading")
             }

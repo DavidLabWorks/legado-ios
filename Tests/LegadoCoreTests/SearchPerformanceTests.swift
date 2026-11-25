@@ -84,15 +84,18 @@ struct SearchPerformanceTests {
         #expect(await transport.requests().last?.timeoutInterval == 30)
     }
 
-    @Test func incrementalMergeKeepsRelevanceOriginsAndCanReplaceCachedMetadata() {
+    @Test func incrementalResultsRefreshOnlyTheMatchingSourcesCachedMetadata() {
         var accumulator = BookSearchAccumulator()
         let cached = SearchBook(bookURL: "old", origin: "a", originName: "A", type: 0, name: "书", author: "作者")
         let fresh = SearchBook(bookURL: "fresh", origin: "b", originName: "B", type: 0, name: "书", author: "作者")
         accumulator.add([.init(bookURL: "other", origin: "a", originName: "A", type: 0, name: "其他"), cached])
         accumulator.add([fresh], replacingExisting: true)
+        var updated = cached
+        updated.bookURL = "updated"
+        accumulator.add([updated], replacingExisting: true)
         let results = accumulator.results(keyword: "书")
-        #expect(results.map(\.bookURL) == ["fresh", "other"])
-        #expect(results[0].origins == ["a", "b"])
+        #expect(results.map(\.bookURL) == ["updated", "fresh", "other"])
+        #expect(results.prefix(2).map(\.origin) == ["a", "b"])
     }
 
     @Test func cacheQueryUsesLiteralKeywordAndDoesNotRequireDecodingSourceCatalog() async throws {

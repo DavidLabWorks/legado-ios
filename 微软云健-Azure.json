@@ -1,0 +1,22 @@
+[
+  {
+    "id": 1865400194301,
+    "name": "微软云健（Azure）",
+    "url": "https://{{speechRegion()}}.tts.speech.microsoft.com/cognitiveservices/v1,{\"method\":\"POST\",\"body\":{{JSON.stringify(speechBody())}}}",
+    "header": "@js:var key = String(source.getLoginInfoMap().get('Key') || '').trim();\nif (!key) throw new Error('请在登录表单填写 Azure Speech 密钥');\nJSON.stringify({'Ocp-Apim-Subscription-Key': key, 'Content-Type': 'application/ssml+xml', 'X-Microsoft-OutputFormat': 'audio-24khz-48kbitrate-mono-mp3', 'User-Agent': 'Legado-iOS'});",
+    "jsLib": "function speechRegion() {\n    var region = String(source.getLoginInfoMap().get('Region') || '').trim().toLowerCase();\n    if (!/^[a-z][a-z0-9]*$/.test(region)) throw new Error('请填写 Azure 区域标识，例如 eastasia');\n    return region;\n}\nfunction speechBody() {\n    var text = java.get('speakText').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/searchKey/g, 'search&#75;ey');\n    var percent = (Number(java.get('speakSpeed')) - 10) * 10;\n    var rate = (percent >= 0 ? '+' : '') + percent + '%';\n    return \"<speak version='1.0' xmlns='http://www.w3.org/2001/10/synthesis' xml:lang='zh-CN'><voice name='zh-CN-YunjianNeural'><prosody rate='\" + rate + \"'>\" + text + \"</prosody></voice></speak>\";\n}",
+    "loginUi": [
+      {
+        "name": "Region",
+        "viewName": "'Azure 区域（例如 eastasia）'",
+        "type": "text"
+      },
+      {
+        "name": "Key",
+        "viewName": "'Azure Speech 密钥'",
+        "type": "password"
+      }
+    ],
+    "contentType": "audio/.*"
+  }
+]

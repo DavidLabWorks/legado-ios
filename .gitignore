@@ -27,3 +27,6 @@ __pycache__/
 *.jks
 *.apk
 *.aab
+
+# Restored with Vendor/QwenSpeech/fetch-models.sh before an iOS build.
+Vendor/QwenSpeech/Models/*.gguf

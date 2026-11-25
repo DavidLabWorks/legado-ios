@@ -106,7 +106,7 @@ struct ReaderScrollView: UIViewRepresentable {
                 lastPageKey = ""
             }
             let anchor = reset ? nil : captureAnchor()
-            let newStyleKey = config.scrollTypographyKey + "|\(view.bounds.width)"
+            let newStyleKey = config.scrollTypographyKey + "|\(config.simplifiedChinese)|\(view.bounds.width)"
             let styleChanged = styleKey != newStyleKey
             let contentChanged = styleChanged || viewportHeight != view.bounds.height || parent.chapters.count != chapterLayouts.count
                 || parent.chapters.contains { chapterLayouts[$0.id]?.chapter != $0 }
@@ -483,11 +483,11 @@ final class ReaderScrollChapterLayout {
         container.lineFragmentPadding = 0
         let attributed = NSMutableAttributedString(string: "")
         if configuration.titleMode != 2, !chapter.title.isEmpty {
-            attributed.append(NSAttributedString(string: chapter.title + "\n", attributes: typography.headingAttributes))
+            attributed.append(NSAttributedString(string: chapter.title.readerText(simplified: configuration.simplifiedChinese) + "\n", attributes: typography.headingAttributes))
         }
         bodyStart = attributed.length
         let body = chapter.error.map { "本章加载失败\n\n\($0)\n\n轻点打开阅读菜单。\n" } ?? (chapter.content.isEmpty ? "本章暂无正文\n" : chapter.content)
-        attributed.append(NSAttributedString(string: body, attributes: typography.bodyAttributes))
+        attributed.append(NSAttributedString(string: body.readerText(simplified: configuration.simplifiedChinese), attributes: typography.bodyAttributes))
         storage = NSTextStorage(attributedString: attributed)
         storage.addLayoutManager(manager)
         manager.addTextContainer(container)
@@ -602,8 +602,7 @@ struct ReaderTypography {
         }
         let weight: UIFont.Weight = switch c.fontWeight { case 1: .bold; case 2: .light; default: .regular }
         let font = ReaderFontStore.font(at: c.fontPath, size: CGFloat(c.fontSize), weight: c.fontWeight)
-            ?? (c.fontWeight == 0 ? (UIFont(name: "STSongti-SC-Regular", size: CGFloat(c.fontSize))
-                ?? UIFont.systemFont(ofSize: CGFloat(c.fontSize))) : UIFont.systemFont(ofSize: CGFloat(c.fontSize), weight: weight))
+            ?? UIFont.systemFont(ofSize: CGFloat(c.fontSize), weight: weight)
         let paragraph = NSMutableParagraphStyle()
         paragraph.lineSpacing = CGFloat(c.lineSpacing)
         paragraph.paragraphSpacing = CGFloat(c.paragraphSpacing)
