@@ -1,0 +1,15 @@
+[
+  {
+    "sourceUrl": "https://www.t66ymirror.com/",
+    "sourceName": "草榴社區存檔",
+    "sourceIcon": "https://www.t66ymirror.com/wp-content/uploads/2024/07/cropped-a-192x192.jpg",
+    "sortUrl": "首页::https://www.t66ymirror.com/",
+    "searchUrl": "https://www.t66ymirror.com/?s={{key}}",
+    "articleStyle": 3,
+    "ruleArticles": "@css:#posts > .post.grid",
+    "ruleTitle": "@css:.con h3 a[rel~=bookmark]@text",
+    "ruleLink": "@css:.con h3 a[rel~=bookmark]@href",
+    "ruleImage": "@css:.img img.thumb@data-src||@css:.img img.thumb@src",
+    "ruleNextPage": "@css:.pagination .next-page a[href]@href"
+  }
+]
