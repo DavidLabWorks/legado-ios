@@ -10,6 +10,10 @@
     "ruleTitle": "@css:.con h3 a[rel~=bookmark]@text",
     "ruleLink": "@css:.con h3 a[rel~=bookmark]@href",
     "ruleImage": "@css:.img img.thumb@data-src||@css:.img img.thumb@src",
-    "ruleNextPage": "@css:.pagination .next-page a[href]@href"
+    "ruleNextPage": "@css:.pagination .next-page a[href]@href",
+    "lastUpdateTime": 1795610553823,
+    "ruleContent": "@css:#single-content .article-content > :not(.heateorSssClear):not(.heateor_sss_sharing_container):not(.modown-ad):not(script):not(style):not(iframe):not(ins)@html<js>\nvar body = String(result).replace(/<img\\b[^>]*>/gi, function (tag) {\n    var original = tag.match(/\\sdata-original=\"([^\"]+)\"/i) || tag.match(/\\sdata-src=\"([^\"]+)\"/i);\n    if (!original) return tag;\n    return tag.replace(/\\s(?:src|srcset)=\"[^\"]*\"/gi, '').replace(/^<img/i, function () { return '<img src=\"' + original[1] + '\"'; });\n});\nif (!body.trim()) throw new Error('未找到帖子正文');\n'<html><head><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"></head><body>' + body + '</body></html>'\n</js>",
+    "enableJs": false,
+    "style": "body{box-sizing:border-box;max-width:46rem;margin:0 auto;padding:8px 12px 24px;font:1rem/1.7 -apple-system,sans-serif;overflow-wrap:anywhere}p,figure{margin:0 0 1em}img{display:block;max-width:100%!important;height:auto!important;margin:8px auto}a[data-fancybox]+br,img+br{display:none}"
   }
 ]
