@@ -5,16 +5,16 @@
   "description": "喵阅的最新版本，供 AltStore Classic、SideStore 和 LiveContainer 添加。",
   "sourceURL": "https://raw.githubusercontent.com/DavidLabWorks/legado-ios/main/docs/altstore.json",
   "website": "https://github.com/DavidLabWorks/legado-ios",
-  "iconURL": "https://raw.githubusercontent.com/DavidLabWorks/legado-ios/main/release/MiaoYue-build99-mascot.png",
+  "iconURL": "https://raw.githubusercontent.com/DavidLabWorks/legado-ios/main/App/Assets.xcassets/BrandIcon.imageset/BrandIcon.png",
   "tintColor": "#315C50",
   "apps": [
     {
       "name": "喵阅",
-      "bundleIdentifier": "com.epiboly.legado",
+      "bundleIdentifier": "com.davidlabworks.miaoreader",
       "developerName": "DavidLabWorks",
       "subtitle": "读小说、听书、整理网页",
       "localizedDescription": "一款优先兼容阅读书源的开源 iOS 阅读器，支持书架、搜索、阅读排版、本地 TXT、语音朗读和 RSS。应用不提供书源或在线书库，书源需自行导入。",
-      "iconURL": "https://raw.githubusercontent.com/DavidLabWorks/legado-ios/main/release/MiaoYue-build99-icon.png",
+      "iconURL": "https://raw.githubusercontent.com/DavidLabWorks/legado-ios/main/App/Assets.xcassets/AppIcon.appiconset/AppIcon-1024.png",
       "tintColor": "#315C50",
       "category": "utilities",
       "screenshots": [
@@ -36,20 +36,20 @@
       ],
       "versions": [
         {
-          "version": "0.1.87",
-          "buildVersion": "101",
-          "date": "2026-11-26T11:12:30Z",
-          "localizedDescription": "新增 JSON 备份与恢复，可迁移书架、书源、网站源、本地书籍及网络与缓存设置。支持从分享菜单打开备份。",
-          "downloadURL": "https://raw.githubusercontent.com/DavidLabWorks/legado-ios/main/release/MiaoYue-0.1.87-build101-unsigned.ipa",
-          "size": 34620144,
+          "version": "0.0.1",
+          "buildVersion": "1",
+          "date": "2026-11-26T11:30:10Z",
+          "localizedDescription": "喵阅启用新包名。迁移时，先在旧版导出 JSON 备份，再用新版打开备份，恢复书架、本地图书、源和设置。",
+          "downloadURL": "https://raw.githubusercontent.com/DavidLabWorks/legado-ios/main/release/MiaoYue-0.0.1-build1-unsigned.ipa",
+          "size": 34652518,
           "minOSVersion": "15.0"
         }
       ],
-      "version": "0.1.87",
-      "versionDate": "2026-11-26T11:12:30Z",
-      "versionDescription": "新增 JSON 备份与恢复，可迁移书架、书源、网站源、本地书籍及网络与缓存设置。支持从分享菜单打开备份。",
-      "downloadURL": "https://raw.githubusercontent.com/DavidLabWorks/legado-ios/main/release/MiaoYue-0.1.87-build101-unsigned.ipa",
-      "size": 34620144,
+      "version": "0.0.1",
+      "versionDate": "2026-11-26T11:30:10Z",
+      "versionDescription": "喵阅启用新包名。迁移时，先在旧版导出 JSON 备份，再用新版打开备份，恢复书架、本地图书、源和设置。",
+      "downloadURL": "https://raw.githubusercontent.com/DavidLabWorks/legado-ios/main/release/MiaoYue-0.0.1-build1-unsigned.ipa",
+      "size": 34652518,
       "appPermissions": {
         "entitlements": [],
         "privacy": {
