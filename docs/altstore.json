@@ -36,20 +36,20 @@
       ],
       "versions": [
         {
-          "version": "0.0.7",
-          "buildVersion": "7",
-          "date": "2026-11-26T17:43:09Z",
-          "localizedDescription": "阅读器半屏设置面板统一为日间白底、夜间深色底。「字体与间距」移入「外观」的「更多」，返回时面板平滑收回。",
-          "downloadURL": "https://raw.githubusercontent.com/DavidLabWorks/legado-ios/c550570550bbafe54f8725a8939622c456838917/release/MiaoYue-0.0.7-build7-unsigned.ipa",
-          "size": 29041521,
+          "version": "0.0.8",
+          "buildVersion": "8",
+          "date": "2026-11-26T17:54:21Z",
+          "localizedDescription": "阅读样式中的「页面设置」和「字体与间距」改为从底部向上滑入，下滑或点「返回」可逐层收起。",
+          "downloadURL": "https://raw.githubusercontent.com/DavidLabWorks/legado-ios/cb9e5bf2699e19c58a0c8c4afad0f69f7c40030f/release/MiaoYue-0.0.8-build8-unsigned.ipa",
+          "size": 29037372,
           "minOSVersion": "15.0"
         }
       ],
-      "version": "0.0.7",
-      "versionDate": "2026-11-26T17:43:09Z",
-      "versionDescription": "阅读器半屏设置面板统一为日间白底、夜间深色底。「字体与间距」移入「外观」的「更多」，返回时面板平滑收回。",
-      "downloadURL": "https://raw.githubusercontent.com/DavidLabWorks/legado-ios/c550570550bbafe54f8725a8939622c456838917/release/MiaoYue-0.0.7-build7-unsigned.ipa",
-      "size": 29041521,
+      "version": "0.0.8",
+      "versionDate": "2026-11-26T17:54:21Z",
+      "versionDescription": "阅读样式中的「页面设置」和「字体与间距」改为从底部向上滑入，下滑或点「返回」可逐层收起。",
+      "downloadURL": "https://raw.githubusercontent.com/DavidLabWorks/legado-ios/cb9e5bf2699e19c58a0c8c4afad0f69f7c40030f/release/MiaoYue-0.0.8-build8-unsigned.ipa",
+      "size": 29037372,
       "appPermissions": {
         "entitlements": [],
         "privacy": {
