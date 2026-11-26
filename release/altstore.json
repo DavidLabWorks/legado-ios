@@ -36,20 +36,20 @@
       ],
       "versions": [
         {
-          "version": "0.0.5",
-          "buildVersion": "5",
-          "date": "2026-11-26T16:09:16Z",
-          "localizedDescription": "精简安装包，移除未使用的 SMB 网络共享、Vulkan 视频滤镜及着色器编译组件。",
-          "downloadURL": "https://raw.githubusercontent.com/DavidLabWorks/legado-ios/37778110e3de817d53cf4690717f3bce66f1651b/release/MiaoYue-0.0.5-build5-unsigned.ipa",
-          "size": 28876338,
+          "version": "0.0.6",
+          "buildVersion": "6",
+          "date": "2026-11-26T16:49:19Z",
+          "localizedDescription": "文章视频支持悬浮半屏播放，正文保持原位。双击迷你播放器可回到半屏并保留播放进度。",
+          "downloadURL": "https://raw.githubusercontent.com/DavidLabWorks/legado-ios/a7eea4aa4479802df7a4b5bb58f6267972661922/release/MiaoYue-0.0.6-build6-unsigned.ipa",
+          "size": 28739395,
           "minOSVersion": "15.0"
         }
       ],
-      "version": "0.0.5",
-      "versionDate": "2026-11-26T16:09:16Z",
-      "versionDescription": "精简安装包，移除未使用的 SMB 网络共享、Vulkan 视频滤镜及着色器编译组件。",
-      "downloadURL": "https://raw.githubusercontent.com/DavidLabWorks/legado-ios/37778110e3de817d53cf4690717f3bce66f1651b/release/MiaoYue-0.0.5-build5-unsigned.ipa",
-      "size": 28876338,
+      "version": "0.0.6",
+      "versionDate": "2026-11-26T16:49:19Z",
+      "versionDescription": "文章视频支持悬浮半屏播放，正文保持原位。双击迷你播放器可回到半屏并保留播放进度。",
+      "downloadURL": "https://raw.githubusercontent.com/DavidLabWorks/legado-ios/a7eea4aa4479802df7a4b5bb58f6267972661922/release/MiaoYue-0.0.6-build6-unsigned.ipa",
+      "size": 28739395,
       "appPermissions": {
         "entitlements": [],
         "privacy": {
