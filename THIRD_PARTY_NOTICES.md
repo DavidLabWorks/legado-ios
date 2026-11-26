@@ -47,7 +47,7 @@
 
 ## Qwen3-TTS offline voices
 
-The optional voice packs use the Qwen3-TTS CustomVoice 0.6B model and 12 Hz codec from Qwen under Apache-2.0, distributed in GGUF format by cstr. The high-quality pack contains the Q8_0 talker and full codec. The medium and compact packs contain requantized weights and a decoder-only codec. Each archive includes the model license and is stored in 48 MB parts under `OfflineVoicePacks/v1`. Users download or import a pack into Application Support.
+Earlier releases distributed three optional voice packs based on the Qwen3-TTS CustomVoice 0.6B model and 12 Hz codec from Qwen under Apache-2.0, in GGUF format provided by cstr. Each archive included the model license.
 
 The app statically links the CPU-only Qwen3-TTS target and its ggml dependencies from CrispStrobe/CrispASR v0.8.55. To reproduce the device and simulator libraries, run `Vendor/QwenSpeech/build-runtime.sh <CrispASR-checkout> <new-output.xcframework>` with Xcode, CMake and Ninja installed. The app includes the runtime license, third-party notices and model license in its Licenses directory.
 
