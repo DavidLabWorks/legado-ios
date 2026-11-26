@@ -36,20 +36,20 @@
       ],
       "versions": [
         {
-          "version": "0.0.2",
-          "buildVersion": "2",
-          "date": "2026-11-26T11:52:22Z",
-          "localizedDescription": "重新设计书架分组管理。默认排序下，新导入的本地文件排在书架首位并保留未读状态。书架布局简化为宫格和列表两种。",
-          "downloadURL": "https://raw.githubusercontent.com/DavidLabWorks/legado-ios/ba9a1bffe15e5ca6e6df5b2c5b693f9e1c5d0014/release/MiaoYue-0.0.2-build2-unsigned.ipa",
-          "size": 34661726,
+          "version": "0.0.3",
+          "buildVersion": "3",
+          "date": "2026-11-26T12:55:42Z",
+          "localizedDescription": "网站源文章列表右上角新增三点菜单，可编辑网站源或清空该源的文章缓存。列表为空时显示布偶猫插画，支持下拉重新加载。",
+          "downloadURL": "https://raw.githubusercontent.com/DavidLabWorks/legado-ios/06fc858d47eecacc556a6b464c95e26303b57f0f/release/MiaoYue-0.0.3-build3-unsigned.ipa",
+          "size": 35157547,
           "minOSVersion": "15.0"
         }
       ],
-      "version": "0.0.2",
-      "versionDate": "2026-11-26T11:52:22Z",
-      "versionDescription": "重新设计书架分组管理。默认排序下，新导入的本地文件排在书架首位并保留未读状态。书架布局简化为宫格和列表两种。",
-      "downloadURL": "https://raw.githubusercontent.com/DavidLabWorks/legado-ios/ba9a1bffe15e5ca6e6df5b2c5b693f9e1c5d0014/release/MiaoYue-0.0.2-build2-unsigned.ipa",
-      "size": 34661726,
+      "version": "0.0.3",
+      "versionDate": "2026-11-26T12:55:42Z",
+      "versionDescription": "网站源文章列表右上角新增三点菜单，可编辑网站源或清空该源的文章缓存。列表为空时显示布偶猫插画，支持下拉重新加载。",
+      "downloadURL": "https://raw.githubusercontent.com/DavidLabWorks/legado-ios/06fc858d47eecacc556a6b464c95e26303b57f0f/release/MiaoYue-0.0.3-build3-unsigned.ipa",
+      "size": 35157547,
       "appPermissions": {
         "entitlements": [],
         "privacy": {
