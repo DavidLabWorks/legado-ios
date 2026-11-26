@@ -36,20 +36,20 @@
       ],
       "versions": [
         {
-          "version": "0.0.4",
-          "buildVersion": "4",
-          "date": "2026-11-26T13:42:28Z",
-          "localizedDescription": "阅读页选中文字后，可复制、过滤、查找或翻译。统一了两端的拖动标记，优化了首行菜单位置和跨行高亮，过滤整段文字后会自动收起空行。",
-          "downloadURL": "https://raw.githubusercontent.com/DavidLabWorks/legado-ios/c211a5ef5d0e4e41363586433b91896ad3ceaa32/release/MiaoYue-0.0.4-build4-unsigned.ipa",
-          "size": 35166314,
+          "version": "0.0.5",
+          "buildVersion": "5",
+          "date": "2026-11-26T16:09:16Z",
+          "localizedDescription": "精简安装包，移除未使用的 SMB 网络共享、Vulkan 视频滤镜及着色器编译组件。",
+          "downloadURL": "https://raw.githubusercontent.com/DavidLabWorks/legado-ios/37778110e3de817d53cf4690717f3bce66f1651b/release/MiaoYue-0.0.5-build5-unsigned.ipa",
+          "size": 28876338,
           "minOSVersion": "15.0"
         }
       ],
-      "version": "0.0.4",
-      "versionDate": "2026-11-26T13:42:28Z",
-      "versionDescription": "阅读页选中文字后，可复制、过滤、查找或翻译。统一了两端的拖动标记，优化了首行菜单位置和跨行高亮，过滤整段文字后会自动收起空行。",
-      "downloadURL": "https://raw.githubusercontent.com/DavidLabWorks/legado-ios/c211a5ef5d0e4e41363586433b91896ad3ceaa32/release/MiaoYue-0.0.4-build4-unsigned.ipa",
-      "size": 35166314,
+      "version": "0.0.5",
+      "versionDate": "2026-11-26T16:09:16Z",
+      "versionDescription": "精简安装包，移除未使用的 SMB 网络共享、Vulkan 视频滤镜及着色器编译组件。",
+      "downloadURL": "https://raw.githubusercontent.com/DavidLabWorks/legado-ios/37778110e3de817d53cf4690717f3bce66f1651b/release/MiaoYue-0.0.5-build5-unsigned.ipa",
+      "size": 28876338,
       "appPermissions": {
         "entitlements": [],
         "privacy": {
