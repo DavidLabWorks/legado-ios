@@ -15,7 +15,7 @@ Android 路径以固定提交 `8b87c5aba4df91c39a3a0939a68a1180b9f2ee1c` 下 `ap
 | SEARCH-009 | P1 | 独立发现；model/webBook/SearchModel.kt mergeItems | Search/BookSearchService.swift | 合并键删除所有标点，把同作者 C++ 与 C# 不同书误并；保留标题内部有意义符号和已有作者装饰清理 | 已验证：不同符号书名/作者、纯符号、原装饰合并与全量521项通过 |
 | SEARCH-010 | P1 | 独立发现；SearchModel.kt onSearchFinish / iOS UI 生命周期 | App/RootTabView.swift SearchView | 尾行先在搜索中显示，完成后不再触发onAppear，后页无法加载；记录已出现结果，在首轮及分页完成时重新检查末行 | 已验证：模拟器红测仅page1；修复后用新关键词实际请求page1→2→3，第二页→详情→目录→正文完整UI通过；并发/暂停/hasMore仍由模型保护 |
 | CONTENT-004 | P1 | PR #355 为检查线索（仅Web补丁）；model/webBook/BookContent.kt、help/book/ContentProcessor.kt | Book/ContentSanitizer.swift 中 ChapterHTMLFormatter | 合法图片属性含 `>` 时标签提取提前截断，图片标记丢失；正确识别引号内字符 | 已验证：完整正文链、单双引号/大写/多行/懒加载/空src边界及521项通过；不声称补完网络文本内嵌图片渲染 |
-| CONTENT-005 | P1 | 同上；help/book/ContentHelp.kt、ContentProcessor.kt | Book/ContentSanitizer.swift、Book/ChapterResegmenter.swift | 开启重新分段破坏图片属性空格/引号；仅对正文重排，原图片标记作为边界保留 | 已验证：开关两态、缓存/当前/邻章/连续窗、多图顺序、稳定性、显式净化规则回归及521项通过；不声称复现Issue #474的净化规则根因 |
+| CONTENT-005 | P1 | ContentHelp.kt、ContentProcessor.kt | Book/ContentSanitizer.swift | 清理正文空白时保留图片标记及签名地址 | 已有正文、缓存和邻章图片回归测试 |
 | CONTENT-006 | P1 | 本次读者链补漏；ui/book/read/page/entities/TextChapter.kt 等图文排版链待继续追踪 | Reader/ReaderTextView.swift、Reader/ReaderScrollView.swift | 网络文本阅读当前以NSAttributedString(string:)展示，未发现内嵌img解码/布局链；图片标记完整不等于图片可显示。需独立处理资源请求头、缓存、尺寸、分页/连续布局与失败状态 | 已定位实现限制，未迁移/待验证；按用户收尾要求停止扩展，EPUB Readium显示链不在此限制中 |
 
 红测证据：`.build/migration-audit/pr-bugs-red.log`（7个测试方法、6套件，预期失败）；`.build/migration-audit/pr-bugs-red-ui.log/xcresult`（一键导入预检未出现）；`pr-search-pagination-probe.log/xcresult`（第二页未出现）。绿测：`pr-bugs-swift.log` 521项/57套件，`pr-bugs-reader.log/xcresult` iOS29项，`pr-search-flow-green.log/xcresult` 1项完整UI链路。所有失败轮次保留，详见进度文档。
@@ -73,7 +73,7 @@ Android 路径以固定提交 `8b87c5aba4df91c39a3a0939a68a1180b9f2ee1c` 下 `ap
 | ID | 优先级 | Android 源码 | Swift 源码 | 问题与方案 | 状态 / 验证 |
 | --- | --- | --- | --- | --- | --- |
 | CONTENT-001 | P2 | help/book/ContentProcessor.kt:111 | Book/ContentSanitizer.swift | 重复标题仅整行匹配；补前缀删除，保留同行正文；空标题不能吞标点段 | 已验证：完整508项/iOS29项通过；内容/阅读器/替换回归覆盖 |
-| CONTENT-002 | P1 | help/book/ContentHelp.kt reSegment、ContentProcessor.kt:138 | Book/ChapterResegmenter.swift、Book/ContentSanitizer.swift、Reader/ReaderViewModel.swift | 迁移断行合并、引号修正、词典、对话和长段切分，消费每书 reSegment 并接阅读设置；固定随机种子防分页漂移 | 已验证：原始Kotlin实跑128样本与Swift一致，完整508项及iOS29项通过；新开关在分页/连续阅读UI通过（实际开关控件点击） |
+| CONTENT-002 | P1 | ContentHelp.reSegment | — | iOS 已移除重新分段，正文沿用源段落 | 已撤销该迁移项 |
 | LOCAL-001 | P1 | model/localBook/TextFile.kt getTocRules、ui/book/import | LocalBook/LocalBookService.swift、Books/BookLibraryModel.swift | 导入实时读取管理页启用规则；现有 legacy_imports 标记一次性默认初始化，明确全停用/删空不复活默认 | 已验证：本地导入/规则持久化定向 53 项通过；完整508项及iOS29项通过 |
 | LOCAL-002 | P1 | model/localBook/TextFile.kt 标题脚本 | LocalBook/LocalBookService.swift | 空标题跳过匹配并保留正文，隐藏前言保留全文 intro，规则只按首次分隔符拆脚本 | 已验证：同批 53 项含正文回读/隐藏前言/空标题；完整508项及iOS29项通过 |
 | LOCAL-003 | P2 | model/localBook/TextFile.kt prevLength | LocalBook/LocalBookService.swift | prevLength 使用上一有效章的长度，跳过标题时 index/seekPos 不误推进 | 已验证：同批 53 项含脚本上下文；完整508项及iOS29项通过 |

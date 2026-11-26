@@ -8,6 +8,7 @@ enum AppTab: String {
 
 struct RootTabView: View {
     @EnvironmentObject private var sourceLibrary: SourceLibraryModel
+    @State private var readerColorScheme: ColorScheme?
     @State private var selection: AppTab
     @State private var showsDemoReader = false
     @State private var didOpenDemoReader = false
@@ -46,7 +47,7 @@ struct RootTabView: View {
                         SourceManagementView()
                     } else if requestedDemoPage == "rss-photo" {
                         let source = RssSource(sourceUrl: "https://appearance.invalid", sourceName: "图片外观检查")
-                        RSSPhotoView(urls: ["data:image/png;base64,"], index: 0, source: source, referer: source.sourceUrl)
+                        RSSPhotoView(photos: [.init(url: "data:image/png;base64,")], index: 0, source: source, referer: source.sourceUrl)
                     } else {
                         BookshelfView()
                     }
@@ -97,7 +98,8 @@ struct RootTabView: View {
                 .tag(AppTab.my)
         }
         .readingTabBarBackground()
-        .preferredColorScheme(themeMode == "2" ? .dark : (themeMode == "1" || themeMode == "3" ? .light : nil))
+        .onPreferenceChange(ReaderColorSchemeKey.self) { readerColorScheme = $0 }
+        .preferredColorScheme(readerColorScheme ?? (themeMode == "2" ? .dark : (themeMode == "1" || themeMode == "3" ? .light : nil)))
         .transaction { transaction in
             if themeMode == "3" { transaction.animation = nil }
         }
@@ -160,10 +162,9 @@ private struct BookshelfView: View {
         case book(Book, BookSource?)
     }
     @State private var showsGroupManager = false
-    @State private var showsBookOrder = false
+    @State private var orderingGroup: BookGroup?
     @State private var verificationBooks: [Book] = []
-    @AppStorage("bookshelfLayout") private var bookshelfLayout = "grid3"
-    @AppStorage("bookshelfSort") private var bookshelfSort = 0
+    @AppStorage("bookshelfLayout") private var bookshelfLayout = "grid"
 
     private var selectedGroup: BookGroup {
         library.visibleGroups.first(where: { $0.id == selectedGroupID })
@@ -171,7 +172,10 @@ private struct BookshelfView: View {
             ?? BookGroup(groupId: BookGroup.idAll, groupName: "全部")
     }
 
-    private var displayedBooks: [Book] { library.books(in: selectedGroup, defaultSort: bookshelfSort) }
+    // Older preferences store grid layouts as grid followed by the column count.
+    private var showsGrid: Bool { bookshelfLayout.hasPrefix("grid") }
+
+    private var displayedBooks: [Book] { library.books(in: selectedGroup) }
 
     private var recentBook: Book? {
         displayedBooks.filter(BookReadingPresentation.hasStarted)
@@ -181,7 +185,7 @@ private struct BookshelfView: View {
 
     var body: some View {
         GeometryReader { geometry in
-            ScrollView {
+            shelfScrollView {
                 VStack(spacing: 0) {
                     ReadingPageHeader(title: "书架", subtitle: "阅读，让时间有了形状", artwork: .bookshelf) {
                         NavigationLink { SearchView() } label: {
@@ -190,41 +194,35 @@ private struct BookshelfView: View {
                         .accessibilityLabel("搜索")
                         bookshelfMenu
                     }
-                    if !library.books.isEmpty && library.visibleGroups.count > 1 {
+                    if library.visibleGroups.count > 1 {
                         bookshelfGroups.padding(.bottom, 24)
                     }
                     LazyVStack(alignment: .leading, spacing: 0) {
+                        if let book = recentBook {
+                            Button { open(book) } label: {
+                                ContinueReadingCard(book: book)
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityIdentifier("bookshelf.continue")
+                            .padding(.bottom, 20)
+                        }
+                        bookshelfSummary
                         if displayedBooks.isEmpty {
                             EmptyBookshelfHero { showsLocalImporter = true }
                                 .padding(.top, min(80, max(24, geometry.size.height * 0.075)))
                         } else {
-                            if let book = recentBook {
-                                VStack(alignment: .leading, spacing: 12) {
-                                    Text("继续阅读")
-                                        .font(.subheadline.weight(.medium))
-                                        .foregroundStyle(.secondary)
-                                    Button { open(book) } label: {
-                                        ContinueReadingCard(book: book)
-                                    }
-                                    .buttonStyle(.plain)
-                                    .accessibilityLabel("继续阅读，\(book.name)，\(BookReadingPresentation.position(book))")
-                                    .accessibilityIdentifier("bookshelf.continue")
-                                }
-                                .padding(.bottom, 30)
-                            }
-                            bookshelfSummary
-                            if bookshelfLayout.hasPrefix("grid") {
+                            if showsGrid {
                                 LazyVGrid(columns: gridColumns, alignment: .leading, spacing: 24) {
                                     ForEach(displayedBooks) { book in
-                                        BookshelfBookLink(book: book, compact: false, grid: true) { open(book) }
+                                        BookshelfBookLink(book: book, grid: true) { open(book) }
                                     }
                                 }
                             } else {
                                 ForEach(displayedBooks) { book in
-                                    BookshelfBookLink(book: book, compact: bookshelfLayout == "compact", grid: false) { open(book) }
+                                    BookshelfBookLink(book: book, grid: false) { open(book) }
                                     if book.id != displayedBooks.last?.id {
                                         Rectangle().fill(ReadingTheme.separator).frame(height: 0.5)
-                                            .padding(.leading, bookshelfLayout == "compact" ? 54 : 66)
+                                            .padding(.leading, 66)
                                     }
                                 }
                             }
@@ -236,11 +234,11 @@ private struct BookshelfView: View {
                 .frame(maxWidth: .infinity)
             }
             .refreshable {
-                guard selectedGroup.enableRefresh else { return }
-                library.startGroupUpdate(sources: sources.sources, group: selectedGroup, defaultSort: bookshelfSort)
+                library.startGroupUpdate(sources: sources.sources, group: selectedGroup)
             }
         }
         .background(ReadingTheme.canvas)
+        .background(BookshelfTabBar())
         .navigationBarHidden(true)
         .readingNavigationDestination(isPresented: Binding(
             get: { readerDestination != nil }, set: { if !$0 { readerDestination = nil } }
@@ -278,11 +276,12 @@ private struct BookshelfView: View {
             .environmentObject(library)
         }
         .sheet(isPresented: $showsGroupManager) {
-            BookGroupManagerView()
+            BookGroupManagerView(groups: library.groups)
                 .environmentObject(library)
         }
-        .sheet(isPresented: $showsBookOrder) {
-            BookOrderView(groupID: selectedGroup.id).environmentObject(library)
+        .sheet(item: $orderingGroup) { group in
+            BookOrderView(group: group)
+                .environmentObject(library)
         }
         .sheet(isPresented: Binding(
             get: { !verificationBooks.isEmpty },
@@ -312,6 +311,22 @@ private struct BookshelfView: View {
             }
         } message: {
             Text(library.updateMessage ?? "")
+        }
+    }
+
+    @ViewBuilder
+    private func shelfScrollView<Content: View>(@ViewBuilder content: () -> Content) -> some View {
+        if #available(iOS 16, *), !ReadingCompatibility.usesLegacyUI {
+            ScrollView { content() }
+        } else {
+            // On iOS 15 the native pull-to-refresh gesture is available on List.
+            List {
+                content()
+                    .listRowInsets(EdgeInsets())
+                    .listRowSeparator(.hidden)
+                    .listRowBackground(ReadingTheme.canvas)
+            }
+            .listStyle(.plain)
         }
     }
 
@@ -353,71 +368,99 @@ private struct BookshelfView: View {
     }
 
     private var bookshelfSummary: some View {
-        HStack(alignment: .center) {
-            VStack(alignment: .leading, spacing: 6) {
-                Text(selectedGroupID == BookGroup.idAll ? "全部书籍" : selectedGroup.groupName)
-                    .font(.title3.bold())
-                    .accessibilityAddTraits(.isHeader)
-                Text("\(displayedBooks.count)本")
-                    .font(.caption).foregroundStyle(.secondary)
+        let controls = HStack(spacing: 0) {
+            bookshelfSortMenu
+            Button { bookshelfLayout = "grid" } label: {
+                Image(systemName: "square.grid.2x2.fill")
+                    .foregroundStyle(showsGrid ? ReadingTheme.accent : .secondary)
+                    .frame(width: 44, height: 44)
             }
-            Spacer()
-            HStack(spacing: 0) {
-                Button { bookshelfLayout = "grid3" } label: {
-                    Image(systemName: "square.grid.2x2.fill")
-                        .foregroundStyle(bookshelfLayout.hasPrefix("grid") ? ReadingTheme.accent : .secondary)
-                        .frame(width: 44, height: 44)
-                }
-                .accessibilityLabel("网格布局")
-                .accessibilityAddTraits(bookshelfLayout.hasPrefix("grid") ? .isSelected : [])
-                Button { bookshelfLayout = "list" } label: {
-                    Image(systemName: "list.bullet")
-                        .foregroundStyle(bookshelfLayout.hasPrefix("grid") ? .secondary : ReadingTheme.accent)
-                        .frame(width: 44, height: 44)
-                }
-                .accessibilityLabel("列表布局")
-                .accessibilityAddTraits(bookshelfLayout.hasPrefix("grid") ? [] : .isSelected)
+            .accessibilityLabel("网格布局")
+            .accessibilityAddTraits(showsGrid ? .isSelected : [])
+            Button { bookshelfLayout = "list" } label: {
+                Image(systemName: "list.bullet")
+                    .foregroundStyle(showsGrid ? .secondary : ReadingTheme.accent)
+                    .frame(width: 44, height: 44)
             }
-            .font(.system(size: 18, weight: .medium))
-            .buttonStyle(.plain)
+            .accessibilityLabel("列表布局")
+            .accessibilityAddTraits(showsGrid ? [] : .isSelected)
+        }
+        .font(.system(size: 18, weight: .medium))
+        .buttonStyle(.plain)
+        let title = selectedGroup.id == BookGroup.idAll ? "全部书籍" : selectedGroup.groupName
+        let count = displayedBooks.count
+        let heading = (Text(title).font(.title3.bold())
+            + Text("（\(count)）").font(.subheadline).foregroundColor(.secondary))
+            .accessibilityLabel("\(title)，\(count)本")
+            .accessibilityAddTraits(.isHeader)
+        return Group {
+            if dynamicTypeSize.isAccessibilitySize {
+                VStack(alignment: .leading, spacing: 4) {
+                    heading
+                    controls
+                }
+            } else {
+                HStack {
+                    heading
+                    Spacer(minLength: 8)
+                    controls
+                }
+            }
         }
         .padding(.bottom, 20)
     }
 
+    private var bookshelfSortMenu: some View {
+        let group = selectedGroup
+        return Menu {
+            Section("「\(group.groupName)」的排序方式") {
+                ForEach(BookshelfSort.allCases) { sort in
+                    sortOption(sort, group: group)
+                }
+            }
+        } label: {
+            HStack(spacing: 6) {
+                Text(group.bookshelfSort.title)
+                    .font(.subheadline.weight(.medium))
+                Image(systemName: "chevron.down")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
+            .background(ReadingTheme.groupedCanvas, in: Capsule())
+            .frame(minHeight: 44)
+            .contentShape(Rectangle())
+        }
+        .fixedSize(horizontal: !dynamicTypeSize.isAccessibilitySize, vertical: true)
+        .accessibilityLabel("排序方式")
+        .accessibilityValue(group.bookshelfSort.title)
+    }
+
+    private func sortOption(_ sort: BookshelfSort, group: BookGroup) -> some View {
+        Button {
+            Task {
+                if group.bookshelfSort != sort { await library.setGroupSort(group, sort: sort) }
+                if sort == .custom,
+                   let saved = library.groups.first(where: { $0.id == group.id && $0.bookshelfSort == sort }),
+                   library.books(in: saved).count > 1 {
+                    orderingGroup = saved
+                }
+            }
+        } label: {
+            if group.bookshelfSort == sort {
+                Label(sort.title, systemImage: "checkmark")
+            } else {
+                Text(sort.title)
+            }
+        }
+        .accessibilityAddTraits(group.bookshelfSort == sort ? .isSelected : [])
+    }
+
     private var bookshelfMenu: some View {
         Menu {
-            Button("更新目录", systemImage: "arrow.clockwise") {
-                library.startGroupUpdate(sources: sources.sources, group: selectedGroup, defaultSort: bookshelfSort)
-            }
-            .disabled(library.isCheckingUpdates)
-            Button("本地书", systemImage: "plus") { showsLocalImporter = true }
+            Button("本地文件", systemImage: "plus") { showsLocalImporter = true }
             Button("书架分组", systemImage: "rectangle.3.group") { showsGroupManager = true }
-            Menu("本分组设置", systemImage: "slider.horizontal.3") {
-                Picker("书籍排序", selection: Binding(
-                    get: { selectedGroup.bookSort },
-                    set: { sort in Task { await library.setGroupSort(selectedGroup, sort: sort) } }
-                )) {
-                    Text("跟随默认排序").tag(-1)
-                    ForEach(BookshelfSort.allCases) { sort in Text(sort.title).tag(sort.rawValue) }
-                }
-                Button("调整书籍顺序") { showsBookOrder = true }
-                    .disabled(displayedBooks.count < 2)
-                Toggle("允许下拉更新", isOn: Binding(
-                    get: { selectedGroup.enableRefresh },
-                    set: { enabled in Task { await library.setGroupRefreshEnabled(selectedGroup, enabled: enabled) } }
-                ))
-                Toggle("仅更新已读至最新章的书", isOn: Binding(
-                    get: { selectedGroup.onlyUpdateRead },
-                    set: { enabled in Task { await library.setGroupOnlyUpdateRead(selectedGroup, enabled: enabled) } }
-                ))
-            }
-            Menu("书架布局", systemImage: "square.grid.2x2") {
-                layoutButton("列表", value: "list")
-                layoutButton("紧凑列表", value: "compact")
-                ForEach(2...6, id: \.self) { count in
-                    layoutButton("\(count) 列宫格", value: "grid\(count)")
-                }
-            }
             NavigationLink {
                 FileManagementView()
             } label: {
@@ -453,32 +496,15 @@ private struct BookshelfView: View {
     }
 
     private var gridColumns: [GridItem] {
-        let count = Int(bookshelfLayout.dropFirst(4)) ?? 3
-        let maximum = dynamicTypeSize.isAccessibilitySize ? 2 : 6
-        return Array(repeating: GridItem(.flexible(), spacing: 16, alignment: .top), count: max(2, min(count, maximum)))
-    }
-
-    @ViewBuilder
-    private func layoutButton(_ title: String, value: String) -> some View {
-        Button {
-            bookshelfLayout = value
-        } label: {
-            if bookshelfLayout == value { Label(title, systemImage: "checkmark") }
-            else { Text(title) }
-        }
+        Array(repeating: GridItem(.flexible(), spacing: 16, alignment: .top),
+              count: dynamicTypeSize.isAccessibilitySize ? 2 : 3)
     }
 }
 
 private struct BookOrderView: View {
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var library: BookLibraryModel
-    let groupID: Int64
-
-    private var group: BookGroup {
-        var value = library.groups.first { $0.id == groupID } ?? .init(groupId: groupID, groupName: "书籍")
-        value.bookSort = BookshelfSort.custom.rawValue
-        return value
-    }
+    let group: BookGroup
 
     var body: some View {
         ReadingNavigationStack {
@@ -494,13 +520,16 @@ private struct BookOrderView: View {
                         Task { await library.moveBooks(in: group, from: offsets, to: destination) }
                     }
                 } footer: {
-                    Text("拖动调整自定义顺序。书籍的自定义顺序在各分组间共用。")
+                    Text("拖动调整书籍顺序。同一本书在各分组间共用自定义顺序。")
                 }
             }
             .environment(\.editMode, .constant(.active))
-            .navigationTitle("调整书籍顺序")
-            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("完成") { dismiss() } } }
-            .task { await library.setGroupSort(group, sort: BookshelfSort.custom.rawValue) }
+            .readingSheetTitle("\(group.groupName) · 自定义顺序")
+            .toolbar {
+                ReadingSheetActions {
+                    ReadingSheetCloseButton { dismiss() }
+                }
+            }
             .alert("保存失败", isPresented: Binding(
                 get: { library.errorMessage != nil },
                 set: { if !$0 { library.clearError() } }
@@ -531,9 +560,11 @@ private struct BookshelfVerificationView: View {
                 List(remaining) { book in
                     Button(book.name) { selected = book }
                 }
-                .navigationTitle("待验证（\(remaining.count) 本）")
+                .readingSheetTitle("待验证（\(remaining.count) 本）")
                 .toolbar {
-                    ToolbarItem(placement: .cancellationAction) { Button("关闭") { dismiss() } }
+                    ReadingSheetActions {
+                        ReadingSheetCloseButton { dismiss() }
+                    }
                 }
             }
             .sheet(item: $selected, onDismiss: {
@@ -558,7 +589,6 @@ private struct BookshelfBookLink: View {
     @EnvironmentObject private var library: BookLibraryModel
     @EnvironmentObject private var sources: SourceLibraryModel
     let book: Book
-    let compact: Bool
     let grid: Bool
     let open: () -> Void
     @State private var showsGroupSelector = false
@@ -571,7 +601,7 @@ private struct BookshelfBookLink: View {
         let isChecking = library.checkingBookURLs.contains(book.bookUrl)
         Button(action: open) {
             if grid { BookshelfGridItem(book: book, isChecking: isChecking) }
-            else { BookshelfRow(book: book, compact: compact, isChecking: isChecking) }
+            else { BookshelfRow(book: book, isChecking: isChecking) }
         }
         .buttonStyle(.plain)
         .contextMenu {
@@ -613,7 +643,7 @@ private struct BookshelfBookLink: View {
 
 private struct BookshelfChapters: View {
     let book: Book
-    let lineLimit: Int
+    var lineLimit: Int? = 2
 
     var body: some View {
         let latest = book.latestChapterTitle?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -632,9 +662,7 @@ private struct BookshelfChapters: View {
 
 private struct BookUpdateIndicator: View {
     var body: some View {
-        ProgressView()
-            .controlSize(.small)
-            .tint(.white)
+        RagdollLoading(width: 24)
             .frame(width: 26, height: 26)
             .background(.black.opacity(0.7), in: Circle())
             .accessibilityLabel("正在检测更新")
@@ -717,137 +745,249 @@ private struct ContinueReadingCard: View {
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     let book: Book
 
-    var body: some View {
-        HStack(alignment: .center, spacing: 18) {
-            VStack(alignment: .leading, spacing: 0) {
-                Text(book.name)
-                    .font(.title3.bold())
-                    .foregroundStyle(ReadingTheme.ink)
-                    .lineLimit(2)
-                Text(book.author.isEmpty ? "未知作者" : book.author)
-                    .font(.subheadline).foregroundStyle(.secondary)
-                    .padding(.top, 7)
-                Text(BookReadingPresentation.position(book))
-                    .font(.caption).foregroundStyle(.secondary)
-                    .lineLimit(2)
-                    .padding(.top, 20)
-                if book.totalChapterNum > 0 {
-                    HStack(spacing: 10) {
-                        ReadingProgressLine(value: BookReadingPresentation.progress(book))
-                        Text("\(Int((BookReadingPresentation.progress(book) * 100).rounded()))%")
-                            .font(.caption2.monospacedDigit())
-                            .foregroundStyle(.secondary)
-                    }
-                    .padding(.top, 12)
-                }
-                HStack(spacing: 12) {
-                    Text("继续阅读")
-                    Image(systemName: "arrow.right")
-                }
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(ReadingTheme.onAccent)
-                .padding(.horizontal, 18)
-                .frame(minHeight: 40)
-                .background(ReadingTheme.accentFill, in: Capsule())
-                .padding(.top, 20)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            if !dynamicTypeSize.isAccessibilitySize {
-                BookCoverArtwork(title: book.name, author: book.author, remoteURL: book.displayCoverURL, width: 94, height: 140)
-            }
+    private var actionLabel: some View {
+        HStack(spacing: 3) {
+            Text("继续阅读")
+            Image(systemName: "chevron.forward").accessibilityHidden(true)
         }
-        .padding(20)
-        .background(ReadingTheme.groupedCanvas, in: RoundedRectangle(cornerRadius: 20))
+        .font(.caption.weight(.semibold))
+        .fixedSize()
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if dynamicTypeSize.isAccessibilitySize { actionLabel }
+            HStack(alignment: .firstTextBaseline, spacing: 10) {
+                Text(book.name)
+                    .font(.headline)
+                    .foregroundStyle(ReadingTheme.ink)
+                    .lineLimit(dynamicTypeSize.isAccessibilitySize ? nil : 2)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                if !dynamicTypeSize.isAccessibilitySize { actionLabel }
+            }
+            BookshelfChapters(book: book, lineLimit: dynamicTypeSize.isAccessibilitySize ? nil : 1)
+                .font(.caption)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
+        .background(ReadingTheme.groupedCanvas, in: RoundedRectangle(cornerRadius: 14))
+        .contentShape(Rectangle())
+        .accessibilityElement(children: .combine)
     }
 }
 
 private struct BookGroupManagerView: View {
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @EnvironmentObject private var library: BookLibraryModel
     @State private var newName = ""
     @State private var showsCreate = false
     @State private var editingGroup: BookGroup?
     @State private var editingName = ""
+    @State private var editMode: EditMode = .inactive
+
+    @State private var original: [BookGroup]
+    @State private var draft: [BookGroup]
+    @State private var saving = false
+    @State private var saveError: String?
+
+    init(groups: [BookGroup]) {
+        _original = State(initialValue: groups)
+        _draft = State(initialValue: groups)
+    }
 
     private var customGroups: [BookGroup] {
-        library.groups.filter { $0.groupId > 0 }.sorted { $0.order < $1.order }
+        draft.filter { $0.groupId > 0 }.sorted { $0.order < $1.order }
     }
 
     var body: some View {
         ReadingNavigationStack {
-            List {
-                Section {
-                    HStack {
-                        Text("全部")
-                        Spacer()
-                        Text("系统分组").font(.caption).foregroundStyle(.secondary)
-                    }
-                }
-                Section("自定义分组") {
-                    ForEach(customGroups) { group in
-                        HStack {
-                            Toggle(isOn: Binding(
-                                get: { group.show },
-                                set: { visible in Task { await library.setGroupVisible(group, visible: visible) } }
-                            )) {
-                                Text(group.groupName)
-                            }
-                            Button {
-                                editingGroup = group
-                                editingName = group.groupName
-                            } label: {
-                                Image(systemName: "pencil")
-                            }
-                            .buttonStyle(.borderless)
-                        }
-                        .swipeActions {
-                            Button("删除", role: .destructive) {
-                                Task { await library.deleteGroup(group) }
+            groupList
+                .readingSheetSurface()
+                .readingSheetTitle("书架分组")
+                .toolbar {
+                    ReadingSheetActions {
+                        Button("取消") { dismiss() }
+                        ReadingSheetActionButton(isWorking: saving) {
+                            saving = true
+                            Task {
+                                if await library.saveGroupDraft(draft, original: original) { dismiss() }
+                                else { saveError = library.errorMessage; library.clearError() }
+                                saving = false
                             }
                         }
                     }
-                    .onMove { offsets, destination in
-                        Task { await library.moveGroups(from: offsets, to: destination) }
-                    }
                 }
-            }
-            .overlay {
-                if customGroups.isEmpty {
-                    ReadingUnavailableView("没有自定义分组", systemImage: "rectangle.3.group", description: Text("点右上角加号新建分组。"))
+        }
+        .disabled(saving)
+        .interactiveDismissDisabled(saving)
+        .alert("分组未保存", isPresented: Binding(get: { saveError != nil }, set: { if !$0 { saveError = nil } })) {
+            Button("好") { saveError = nil }
+        } message: { Text(saveError ?? "") }
+        .tint(ReadingTheme.accent)
+        .readingPresentationDetents(dynamicTypeSize.isAccessibilitySize ? [.large] : [.medium, .large])
+        .readingPresentationDragIndicator()
+        .alert("新建分组", isPresented: $showsCreate) {
+            TextField("分组名称", text: $newName)
+            Button("取消", role: .cancel) {}
+            // On iOS 17 an initially disabled alert action can dismiss without running.
+            Button("创建") {
+                let name = newName.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !name.isEmpty, !draft.contains(where: { $0.groupName == name }) else { return }
+                guard let id = library.nextGroupID(reserving: draft) else {
+                    saveError = "自定义分组已达到上限（63 个）。"
+                    return
                 }
-            }
-            .navigationTitle("书架分组")
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) { Button("关闭") { dismiss() } }
-                ToolbarItemGroup(placement: .topBarTrailing) {
-                    EditButton()
-                    Button("新建", systemImage: "plus") { newName = ""; showsCreate = true }
-                }
-            }
-            .alert("新建分组", isPresented: $showsCreate) {
-                TextField("分组名称", text: $newName)
-                Button("取消", role: .cancel) {}
-                Button("确定") { Task { await library.createGroup(name: newName) } }
-            }
-            .alert("编辑分组", isPresented: Binding(
-                get: { editingGroup != nil },
-                set: { if !$0 { editingGroup = nil } }
-            )) {
-                TextField("分组名称", text: $editingName)
-                Button("取消", role: .cancel) { editingGroup = nil }
-                Button("确定") {
-                    guard let group = editingGroup else { return }
-                    Task { await library.renameGroup(group, name: editingName) }
-                    editingGroup = nil
-                }
+                draft.append(BookGroup(groupId: id, groupName: name, order: (customGroups.last?.order ?? 0) + 1))
             }
         }
+        .alert("重命名分组", isPresented: Binding(
+            get: { editingGroup != nil },
+            set: { if !$0 { editingGroup = nil } }
+        )) {
+            TextField("分组名称", text: $editingName)
+            Button("取消", role: .cancel) { editingGroup = nil }
+            Button("保存") {
+                guard let group = editingGroup, let i = draft.firstIndex(where: { $0.id == group.id }) else { return }
+                draft[i].groupName = editingName.trimmingCharacters(in: .whitespacesAndNewlines)
+                editingGroup = nil
+            }
+            .disabled(editingName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        }
+        .onChange(of: customGroups.count) { count in
+            if count < 2 { editMode = .inactive }
+        }
+    }
+
+    private var groupList: some View {
+        VStack(spacing: 0) {
+            List {
+                Group {
+                    shelfSummary
+                        .listRowSeparator(.hidden)
+                    groupsHeading
+                        .listRowSeparator(.hidden)
+                    if customGroups.isEmpty {
+                        Text("暂无自定义分组")
+                            .font(.subheadline).foregroundStyle(.secondary)
+                            .padding(.vertical, 10)
+                            .listRowSeparator(.hidden)
+                    }
+                    ForEach(customGroups) { group in
+                        groupRow(group)
+                            .swipeActions {
+                                Button("删除", role: .destructive) { draft.removeAll { $0.id == group.id } }
+                            }
+                    }
+                    .onMove { offsets, destination in
+                        var ordered = customGroups
+                        ordered.move(fromOffsets: offsets, toOffset: destination)
+                        for i in ordered.indices { ordered[i].order = i + 1 }
+                        draft = draft.filter { $0.groupId <= 0 } + ordered
+                    }
+                }
+                .listRowInsets(EdgeInsets(top: 0, leading: 16, bottom: 0, trailing: 16))
+                .listRowBackground(Color(uiColor: .systemBackground))
+            }
+            .listStyle(.plain)
+            .readingScrollContentBackgroundHidden()
+            .environment(\.editMode, $editMode)
+
+            Button {
+                newName = ""
+                showsCreate = true
+            } label: {
+                Label("新建分组", systemImage: "plus")
+                    .font(.headline)
+                    .frame(maxWidth: .infinity, minHeight: 48)
+                    .foregroundStyle(ReadingTheme.onAccent)
+                    .background(ReadingTheme.accentFill, in: Capsule())
+            }
+            .buttonStyle(.plain)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
+        }
+    }
+
+    private var shelfSummary: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text("全部书籍").font(.headline)
+            Text("共 \(library.books.count) 本")
+                .font(.subheadline).foregroundStyle(.secondary)
+        }
+        .padding(18)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(alignment: .bottomTrailing) {
+            if !dynamicTypeSize.isAccessibilitySize {
+                ReadingHeaderArtwork.bookshelf
+                    .aspectRatio(220.0 / 72, contentMode: .fit)
+                    .frame(width: 136)
+                    .padding(.trailing, 10)
+                    .accessibilityHidden(true)
+            }
+        }
+        .readingSheetGroup()
+        .accessibilityElement(children: .combine)
+    }
+
+    private var groupsHeading: some View {
+        HStack {
+            Text("自定义分组").font(.headline).accessibilityAddTraits(.isHeader)
+            Spacer()
+            if customGroups.count > 1 {
+                Button(editMode.isEditing ? "完成排序" : "排序") {
+                    withAnimation { editMode = editMode.isEditing ? .inactive : .active }
+                }
+                .font(.subheadline).frame(minHeight: 44)
+                .buttonStyle(.borderless)
+            }
+        }
+        .padding(.top, 10)
+        .frame(minHeight: 44, alignment: .bottom)
+    }
+
+    private func groupRow(_ group: BookGroup) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: group.show ? "folder" : "eye.slash")
+                .foregroundStyle(group.show ? ReadingTheme.accent : Color.secondary)
+                .frame(width: 40, height: 40)
+                .background(ReadingTheme.groupedCanvas, in: RoundedRectangle(cornerRadius: 12))
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(group.groupName).font(.body.weight(.medium))
+                Text(group.show ? "书架可见" : "已隐藏")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 0)
+            if !editMode.isEditing {
+                Menu {
+                    Button(group.show ? "在书架隐藏" : "在书架显示", systemImage: group.show ? "eye.slash" : "eye") {
+                        if let i = draft.firstIndex(where: { $0.id == group.id }) { draft[i].show.toggle() }
+                    }
+                    Button("重命名", systemImage: "pencil") {
+                        editingName = group.groupName
+                        editingGroup = group
+                    }
+                    Button("删除", systemImage: "trash", role: .destructive) {
+                        draft.removeAll { $0.id == group.id }
+                    }
+                } label: {
+                    Image(systemName: "ellipsis")
+                        .frame(width: 44, height: 44)
+                        .contentShape(Rectangle())
+                }
+                .accessibilityLabel("\(group.groupName)的操作")
+            }
+        }
+        .padding(.vertical, 8)
     }
 }
 
 private struct BookGroupSelectView: View {
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var library: BookLibraryModel
+    @State private var saving = false
+    @State private var saveError: String?
     let book: Book
     @State private var selected: Set<Int64>
 
@@ -878,12 +1018,17 @@ private struct BookGroupSelectView: View {
                     ReadingUnavailableView("没有自定义分组", systemImage: "rectangle.3.group")
                 }
             }
-            .navigationTitle("移至分组")
+            .readingSheetTitle("移至分组")
             .toolbar {
-                ToolbarItem(placement: .cancellationAction) { Button("取消") { dismiss() } }
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("确定") {
-                        Task { await library.setBook(book, groupIDs: selected); dismiss() }
+                ReadingSheetActions {
+                    Button("取消") { dismiss() }
+                    ReadingSheetActionButton(isWorking: saving) {
+                        saving = true
+                        Task {
+                            if await library.setBook(book, groupIDs: selected) { dismiss() }
+                            else { saveError = library.errorMessage ?? "书架记录已变化"; library.clearError() }
+                            saving = false
+                        }
                     }
                 }
             }
@@ -891,70 +1036,86 @@ private struct BookGroupSelectView: View {
                 selected = Set(customGroups.filter { (book.group & $0.groupId) != 0 }.map(\.groupId))
             }
         }
-        .interactiveDismissDisabled()
+        .disabled(saving)
+        .interactiveDismissDisabled(saving)
+        .alert("分组未保存", isPresented: Binding(get: { saveError != nil }, set: { if !$0 { saveError = nil } })) {
+            Button("好") { saveError = nil }
+        } message: { Text(saveError ?? "") }
     }
 }
 
 private struct LocalBookImportReviewView: View {
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var library: BookLibraryModel
-    let files: [LocalBookImportFile]
+    @State private var files: [LocalBookImportFile]
     let onFinish: () -> Void
     @State private var selectedPaths: Set<String>
     @State private var isImporting = false
+    @State private var importError: String?
 
     private var urls: [URL] { files.map(\.url) }
 
     init(files: [LocalBookImportFile], onFinish: @escaping () -> Void) {
-        self.files = files
+        _files = State(initialValue: files)
         self.onFinish = onFinish
         _selectedPaths = State(initialValue: Set(files.map { $0.url.path }))
     }
 
     var body: some View {
         ReadingNavigationStack {
-            List(urls, id: \.path) { url in
-                Button {
-                    if !selectedPaths.insert(url.path).inserted { selectedPaths.remove(url.path) }
-                } label: {
-                    HStack {
-                        Image(systemName: selectedPaths.contains(url.path) ? "checkmark.square.fill" : "square")
-                            .foregroundStyle(selectedPaths.contains(url.path) ? ReadingTheme.accent : .secondary)
-                        VStack(alignment: .leading) {
-                            Text(url.deletingPathExtension().lastPathComponent).foregroundStyle(.primary)
-                            Text(url.lastPathComponent).font(.caption).foregroundStyle(.secondary)
+            List {
+                Button(selectedPaths.count == urls.count ? "取消全选" : "全选") {
+                    if selectedPaths.count == urls.count { selectedPaths.removeAll() }
+                    else { selectedPaths = Set(urls.map(\.path)) }
+                }
+                .disabled(isImporting)
+
+                ForEach(urls, id: \.path) { url in
+                    Button {
+                        if !selectedPaths.insert(url.path).inserted { selectedPaths.remove(url.path) }
+                    } label: {
+                        HStack {
+                            Image(systemName: selectedPaths.contains(url.path) ? "checkmark.square.fill" : "square")
+                                .foregroundStyle(selectedPaths.contains(url.path) ? ReadingTheme.accent : .secondary)
+                            VStack(alignment: .leading) {
+                                Text(url.deletingPathExtension().lastPathComponent).foregroundStyle(.primary)
+                                Text(url.lastPathComponent).font(.caption).foregroundStyle(.secondary)
+                            }
                         }
                     }
                 }
             }
-            .overlay { if isImporting { ProgressView("正在导入…") } }
-            .navigationTitle("导入本地书")
-            .navigationBarTitleDisplayMode(.inline)
+            .overlay { if isImporting { RagdollLoading("正在导入…") } }
+            .readingSheetTitle("导入本地书")
             .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
+                ReadingSheetActions {
                     Button("取消") { finish() }.disabled(isImporting)
-                }
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button(selectedPaths.count == urls.count ? "取消全选" : "全选") {
-                        if selectedPaths.count == urls.count { selectedPaths.removeAll() }
-                        else { selectedPaths = Set(urls.map(\.path)) }
-                    }
-                    .disabled(isImporting)
-                }
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("导入") {
+                    ReadingSheetActionButton("导入", busyTitle: "导入中", isWorking: isImporting) {
                         isImporting = true
                         let selected = files.filter { selectedPaths.contains($0.url.path) }
                         Task {
-                            await library.importPickedLocalFiles(selected)
-                            finish()
+                            let failed = await library.importPickedLocalFiles(selected)
+                            isImporting = false
+                            if failed.isEmpty {
+                                finish()
+                            } else {
+                                let succeeded = selectedPaths.subtracting(failed)
+                                files.removeAll { succeeded.contains($0.url.path) }
+                                selectedPaths = failed
+                                importError = library.errorMessage
+                                library.clearError()
+                            }
                         }
                     }
                     .disabled(selectedPaths.isEmpty || isImporting)
                 }
             }
         }
+        .disabled(isImporting)
         .interactiveDismissDisabled(isImporting)
+        .alert("本地书导入失败", isPresented: Binding(get: { importError != nil }, set: { if !$0 { importError = nil } })) {
+            Button("好", role: .cancel) {}
+        } message: { Text(importError ?? "") }
     }
 
     private func finish() {
@@ -991,7 +1152,7 @@ private struct EmptyBookshelfHero: View {
                     Image(systemName: "plus")
                         .font(.system(size: 19, weight: .medium))
                         .accessibilityHidden(true)
-                    Text("导入本地书")
+                    Text("本地文件")
                         .font(.headline)
                 }
                 .foregroundStyle(ReadingTheme.onAccent)
@@ -1064,14 +1225,13 @@ private struct ReaderOpeningPage<Content: View>: View {
         content
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(Color(uiColor: style.background).ignoresSafeArea())
-            .preferredColorScheme(style.id == "night" ? .dark : .light)
+            .readerPresentationColorScheme(style.id == "night" ? .dark : .light)
             .readingTabBarHidden()
     }
 }
 
 private struct BookshelfRow: View {
     let book: Book
-    var compact = false
     let isChecking: Bool
     @ScaledMetric(relativeTo: .body) private var coverWidth = 52
 
@@ -1081,8 +1241,8 @@ private struct BookshelfRow: View {
                 title: book.name,
                 author: book.author,
                 remoteURL: book.displayCoverURL,
-                width: compact ? 40 : coverWidth,
-                height: compact ? 56 : coverWidth * 1.42
+                width: coverWidth,
+                height: coverWidth * 1.42
             )
             .overlay { if isChecking { BookUpdateIndicator() } }
             VStack(alignment: .leading, spacing: 5) {
@@ -1096,12 +1256,12 @@ private struct BookshelfRow: View {
                 }
                 Text(book.author.isEmpty ? "未知作者" : book.author)
                     .font(.caption).foregroundStyle(.secondary).lineLimit(1)
-                BookshelfChapters(book: book, lineLimit: compact ? 1 : 2)
+                BookshelfChapters(book: book)
                     .font(.caption)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .padding(.vertical, compact ? 10 : 12)
+        .padding(.vertical, 12)
         .contentShape(Rectangle())
         .accessibilityElement(children: .combine)
     }
@@ -1111,6 +1271,7 @@ struct SearchView: View {
     @EnvironmentObject private var library: SourceLibraryModel
     let fixedSource: BookSource?
     private let initialKeyword: String
+    private let sheetClose: (() -> Void)?
     @State private var keyword: String
     @StateObject private var model = SearchViewModel()
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
@@ -1120,25 +1281,19 @@ struct SearchView: View {
     @State private var selectedSourceID: String?
     @State private var presentedBrowserPage: BrowserSearchPage?
     @State private var didStartInitialSearch = false
-    @State private var searchIsPresented = false
+    @State private var searchIsPresented: Bool
     @State private var visibleResultIDs = Set<String>()
     @AppStorage("precisionSearch") private var precisionSearch = false
 
-    init(fixedSource: BookSource? = nil, initialKeyword: String = "") {
+    init(fixedSource: BookSource? = nil, initialKeyword: String = "", sheetClose: (() -> Void)? = nil) {
+        self.sheetClose = sheetClose
         self.fixedSource = fixedSource
         self.initialKeyword = initialKeyword
         _keyword = State(initialValue: initialKeyword)
+        _searchIsPresented = State(initialValue: initialKeyword.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
     }
 
     var body: some View {
-        if #available(iOS 17.1, *) {
-            searchPage.searchPresentationToolbarBehavior(.avoidHidingContent)
-        } else {
-            searchPage
-        }
-    }
-
-    private var searchPage: some View {
         ScrollView {
             LazyVStack(spacing: 12) {
                 switch model.state {
@@ -1166,8 +1321,7 @@ struct SearchView: View {
             .padding(.bottom, 28)
         }
         .background(ReadingTheme.canvas)
-        .navigationTitle("搜索")
-        .readingSearchable(text: $keyword, isPresented: $searchIsPresented, prompt: "书名或作者")
+        .readingSearchField(text: $keyword, isPresented: $searchIsPresented, prompt: "书名或作者")
         .readingScrollDismissesKeyboard()
         .onSubmit(of: [.text, .search]) { startSearch() }
         .onDisappear {
@@ -1193,36 +1347,33 @@ struct SearchView: View {
         }
         .task {
             await model.loadSearchKeywords()
-            if initialKeyword.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                searchIsPresented = true
-            } else if !library.sources.isEmpty, !didStartInitialSearch {
+            if !initialKeyword.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+               !library.sources.isEmpty, !didStartInitialSearch {
                 didStartInitialSearch = true
                 startSearch()
             }
         }
-        .toolbar {
-            ToolbarItem(placement: .topBarTrailing) {
-                Menu {
-                    Toggle("精准搜索", isOn: $precisionSearch)
-                    Button("分组或书源", systemImage: "scope") { showsScope = true }
-                    NavigationLink {
-                        SourceManagementView()
-                    } label: {
-                        Label("书源管理", systemImage: "network")
-                    }
-                    if model.state == .searching {
-                        Button("停止搜索", systemImage: "stop.fill", role: .destructive) {
-                            model.cancel()
-                        }
-                    } else if model.isPaused {
-                        Button("继续搜索", systemImage: "play.fill") { model.resume() }
-                    }
+        .readingRouteHeader("搜索", close: sheetClose, displayMode: .automatic) {
+            Menu {
+                Toggle("精准搜索", isOn: $precisionSearch)
+                Button("分组或书源", systemImage: "scope") { showsScope = true }
+                NavigationLink {
+                    SourceManagementView()
                 } label: {
-                    Label("搜索选项", systemImage: "slider.horizontal.3")
+                    Label("书源管理", systemImage: "network")
                 }
-                .accessibilityLabel("搜索选项")
-                .accessibilityIdentifier("search.options")
+                if model.state == .searching {
+                    Button("停止搜索", systemImage: "stop.fill", role: .destructive) {
+                        model.cancel()
+                    }
+                } else if model.isPaused {
+                    Button("继续搜索", systemImage: "play.fill") { model.resume() }
+                }
+            } label: {
+                Label("搜索选项", systemImage: "slider.horizontal.3")
             }
+            .accessibilityLabel("搜索选项")
+            .accessibilityIdentifier("search.options")
         }
         .onChange(of: model.browserPage?.id) { _ in
             if let page = model.browserPage, page.page == 1, !showsScope {
@@ -1312,7 +1463,7 @@ struct SearchView: View {
             ReadingCard {
                 VStack(alignment: .leading, spacing: 14) {
                     HStack(spacing: 12) {
-                        ProgressView().controlSize(.regular)
+                        RagdollLoading()
                         VStack(alignment: .leading, spacing: 3) {
                             Text("正在搜索“\(model.submittedKeyword)”").font(.headline)
                             Text(searchProgressText).font(.caption).foregroundStyle(.secondary)
@@ -1351,7 +1502,10 @@ struct SearchView: View {
                             .readingSecondaryButtonStyle()
                             .controlSize(.small)
                     } else if model.state == .searching {
-                        StatusPill(text: "\(model.completedSourceCount)/\(model.totalSourceCount)", systemImage: "magnifyingglass")
+                        HStack(spacing: 4) {
+                            RagdollLoading(width: 28)
+                            Text("\(model.completedSourceCount)/\(model.totalSourceCount)").font(.caption.monospacedDigit())
+                        }
                     } else {
                         StatusPill(text: scopeDisplay, systemImage: "scope")
                             .lineLimit(2)
@@ -1384,7 +1538,7 @@ struct SearchView: View {
             }
             if model.isLoadingMore {
                 HStack(spacing: 10) {
-                    ProgressView().controlSize(.small)
+                    RagdollLoading(width: 28)
                     Text("正在查找更多结果…").font(.subheadline).foregroundStyle(.secondary)
                 }
                 .frame(maxWidth: .infinity)
@@ -2014,27 +2168,45 @@ private struct AllBookmarksView: View {
     }
 
     var body: some View {
-        List {
+        Group {
             if activity.bookmarks.isEmpty {
-                ReadingUnavailableView(
-                    "暂无书签",
-                    systemImage: "bookmark.slash",
-                    description: Text("阅读时可从菜单或点击区域添加书签。")
-                )
+                ReadingIllustratedEmptyState(artwork: "HistoryEmptyArtwork", title: "暂无书签",
+                                             message: "阅读时可从右上角菜单添加书签。") { EmptyView() }
             } else {
-                ForEach(sections) { section in
-                    Section("\(section.bookName)(\(section.author))") {
-                        ForEach(section.bookmarks) { bookmark in
-                            bookmarkLink(bookmark)
-                                .contextMenu {
-                                    Button("编辑书签", systemImage: "square.and.pencil") { editingBookmark = bookmark }
+                List {
+                    ForEach(sections) { section in
+                        Section {
+                            ForEach(section.bookmarks) { bookmark in
+                                bookmarkLink(bookmark)
+                                    .contextMenu {
+                                        Button("编辑书签", systemImage: "square.and.pencil") { editingBookmark = bookmark }
+                                    }
+                            }
+                            .listRowBackground(ReadingTheme.surface)
+                        } header: {
+                            HStack(spacing: 12) {
+                                BookCoverArtwork(title: section.bookName, author: section.author,
+                                                 remoteURL: section.bookmarks.first.flatMap(matchingBook)?.displayCoverURL,
+                                                 width: 34, height: 48)
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text(section.bookName).font(.headline).foregroundStyle(ReadingTheme.ink)
+                                    if !section.author.isEmpty { Text(section.author).font(.caption) }
                                 }
+                            }
+                            .textCase(nil)
+                            .padding(.vertical, 6)
+                            .accessibilityElement(children: .combine)
                         }
                     }
                 }
+                .listStyle(.insetGrouped)
+                .readingListTopMargin(4)
+                .readingScrollContentBackgroundHidden()
             }
         }
+        .background(ReadingTheme.canvas)
         .navigationTitle("书签")
+        .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 if !activity.bookmarks.isEmpty {
@@ -2081,17 +2253,25 @@ private struct AllBookmarksView: View {
     }
 
     private func bookmarkRow(_ bookmark: Bookmark) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: 8) {
             Text(bookmark.chapterName.isEmpty ? "第 \(bookmark.chapterIndex + 1) 章" : bookmark.chapterName)
-                .font(.headline).foregroundStyle(ReadingTheme.coral)
+                .font(.subheadline.weight(.medium))
+                .foregroundStyle(.secondary)
             if !bookmark.bookText.isEmpty {
-                Text(bookmark.bookText).font(.footnote).foregroundStyle(.secondary).lineLimit(3)
+                Text(bookmark.bookText)
+                    .font(.system(.body, design: .serif))
+                    .foregroundStyle(ReadingTheme.ink)
+                    .lineSpacing(3)
+                    .lineLimit(3)
             }
             if !bookmark.content.isEmpty {
-                Label(bookmark.content, systemImage: "note.text").font(.caption).lineLimit(2)
+                Label(bookmark.content, systemImage: "note.text")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
             }
         }
-        .padding(.vertical, 5)
+        .padding(.vertical, 8)
     }
 
     private var jsonExportData: Data {
@@ -2142,6 +2322,8 @@ private struct BookmarkEditorView: View {
     @EnvironmentObject private var activity: ReadingActivityModel
     @Environment(\.dismiss) private var dismiss
     let bookmark: Bookmark
+    @State private var saving = false
+    @State private var saveError: String?
     @State private var bookText: String
     @State private var content: String
 
@@ -2162,20 +2344,29 @@ private struct BookmarkEditorView: View {
                     }
                 }
             }
-            .navigationTitle(bookmark.chapterName.isEmpty ? "编辑书签" : bookmark.chapterName)
-            .navigationBarTitleDisplayMode(.inline)
+            .readingSheetTitle(bookmark.chapterName.isEmpty ? "编辑书签" : bookmark.chapterName)
             .toolbar {
-                ToolbarItem(placement: .cancellationAction) { Button("取消") { dismiss() } }
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("保存") {
+                ReadingSheetActions {
+                    Button("取消") { dismiss() }
+                    ReadingSheetActionButton(isWorking: saving) {
+                        saving = true
                         var updated = bookmark
                         updated.bookText = bookText
                         updated.content = content
-                        Task { await activity.updateBookmark(updated); dismiss() }
+                        Task {
+                            if await activity.updateBookmark(updated) { dismiss() }
+                            else { saveError = activity.errorMessage; activity.clearError() }
+                            saving = false
+                        }
                     }
                 }
             }
         }
+        .disabled(saving)
+        .interactiveDismissDisabled(saving)
+        .alert("书签未保存", isPresented: Binding(get: { saveError != nil }, set: { if !$0 { saveError = nil } })) {
+            Button("好") { saveError = nil }
+        } message: { Text(saveError ?? "") }
     }
 }
 
@@ -2284,9 +2475,9 @@ private struct SearchScopeSheet: View {
     let groups: [String]
     @Binding var selectedGroups: Set<String>
     @Binding var selectedSourceID: String?
-    @State private var mode = 0
+    private enum Scope { case all, groups, source }
+    @State private var mode: Scope
     @State private var sourceFilter = ""
-    @State private var filterIsPresented = false
     @State private var workingGroups: Set<String>
     @State private var workingSourceID: String?
 
@@ -2302,28 +2493,25 @@ private struct SearchScopeSheet: View {
         _selectedSourceID = selectedSourceID
         _workingGroups = State(initialValue: selectedGroups.wrappedValue)
         _workingSourceID = State(initialValue: selectedSourceID.wrappedValue)
-        _mode = State(initialValue: selectedSourceID.wrappedValue == nil ? 0 : 1)
+        _mode = State(initialValue: selectedSourceID.wrappedValue != nil ? .source : selectedGroups.wrappedValue.isEmpty ? .all : .groups)
     }
 
     var body: some View {
         ReadingNavigationStack {
             List {
                 Picker("范围类型", selection: $mode) {
-                    Text("分组").tag(0)
-                    Text("书源").tag(1)
+                    Text("全部书源").tag(Scope.all)
+                    Text("分组").tag(Scope.groups)
+                    Text("书源").tag(Scope.source)
                 }
                 .pickerStyle(.segmented)
 
-                Button("全部书源") {
-                    selectedGroups.removeAll()
-                    selectedSourceID = nil
-                    dismiss()
-                }
-
-                if mode == 0 {
+                if mode == .all {
+                    Label("全部书源", systemImage: "checkmark")
+                } else if mode == .groups {
+                    Text("已选 \(workingGroups.count) 个分组").font(.footnote).foregroundStyle(.secondary)
                     ForEach(groups, id: \.self) { group in
                         Button {
-                            workingSourceID = nil
                             if !workingGroups.insert(group).inserted { workingGroups.remove(group) }
                         } label: {
                             HStack {
@@ -2334,11 +2522,10 @@ private struct SearchScopeSheet: View {
                         }
                     }
                 } else {
+                    ReadingPillSearchField(placeholder: "筛选书源", text: $sourceFilter)
                     ForEach(filteredSources) { source in
                         Button {
-                            workingGroups.removeAll()
                             workingSourceID = source.id
-                            filterIsPresented = false
                         } label: {
                             HStack {
                                 VStack(alignment: .leading) {
@@ -2352,20 +2539,21 @@ private struct SearchScopeSheet: View {
                     }
                 }
             }
-            .navigationTitle("分组或书源")
-            .navigationBarTitleDisplayMode(.inline)
-            .readingSearchable(text: $sourceFilter, isPresented: $filterIsPresented, prompt: "筛选书源")
+            .readingSheetTitle("搜索范围")
             .toolbar {
-                ToolbarItem(placement: .cancellationAction) { Button("取消") { dismiss() } }
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("确定") {
-                        selectedGroups = workingGroups
-                        selectedSourceID = workingSourceID
+                ReadingSheetActions {
+                    Button("取消") { dismiss() }
+                    ReadingSheetActionButton {
+                        selectedGroups = mode == .groups ? workingGroups : []
+                        selectedSourceID = mode == .source ? workingSourceID : nil
                         dismiss()
                     }
+                    .disabled((mode == .groups && workingGroups.isEmpty) || (mode == .source && workingSourceID == nil))
                 }
             }
         }
+        .readingPresentationDetents([.medium, .large])
+        .readingPresentationDragIndicator()
     }
 
     private var filteredSources: [BookSource] {

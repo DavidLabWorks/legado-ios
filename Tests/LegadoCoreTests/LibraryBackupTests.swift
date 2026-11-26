@@ -3,6 +3,19 @@ import Testing
 @testable import LegadoCore
 
 struct LibraryBackupTests {
+    @Test func retiredTapSettingsDoNotBlockRestoringOlderBackups() throws {
+        let values: [String: JSONValue] = ["clickActionMiddleLeft": .number(8), "textSize": .number(24)]
+        let suite = UUID().uuidString
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        try BackupPreferences.validate(values)
+        BackupPreferences.apply(values, to: defaults)
+        #expect(defaults.integer(forKey: "textSize") == 24)
+        #expect(defaults.object(forKey: "clickActionMiddleLeft") == nil)
+        let config = try JSONDecoder().decode(BookReadConfig.self, from: Data(#"{"reSegment":true,"pageAnim":3}"#.utf8))
+        #expect(config.pageAnim == 3)
+    }
+
     @Test func restoresPortableShelfSourcesSettingsAndWebsiteData() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -125,6 +138,26 @@ struct LibraryBackupTests {
             let restoredVariables = RSSVariableStore(directory: b.appendingPathComponent("ruleData/rss"))
             #expect(try restoredVariables.get(origin: site.sourceUrl, link: "/1", key: "page") == "3")
         }
+    }
+
+    @Test func backupIncludesOnlyLegacyChaptersForBooksOnShelf() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let db = try LegadoDatabase(url: root.appendingPathComponent("db"))
+        let book = Book(bookUrl: "https://library.test/kept", name: "在架", origin: "source")
+        try await db.replaceBooks([book])
+        let directory = root.appendingPathComponent("Chapters")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        for key in [book.bookUrl, "https://library.test/removed"] {
+            let chapter = BookChapter(url: key + "/1", title: "第一章", bookUrl: key, index: 0)
+            let name = URL(fileURLWithPath: key).lastPathComponent + ".json"
+            try JSONEncoder().encode([chapter]).write(to: directory.appendingPathComponent(name))
+        }
+
+        let backup = try await db.makeBackup(defaultsSuite: UUID().uuidString)
+        #expect(Set(backup.shelf.chapters.keys) == [book.bookUrl])
+        #expect(backup.shelf.chapters[book.bookUrl]?.first?.title == "第一章")
+        #expect(FileManager.default.fileExists(atPath: directory.appendingPathComponent("removed.json").path))
     }
 
     @Test func emptyBackupReplacesCollectionsAndDoesNotReviveLegacyFiles() async throws {

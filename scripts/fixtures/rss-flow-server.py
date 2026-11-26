@@ -14,6 +14,7 @@ BASE_URL = "http://127.0.0.1:18763"
 class Fixture(http.server.BaseHTTPRequestHandler):
     article_reads = {}
     feed_reads = {}
+    served_images = set()
 
     def do_GET(self):
         parsed = urllib.parse.urlsplit(self.path)
@@ -52,6 +53,8 @@ class Fixture(http.server.BaseHTTPRequestHandler):
             titles = ["第二页文章"] if parsed.path.endswith("/page/2/") else [f"文章 {i}" for i in range(20)]
             if len(titles) > 1:
                 self.feed_reads[root] = self.feed_reads.get(root, 0) + 1
+                if self.feed_reads[root] == 1:
+                    time.sleep(3)  # Keep the cold-load indicator observable.
                 titles[0] = f"第{self.feed_reads[root]}次首页"
                 titles.insert(0, "一段需要换行的文章标题" * 6)
             else:
@@ -67,9 +70,23 @@ class Fixture(http.server.BaseHTTPRequestHandler):
             self.wfile.write(body)
             return
         if parsed.path == "/wide.png":
+            policy = query.get("policy", [""])[0]
+            token = query.get("once", [None])[0]
+            if token:
+                if token in self.served_images:
+                    self.send_error(410)
+                    return
+                self.served_images.add(token)
+            if policy == "none" and self.headers.get("Referer"):
+                self.send_error(403)
+                return
+            if policy == "stall":
+                time.sleep(30)
             body = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAUAAAAAYAQAAAACjQRkpAAAAEUlEQVR4nGNgGAWjYBQMNwAAA9gAAdPGQ68AAAAASUVORK5CYII=")
             self.send_response(200)
             self.send_header("Content-Type", "image/png")
+            if token:
+                self.send_header("Cache-Control", "no-store")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)

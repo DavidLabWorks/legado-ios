@@ -213,7 +213,7 @@ final class SourceLibraryModel: ObservableObject {
         do {
             var budget = 100
             let batch = try await resolveImport(value, depth: 0, visited: [], budget: &budget)
-            if batch.rules != nil { stage(batch); return }
+            if batch.rules != nil { pendingImport = review(for: batch); return }
             guard batch.invalidItems.isEmpty else {
                 throw BookSourceImportError.invalidSources(batch.invalidItems.flatMap(\.issues))
             }
@@ -282,7 +282,7 @@ final class SourceLibraryModel: ObservableObject {
                 let batch = try await resolveImport(String(decoding: input.rules, as: UTF8.self), depth: 0, visited: [], budget: &budget)
                 try combined.append(batch)
             }
-            stage(combined)
+            pendingImport = review(for: combined)
         } catch {
             notice = .init(kind: .error, title: "文件导入失败", detail: error.localizedDescription)
         }
@@ -296,12 +296,16 @@ final class SourceLibraryModel: ObservableObject {
         isWorking = true
         defer { isWorking = false }
         do {
-            var budget = 100
-            let batch = try await resolveImport(value, depth: 0, visited: [], budget: &budget)
-            stage(batch)
+            pendingImport = try await preparePreview(value)
         } catch {
             notice = .init(kind: .error, title: "规则导入失败", detail: error.localizedDescription)
         }
+    }
+
+    func preparePreview(_ input: String) async throws -> PendingImport {
+        var budget = 100
+        let batch = try await resolveImport(input, depth: 0, visited: [], budget: &budget)
+        return review(for: batch)
     }
 
     private nonisolated func resolveImport(_ value: String, depth: Int, visited: Set<String>, budget: inout Int) async throws -> ImportBatch {
@@ -470,14 +474,15 @@ final class SourceLibraryModel: ObservableObject {
         await persist(updated, successTitle: enabled ? "已批量启用" : "已批量停用")
     }
 
-    func addGroup(_ group: String, to sourceIDs: Set<String>) async {
+    @discardableResult
+    func addGroup(_ group: String, to sourceIDs: Set<String>) async -> Bool {
         let values = BookSource.parseGroups(group)
-        guard !values.isEmpty, !sourceIDs.isEmpty else { return }
+        guard !values.isEmpty, !sourceIDs.isEmpty else { return false }
         var updated = sources
         for index in updated.indices where sourceIDs.contains(updated[index].id) {
             updated[index].addGroups(values.joined(separator: ","))
         }
-        await persist(updated, successTitle: "已加入分组 \(values.joined(separator: "、"))")
+        return await persist(updated, successTitle: "已加入分组 \(values.joined(separator: "、"))")
     }
 
     func removeGroup(_ group: String, from sourceIDs: Set<String>) async {
@@ -570,11 +575,11 @@ final class SourceLibraryModel: ObservableObject {
         return (result.sources, result.rejected.map { .init(source: $0.source, issues: $0.issues) })
     }
 
-    private func stage(_ batch: ImportBatch) {
+    private func review(for batch: ImportBatch) -> PendingImport {
         let incoming = batch.sources
         let existingByID = Dictionary(uniqueKeysWithValues: sources.map { ($0.id, $0) })
         let unique = incoming.reduce(into: [String: BookSource]()) { $0[$1.id] = $1 }
-        pendingImport = .init(items: Array(unique.values)
+        return .init(items: Array(unique.values)
             .sorted { $0.bookSourceName.localizedStandardCompare($1.bookSourceName) == .orderedAscending }
             .map { .init(source: $0, existing: existingByID[$0.id]) },
             invalidItems: batch.invalidItems, rules: batch.rules)

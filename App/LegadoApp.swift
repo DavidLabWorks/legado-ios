@@ -11,6 +11,7 @@ struct LegadoApp: App {
     @StateObject private var ruleSubscriptions: RuleSubscriptionModel
 
     init() {
+        UIRefreshControl.appearance().showsRagdoll = true
         if UserDefaults.standard.string(forKey: "systemTtsVoice") == "auto-mandarin" {
             UserDefaults.standard.removeObject(forKey: "systemTtsVoice")
         }

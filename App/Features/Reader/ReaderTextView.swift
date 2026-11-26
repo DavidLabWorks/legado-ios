@@ -1,10 +1,39 @@
 import SwiftUI
 import UIKit
 
+extension UIView {
+    func handleReaderTap(at point: CGPoint, menu: () -> Void, turn: (Int) -> Void) {
+        let x = point.x - bounds.minX
+        let third = bounds.width / 3
+        if x < third { turn(-1) }
+        else if x >= 2 * third { turn(1) }
+        else { menu() }
+    }
+}
+
+extension UIScrollView {
+    @discardableResult
+    func turnReaderScreen(_ direction: Int) -> Bool {
+        let top = -adjustedContentInset.top
+        let bottom = max(top, contentSize.height - bounds.height + adjustedContentInset.bottom)
+        let y = min(bottom, max(top, contentOffset.y + CGFloat(direction) * bounds.height))
+        guard abs(y - contentOffset.y) > 0.5 else { return false }
+        setContentOffset(CGPoint(x: contentOffset.x, y: y), animated: !UIAccessibility.isReduceMotionEnabled)
+        return true
+    }
+}
+
 struct ReaderTextPage {
     let offset: CGFloat
     let height: CGFloat
     let characterRange: NSRange
+
+    @MainActor func visibleRect(in view: UITextView) -> CGRect {
+        let inset = view.textContainerInset
+        let available = max(1, view.bounds.height - inset.top - inset.bottom)
+        return CGRect(x: view.bounds.minX, y: view.bounds.minY + inset.top,
+                      width: view.bounds.width, height: min(height, available))
+    }
 
     /// TextKit line fragments include line/paragraph spacing and mixed fonts.
     /// A page break must fall between these fragments, never through a glyph.
@@ -72,9 +101,28 @@ private final class ReaderPageDragView: UIView {
         current.frame = outgoing
         adjacent.frame = incoming
     }
+
+    func animateTurn(commit: Bool, animation: Int, releaseSpeed: CGFloat = 0,
+                     completion: @escaping (Bool) -> Void) {
+        let destination = commit ? -CGFloat(direction) * bounds.width : 0
+        let distance = abs(destination - current.frame.minX)
+        let remaining = distance / bounds.width
+        let normalDuration = commit ? 0.18 + 0.12 * Double(remaining) : 0.12 + 0.10 * Double(remaining)
+        let duration = commit && releaseSpeed > 0
+            ? min(normalDuration, max(0.12, Double(distance / releaseSpeed))) : normalDuration
+        if animation == 2, commit {
+            UIView.transition(with: current, duration: 0.38,
+                              options: direction > 0 ? .transitionCurlUp : .transitionCurlDown,
+                              animations: { self.current.image = self.adjacent.image }, completion: completion)
+        } else {
+            UIView.animate(withDuration: duration, delay: 0, options: [.curveEaseOut, .allowUserInteraction]) {
+                self.move(to: destination, covering: animation == 0)
+            } completion: { completion($0) }
+        }
+    }
 }
 
-private final class ReaderLayoutTextView: UITextView {
+private class ReaderLayoutTextView: UITextView {
     var onLayout: ((UITextView) -> Void)?
     private var reportedSize = CGSize.zero
     private var reportedContentSize = CGSize.zero
@@ -98,14 +146,17 @@ struct ReaderTextSelection {
     let character: Int
     let insets: UIEdgeInsets
     let viewportOffset: CGFloat
+    let page: ReaderTextPage?
+    let lineFragmentPadding: CGFloat
 
     init?(manager: NSLayoutManager, container: NSTextContainer, at point: CGPoint, body: String,
-          bodyStart: Int, insets: UIEdgeInsets, viewportOffset: CGFloat) {
+          bodyStart: Int, insets: UIEdgeInsets, viewportOffset: CGFloat, page: ReaderTextPage? = nil) {
         guard let storage = manager.textStorage, manager.numberOfGlyphs > 0 else { return nil }
         let glyph = manager.glyphIndex(for: point, in: container)
         guard glyph < manager.numberOfGlyphs else { return nil }
         let rect = manager.boundingRect(forGlyphRange: NSRange(location: glyph, length: 1), in: container)
         let character = manager.characterIndexForGlyph(at: glyph)
+        if let page, !NSLocationInRange(character, page.characterRange) { return nil }
         guard rect.contains(point), NSLocationInRange(character, NSRange(location: bodyStart, length: body.utf16.count)) else { return nil }
         self.rendered = NSAttributedString(attributedString: storage)
         self.body = body
@@ -113,37 +164,312 @@ struct ReaderTextSelection {
         self.character = character
         self.insets = insets
         self.viewportOffset = viewportOffset
+        self.page = page
+        self.lineFragmentPadding = container.lineFragmentPadding
+    }
+
+    func containsBodyText(in range: NSRange) -> Bool {
+        range.length > 0 && range.location >= bodyStart && NSMaxRange(range) <= bodyStart + body.utf16.count
     }
 
     func originalText(in range: NSRange) -> String? {
-        guard range.length > 0, range.location >= bodyStart,
-              NSMaxRange(range) <= bodyStart + body.utf16.count else { return nil }
+        guard containsBodyText(in: range) else { return nil }
         return (body as NSString).substring(with: NSRange(location: range.location - bodyStart, length: range.length))
+    }
+}
+
+struct ReaderDictionary: UIViewControllerRepresentable {
+    let term: String
+
+    func makeUIViewController(context: Context) -> UIReferenceLibraryViewController {
+        UIReferenceLibraryViewController(term: term)
+    }
+
+    func updateUIViewController(_ controller: UIReferenceLibraryViewController, context: Context) {}
+}
+
+private final class ReaderSelectionRect: UITextSelectionRect {
+    private let segment: UITextSelectionRect
+    override var rect: CGRect { bounds }
+    override var writingDirection: NSWritingDirection { segment.writingDirection }
+    override var containsStart: Bool { startsRange }
+    override var containsEnd: Bool { endsRange }
+    override var isVertical: Bool { segment.isVertical }
+
+    private let bounds: CGRect
+    private let startsRange: Bool
+    private let endsRange: Bool
+
+    init(_ segment: UITextSelectionRect, rect: CGRect, containsStart: Bool, containsEnd: Bool) {
+        self.segment = segment
+        bounds = rect
+        startsRange = containsStart
+        endsRange = containsEnd
+        super.init()
+    }
+}
+
+private final class ReaderSelectionTextView: ReaderLayoutTextView {
+    static let handleDiameter: CGFloat = 9
+    var onDismiss: (() -> Void)?
+    var onSelectionLayout: ((CGRect) -> Void)?
+    var showsSystemTranslation = false
+    var page: ReaderTextPage?
+    private let markers = CAShapeLayer()
+    private let highlight = CAShapeLayer()
+    private let decoration = UIView()
+
+    func configureSelection(in container: UIView) {
+        // UIKit keeps its drag targets while these layers draw the smaller handles.
+        tintColor = .clear
+        let green = UIColor(red: 0.15, green: 0.55, blue: 0.34, alpha: 1)
+        highlight.fillColor = green.withAlphaComponent(0.18).cgColor
+        markers.fillColor = green.cgColor
+        decoration.isUserInteractionEnabled = false
+        decoration.accessibilityElementsHidden = true
+        decoration.clipsToBounds = true
+        decoration.frame = container.bounds
+        decoration.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        container.addSubview(decoration)
+        decoration.layer.addSublayer(highlight)
+        decoration.layer.addSublayer(markers)
+        let tap = UITapGestureRecognizer(target: self, action: #selector(dismissSelection))
+        tap.cancelsTouchesInView = false
+        addGestureRecognizer(tap)
+        if #unavailable(iOS 17.4) {
+            NotificationCenter.default.addObserver(self, selector: #selector(legacyTranslationMenuClosed),
+                name: UIMenuController.didHideMenuNotification, object: nil)
+        }
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        if let page, let mask = layer.mask as? CAShapeLayer {
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            mask.path = UIBezierPath(rect: page.visibleRect(in: self)).cgPath
+            CATransaction.commit()
+        }
+        updateSelection()
+    }
+
+    override func selectionRects(for range: UITextRange) -> [UITextSelectionRect] {
+        let characters = NSRange(location: offset(from: beginningOfDocument, to: range.start),
+                                 length: offset(from: range.start, to: range.end))
+        guard characters.length > 0 else { return super.selectionRects(for: range) }
+
+        var result: [UITextSelectionRect] = []
+        let manager = layoutManager
+        let glyphs = manager.glyphRange(forCharacterRange: characters, actualCharacterRange: nil)
+        func fontBand(at glyph: Int) -> CGRect {
+            var lineGlyphs = NSRange()
+            let used = manager.lineFragmentUsedRect(forGlyphAt: glyph, effectiveRange: &lineGlyphs)
+            let first = lineGlyphs.location
+            let character = manager.characterIndexForGlyph(at: first)
+            guard let font = textStorage.attribute(.font, at: character, effectiveRange: nil) as? UIFont else {
+                return used.offsetBy(dx: textContainerInset.left, dy: textContainerInset.top)
+            }
+            let baseline = manager.lineFragmentRect(forGlyphAt: first, effectiveRange: nil).minY
+                + manager.location(forGlyphAt: first).y + textContainerInset.top
+            return CGRect(x: used.minX + textContainerInset.left, y: baseline - font.ascender,
+                          width: used.width, height: font.ascender - font.descender)
+        }
+
+        manager.enumerateLineFragments(forGlyphRange: glyphs) { _, _, _, lineGlyphs, _ in
+            let line = NSIntersectionRange(characters, manager.characterRange(forGlyphRange: lineGlyphs, actualGlyphRange: nil))
+            guard line.length > 0,
+                  let start = self.position(from: range.start, offset: line.location - characters.location),
+                  let end = self.position(from: start, offset: line.length),
+                  let part = self.textRange(from: start, to: end) else { return }
+
+            let band = fontBand(at: lineGlyphs.location)
+            var top = band.minY - 2
+            var bottom = band.maxY + 2
+            // Share the space between lines, leaving a two-point gap even with tight leading.
+            if lineGlyphs.location > 0 {
+                let previous = fontBand(at: lineGlyphs.location - 1)
+                top = max(top, (previous.maxY + band.minY) / 2 + 1)
+            }
+            if NSMaxRange(lineGlyphs) < manager.numberOfGlyphs {
+                let next = fontBand(at: NSMaxRange(lineGlyphs))
+                bottom = min(bottom, (band.maxY + next.minY) / 2 - 1)
+            }
+            guard bottom > top else { return }
+            let intersecting = super.selectionRects(for: part).filter { !$0.rect.intersection(band).isNull }
+            let visible = intersecting.filter { $0.rect.intersection(band).width > 0 }
+            let segments = visible.isEmpty ? intersecting : visible
+            // At a wrap UIKit can put the endpoint on a zero-width rect on the adjacent line.
+            let first = segments.first(where: { $0.containsStart }) ?? segments.first
+            let last = segments.last(where: { $0.containsEnd }) ?? segments.last
+            for segment in segments {
+                let overlap = segment.rect.intersection(band)
+                let rect = CGRect(x: overlap.minX, y: top, width: overlap.width, height: bottom - top)
+                result.append(ReaderSelectionRect(segment, rect: rect,
+                    containsStart: line.location == characters.location && segment === first,
+                    containsEnd: NSMaxRange(line) == NSMaxRange(characters) && segment === last))
+            }
+        }
+        return result
+    }
+
+    func updateSelection() {
+        let handles = UIBezierPath()
+        let background = UIBezierPath()
+        if let selection = selectedTextRange, !selection.isEmpty {
+            for segment in selectionRects(for: selection) {
+                let rect = convert(segment.rect, to: decoration)
+                background.append(UIBezierPath(rect: rect))
+                let rtl = segment.writingDirection == .rightToLeft
+                if segment.containsStart { appendHandle(to: handles, rect: rect, x: rtl ? rect.maxX : rect.minX, atStart: true) }
+                if segment.containsEnd { appendHandle(to: handles, rect: rect, x: rtl ? rect.minX : rect.maxX, atStart: false) }
+            }
+        }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        highlight.frame = decoration.bounds
+        markers.frame = highlight.frame
+        highlight.path = background.cgPath
+        markers.path = handles.cgPath
+        CATransaction.commit()
+        onSelectionLayout?(background.isEmpty || showsSystemTranslation ? .null : background.bounds.intersection(decoration.bounds))
+    }
+
+    private func appendHandle(to path: UIBezierPath, rect: CGRect, x: CGFloat, atStart: Bool) {
+        path.append(UIBezierPath(rect: CGRect(x: x - 0.75, y: rect.minY, width: 1.5, height: rect.height)))
+        let diameter = Self.handleDiameter
+        guard rect.intersects(decoration.bounds) else { return }
+        let desiredY = atStart ? rect.minY - diameter : rect.maxY
+        let y = min(max(desiredY, 0), decoration.bounds.height - diameter)
+        path.append(UIBezierPath(ovalIn: CGRect(x: x - diameter / 2, y: y, width: diameter, height: diameter)))
+    }
+
+    @objc private func dismissSelection() { onDismiss?() }
+
+    override func accessibilityPerformEscape() -> Bool {
+        dismissSelection()
+        return true
+    }
+
+    override func canPerformAction(_ action: Selector, withSender sender: Any?) -> Bool {
+        if showsSystemTranslation {
+            return NSStringFromSelector(action).localizedCaseInsensitiveContains("translate")
+                && super.canPerformAction(action, withSender: sender)
+        }
+        return action == #selector(copy(_:)) && sender is UIKeyCommand
+    }
+
+    @objc private func legacyTranslationMenuClosed() {
+        guard showsSystemTranslation else { return }
+        showsSystemTranslation = false
+        updateSelection()
+    }
+
+    // iOS 15–17.3 expose system translation through the text editing menu.
+    func showLegacyTranslation() {
+        guard let range = selectedTextRange else { return }
+        showsSystemTranslation = true
+        updateSelection()
+        UIMenuController.shared.showMenu(from: self, rect: firstRect(for: range))
     }
 }
 
 struct ReaderSelectionView: UIViewRepresentable {
     let selection: ReaderTextSelection
-    let onSelection: (String?) -> Void
+    let onDismiss: () -> Void
+    let onFilter: (String) -> Void
+    let onLookup: (String) -> Void
+    let onTranslate: (String) -> Void
 
-    func makeCoordinator() -> Coordinator { Coordinator(parent: self) }
+    func makeCoordinator() -> Coordinator { Coordinator() }
 
-    func makeUIView(context: Context) -> UITextView {
-        let view: ReaderLayoutTextView
-        if #available(iOS 16.0, *) {
-            view = ReaderLayoutTextView(usingTextLayoutManager: false)
-        } else {
-            view = ReaderLayoutTextView(frame: .zero)
-        }
+    func makeUIView(context: Context) -> UIView {
+        let container = UIView()
+        let view = ReaderSelectionTextView(frame: .zero, textContainer: nil)
+        // Match the TextKit 1 layout used to create the chapter snapshot.
+        _ = view.layoutManager
+        view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        // Give native drags room past the visible edge so UIKit does not draw an overflow knob.
+        let handleMargin = ReaderSelectionTextView.handleDiameter * 2
+        view.frame = container.bounds.insetBy(dx: 0, dy: -handleMargin)
+        container.clipsToBounds = true
+        container.addSubview(view)
         view.backgroundColor = .clear
         view.isEditable = false
         view.isSelectable = true
         view.accessibilityIdentifier = "reader.selection"
         view.contentInsetAdjustmentBehavior = .never
-        view.textContainer.lineFragmentPadding = 0
-        view.textContainerInset = selection.insets
+        view.textContainer.lineFragmentPadding = selection.lineFragmentPadding
+        if let page = selection.page {
+            view.page = page
+            // Keep the full TextKit layout for paragraphs that wrap across a page break.
+            view.panGestureRecognizer.isEnabled = false
+            view.showsVerticalScrollIndicator = false
+            view.layer.mask = CAShapeLayer()
+        }
+        var insets = selection.insets
+        insets.top += handleMargin
+        insets.bottom += handleMargin
+        view.textContainerInset = insets
         view.attributedText = selection.rendered
         view.delegate = context.coordinator
+        view.configureSelection(in: container)
+        view.onDismiss = onDismiss
+
+        let toolbar = UIStackView()
+        toolbar.accessibilityIdentifier = "reader.selectionMenu"
+        toolbar.distribution = .fillEqually
+        toolbar.backgroundColor = UIColor(white: 0.18, alpha: 0.98)
+        toolbar.layer.cornerRadius = 9
+        toolbar.layer.cornerCurve = .continuous
+        toolbar.isHidden = true
+        container.addSubview(toolbar)
+        @discardableResult func addAction(_ title: String, icon: String, perform: @escaping (ReaderSelectionTextView, String) -> Void) -> UIButton {
+            var config = UIButton.Configuration.plain()
+            config.title = title
+            config.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { attributes in
+                var styled = attributes
+                styled.font = UIFont.preferredFont(forTextStyle: .caption1)
+                return styled
+            }
+            config.image = UIImage(systemName: icon, withConfiguration: UIImage.SymbolConfiguration(pointSize: 15, weight: .medium))
+            config.imagePlacement = .top
+            config.imagePadding = 4
+            config.baseForegroundColor = .white
+            config.contentInsets = NSDirectionalEdgeInsets(top: 6, leading: 4, bottom: 6, trailing: 4)
+            let button = UIButton(configuration: config, primaryAction: UIAction { [weak view] _ in
+                guard let view, let range = view.selectedTextRange, let text = view.text(in: range), !text.isEmpty else { return }
+                perform(view, text)
+            })
+            button.accessibilityLabel = title
+            toolbar.addArrangedSubview(button)
+            return button
+        }
+        addAction("复制", icon: "doc.on.doc") { _, text in
+            UIPasteboard.general.string = text
+            onDismiss()
+        }
+        let filter = addAction("过滤", icon: "line.3.horizontal.decrease.circle") { view, _ in
+            if let text = selection.originalText(in: view.selectedRange) { onFilter(text) }
+        }
+        addAction("查找", icon: "book") { _, text in onLookup(text) }
+        addAction("翻译", icon: "character.bubble") { view, text in
+            if #available(iOS 17.4, *) { onTranslate(text) } else { view.showLegacyTranslation() }
+        }
+        view.onSelectionLayout = { [weak view, weak toolbar, weak filter] visibleRect in
+            guard let view, let toolbar, let viewport = toolbar.superview?.bounds else { return }
+            toolbar.isHidden = visibleRect.isNull
+            guard !visibleRect.isNull else { return }
+            filter?.isEnabled = selection.containsBodyText(in: view.selectedRange)
+            let anchor = visibleRect
+            let size = toolbar.systemLayoutSizeFitting(UIView.layoutFittingCompressedSize)
+            let width = min(max(208, size.width), viewport.width - 12)
+            let height = max(46, size.height)
+            let x = min(max(6, anchor.midX - width / 2), viewport.width - width - 6)
+            let clearance = ReaderSelectionTextView.handleDiameter + 4
+            let above = anchor.minY - height - clearance
+            let y = above >= 4 ? above : min(anchor.maxY + clearance, viewport.height - height - 4)
+            toolbar.frame = CGRect(x: x, y: max(4, y), width: width, height: height).integral
+        }
         view.onLayout = { [selection, weak view] _ in
             guard let view else { return }
             view.onLayout = nil
@@ -155,21 +481,46 @@ struct ReaderSelectionView: UIViewRepresentable {
             if let word { view.selectedTextRange = word } else { view.selectedRange = fallback }
             // A short chapter can begin halfway down the continuous viewport.
             let selectionBottom = view.selectedTextRange.map { view.firstRect(for: $0).maxY } ?? 0
-            let offset = max(selection.viewportOffset, selectionBottom - view.bounds.height)
+            let offset = selection.page?.offset ?? max(selection.viewportOffset, selectionBottom + handleMargin - view.bounds.height)
             view.contentInset.top = max(0, -offset)
             view.contentInset.bottom = max(0, offset + view.bounds.height - view.contentSize.height)
             view.setContentOffset(CGPoint(x: 0, y: offset), animated: false)
         }
-        return view
+        DispatchQueue.main.async { [weak view] in
+            guard let view, view.window != nil else { return }
+            view.becomeFirstResponder()
+            view.updateSelection()
+        }
+        return container
     }
 
-    func updateUIView(_ view: UITextView, context: Context) {}
+    func updateUIView(_ view: UIView, context: Context) {}
 
     final class Coordinator: NSObject, UITextViewDelegate {
-        let parent: ReaderSelectionView
-        init(parent: ReaderSelectionView) { self.parent = parent }
+        func scrollViewDidScroll(_ scrollView: UIScrollView) {
+            guard let view = scrollView as? ReaderSelectionTextView, let page = view.page,
+                  abs(view.contentOffset.y - page.offset) > 0.5 else { return }
+            view.contentOffset.y = page.offset
+        }
+
         func textViewDidChangeSelection(_ textView: UITextView) {
-            parent.onSelection(parent.selection.originalText(in: textView.selectedRange))
+            guard let view = textView as? ReaderSelectionTextView else { return }
+            if let range = view.page?.characterRange, view.selectedRange.length > 0 {
+                let allowed = NSIntersectionRange(view.selectedRange, range)
+                if allowed != view.selectedRange {
+                    view.selectedRange = allowed
+                }
+            }
+            view.updateSelection()
+        }
+
+        @available(iOS 16.0, *)
+        func textView(_ textView: UITextView, editMenuForTextIn range: NSRange,
+                      suggestedActions: [UIMenuElement]) -> UIMenu? {
+            guard let view = textView as? ReaderSelectionTextView, view.showsSystemTranslation else {
+                return UIMenu(children: [])
+            }
+            return nil
         }
     }
 }
@@ -230,7 +581,6 @@ struct ReaderTextView: UIViewRepresentable {
     let fullJustify: Bool
     let pageAnimation: Int
     let isEInkMode: Bool
-    let clickActions: [Int]
     let backgroundColor: UIColor
     let foregroundColor: UIColor
     var spokenRange: NSRange?
@@ -254,7 +604,7 @@ struct ReaderTextView: UIViewRepresentable {
     let onDeferredRender: () -> Void
     let onCancelNextLoading: () -> Void
     let onPageChanged: () -> Void
-    let onTapAction: (Int) -> Void
+    let onMenuTap: () -> Void
     var holdsDisplayedPage = false
     var chapterGeneration = 0
 
@@ -392,6 +742,7 @@ struct ReaderTextView: UIViewRepresentable {
             view.textStorage.setAttributedString(rendered)
             context.coordinator.isApplyingContent = false
             context.coordinator.scroll(to: position, in: view)
+            if chapterChanged { context.coordinator.animateLoadedChapter(in: view) }
             let generation = context.coordinator.layoutGeneration
             DispatchQueue.main.async { [weak coordinator = context.coordinator] in
                 guard coordinator?.layoutGeneration == generation else { return }
@@ -485,6 +836,7 @@ struct ReaderTextView: UIViewRepresentable {
         private var trackingPagePan = false
         private var panLayoutGeneration: Int?
         private var finishSettlingPage: (() -> Void)?
+        private var pendingChapterTurn: (generation: Int, direction: Int, image: UIImage, animation: Int)?
         private var pageDragView: ReaderPageDragView?
         private weak var readerTap: UITapGestureRecognizer?
         private weak var loadingFooter: UIView?
@@ -569,9 +921,7 @@ struct ReaderTextView: UIViewRepresentable {
             } else {
                 let container = UIView()
                 container.isUserInteractionEnabled = false
-                let indicator = UIActivityIndicatorView(style: .medium)
-                indicator.color = parent.foregroundColor.withAlphaComponent(0.65)
-                indicator.startAnimating()
+                let indicator = RagdollImageView(width: 36)
                 let label = UILabel()
                 label.text = "正在加载下一章…"
                 label.textColor = parent.foregroundColor.withAlphaComponent(0.65)
@@ -796,11 +1146,9 @@ struct ReaderTextView: UIViewRepresentable {
             let page = pages[pageIndex(in: view, pages: pages)]
             // UITextView lays out one continuous document. Hide neighboring
             // lines in the per-page margins instead of showing partial lines.
-            let rect = CGRect(x: view.bounds.minX, y: view.bounds.minY + view.textContainerInset.top,
-                              width: view.bounds.width, height: min(page.height, readingViewportHeight(for: view)))
             CATransaction.begin()
             CATransaction.setDisableActions(true)
-            pageMask.path = UIBezierPath(rect: rect).cgPath
+            pageMask.path = UIBezierPath(rect: page.visibleRect(in: view)).cgPath
             view.layer.mask = pageMask
             CATransaction.commit()
         }
@@ -1043,39 +1391,23 @@ struct ReaderTextView: UIViewRepresentable {
             guard gesture.state == .began, let view = textView, let onSelect = parent.onSelectText else { return }
             let inset = view.textContainerInset
             let point = gesture.location(in: view)
-            let padding = view.textContainer.lineFragmentPadding
+            var page: ReaderTextPage?
+            if parent.pageAnimation != 3 {
+                let pages = pages(in: view)
+                guard !pages.isEmpty else { return }
+                let current = pages[pageIndex(in: view, pages: pages)]
+                guard current.visibleRect(in: view).contains(point) else { return }
+                page = current
+            }
             let selection = ReaderTextSelection(manager: view.layoutManager, container: view.textContainer,
                 at: CGPoint(x: point.x - inset.left, y: point.y - inset.top), body: parent.text,
-                bodyStart: renderedPrefixLength, insets: UIEdgeInsets(top: inset.top, left: inset.left + padding,
-                    bottom: inset.bottom, right: inset.right + padding), viewportOffset: view.contentOffset.y)
+                bodyStart: renderedPrefixLength, insets: inset, viewportOffset: view.contentOffset.y, page: page)
             if let selection { onSelect(selection) }
         }
 
         @objc private func tapped(_ gesture: UITapGestureRecognizer) {
             guard let view = textView, gesture.state == .ended else { return }
-            let point = gesture.location(in: view)
-            // UIScrollView changes its bounds origin as content scrolls, and
-            // gesture locations use that content coordinate space. Convert
-            // back to viewport coordinates before dividing the visible screen
-            // into the 3×3 tap grid.
-            let viewportX = point.x - view.bounds.minX
-            let viewportY = point.y - view.bounds.minY
-            let column = min(max(Int(viewportX / max(view.bounds.width / 3, 1)), 0), 2)
-            let row = min(max(Int(viewportY / max(view.bounds.height / 3, 1)), 0), 2)
-            let index = row * 3 + column
-            let action = index == 4
-                ? 0
-                : (parent.clickActions.indices.contains(index) ? parent.clickActions[index] : 0)
-
-            if parent.pageAnimation == 3, action == 1 || action == 2 {
-                return
-            }
-            switch action {
-            case 1: turnPage(1)
-            case 2: turnPage(-1)
-            case -1: break
-            default: parent.onTapAction(action)
-            }
+            view.handleReaderTap(at: gesture.location(in: view), menu: parent.onMenuTap) { turnPage($0) }
         }
 
         @objc private func panned(_ pan: UIPanGestureRecognizer) {
@@ -1124,8 +1456,13 @@ struct ReaderTextView: UIViewRepresentable {
 
         private func beginPagePreview(in view: UITextView) -> ReaderPageDragView? {
             let pages = pages(in: view)
-            guard let host = view.superview, !pages.isEmpty,
+            guard !pages.isEmpty,
                   let image = dragImage(at: pageIndex(in: view, pages: pages), pages: pages, in: view) else { return nil }
+            return showPagePreview(image, in: view)
+        }
+
+        private func showPagePreview(_ image: UIImage, in view: UITextView) -> ReaderPageDragView? {
+            guard let host = view.superview else { return nil }
             let overlay = ReaderPageDragView(frame: view.convert(view.bounds, to: host), image: image)
             overlay.backgroundColor = view.backgroundColor
             host.insertSubview(overlay, aboveSubview: view)
@@ -1143,12 +1480,6 @@ struct ReaderTextView: UIViewRepresentable {
                 return
             }
             let pages = pages(in: view)
-            let destination = commit ? -CGFloat(direction) * view.bounds.width : 0
-            let distance = abs(destination - overlay.current.frame.minX)
-            let remaining = distance / view.bounds.width
-            let normalDuration = commit ? 0.18 + 0.12 * Double(remaining) : 0.12 + 0.10 * Double(remaining)
-            let duration = commit && releaseSpeed > 0
-                ? min(normalDuration, max(0.12, Double(distance / releaseSpeed))) : normalDuration
             let completion: (Bool) -> Void = { [weak self] finished in
                 guard let self, self.pageDragView === overlay else { return }
                 if finished && commit { self.commitPageTurn(direction, in: view) }
@@ -1159,15 +1490,7 @@ struct ReaderTextView: UIViewRepresentable {
             if !commit || pages.indices.contains(pageIndex(in: view, pages: pages) + direction) {
                 finishSettlingPage = { completion(true) }
             }
-            if animation == 2, commit {
-                UIView.transition(with: overlay.current, duration: 0.38,
-                                  options: direction > 0 ? .transitionCurlUp : .transitionCurlDown,
-                                  animations: { overlay.current.image = overlay.adjacent.image }, completion: completion)
-            } else {
-                UIView.animate(withDuration: duration, delay: 0, options: [.curveEaseOut, .allowUserInteraction]) {
-                    overlay.move(to: destination, covering: animation == 0)
-                } completion: { completion($0) }
-            }
+            overlay.animateTurn(commit: commit, animation: animation, releaseSpeed: releaseSpeed, completion: completion)
         }
 
         private func position(_ overlay: ReaderPageDragView, in view: UITextView, direction: Int, offset: CGFloat) {
@@ -1250,20 +1573,54 @@ struct ReaderTextView: UIViewRepresentable {
         }
 
         func turnPage(_ direction: Int, swipe: Bool = false) {
-            guard !parent.holdsDisplayedPage, !trackingPagePan, let view = textView else { return }
+            guard !parent.holdsDisplayedPage, pendingChapterTurn == nil, !trackingPagePan, let view = textView else { return }
             finishSettlingPage?()
             guard pageDragView == nil else { return }
             let pages = pages(in: view)
-            let index = pageIndex(in: view, pages: pages) + direction
-            guard showsDragPreview, pages.indices.contains(index), let overlay = beginPagePreview(in: view) else {
+            let current = pageIndex(in: view, pages: pages)
+            let index = current + direction
+            let animation = swipe ? 1 : parent.pageAnimation
+            guard showsDragPreview, pages.indices.contains(current),
+                  let outgoing = dragImage(at: current, pages: pages, in: view) else {
                 commitPageTurn(direction, in: view)
                 return
             }
-            let animation = swipe ? 1 : parent.pageAnimation
+            guard pages.indices.contains(index) || animation == 1,
+                  let incoming = dragImage(at: index, pages: pages, in: view) else {
+                // Keep the outgoing page until the destination chapter has loaded and laid out.
+                if parent.adjacentPagePreview(direction) != nil {
+                    pendingChapterTurn = (parent.chapterGeneration &+ 1, direction, outgoing, animation)
+                }
+                commitPageTurn(direction, in: view)
+                return
+            }
+            guard let overlay = showPagePreview(outgoing, in: view) else {
+                commitPageTurn(direction, in: view)
+                return
+            }
             overlay.direction = direction
-            overlay.adjacent.image = dragImage(at: index, pages: pages, in: view)
+            overlay.adjacent.image = incoming
             overlay.move(to: 0, covering: animation == 0)
             settle(overlay, in: view, direction: direction, commit: true, animation: animation)
+        }
+
+        func animateLoadedChapter(in view: UITextView) {
+            guard let turn = pendingChapterTurn else { return }
+            pendingChapterTurn = nil
+            guard turn.generation == parent.chapterGeneration, showsDragPreview,
+                  turn.image.size == view.bounds.size else { return }
+            let pages = pages(in: view)
+            guard !pages.isEmpty,
+                  let incoming = dragImage(at: pageIndex(in: view, pages: pages), pages: pages, in: view),
+                  let overlay = showPagePreview(turn.image, in: view) else { return }
+            overlay.direction = turn.direction
+            overlay.adjacent.image = incoming
+            overlay.move(to: 0, covering: turn.animation == 0)
+            finishSettlingPage = { [weak self] in self?.cancelPageDrag() }
+            overlay.animateTurn(commit: true, animation: turn.animation) { [weak self] _ in
+                guard let self, self.pageDragView === overlay else { return }
+                self.cancelPageDrag()
+            }
         }
 
         private func commitPageTurn(_ direction: Int, in view: UITextView) {

@@ -372,6 +372,13 @@ public actor LegadoDatabase {
         try load("SELECT payload FROM bookmarks ORDER BY time", as: Bookmark.self)
     }
 
+    public func replaceBookGroups(_ groups: [BookGroup], withBooks books: [Book]) throws {
+        try transaction {
+            try replaceBookGroups(groups)
+            try writeBooks(books)
+        }
+    }
+
     public func loadBookGroups() throws -> [BookGroup] {
         try load("SELECT payload FROM book_groups ORDER BY position, group_id", as: BookGroup.self)
     }
@@ -897,8 +904,10 @@ public actor LegadoDatabase {
     }
 
     public func removeRssArticles(origin: String) throws {
-        try executeBound("DELETE FROM rssFeedPages WHERE origin = ?", text: origin)
-        try executeBound("DELETE FROM rssArticles WHERE origin = ?", text: origin)
+        try transaction {
+            try executeBound("DELETE FROM rssFeedPages WHERE origin = ?", text: origin)
+            try executeBound("DELETE FROM rssArticles WHERE origin = ?", text: origin)
+        }
     }
 
     public func loadRssReadRecords() throws -> [RssReadRecord] {
@@ -1041,10 +1050,12 @@ public actor LegadoDatabase {
         if let chaptersDirectory, !legacyChaptersImported() {
             if try count("chapters") == 0,
                FileManager.default.fileExists(atPath: chaptersDirectory.path) {
+                // A full library import can also encounter chapter files left by removed books.
+                let shelfURLs = try booksURL.map { _ in Set(try loadBooks().map(\.bookUrl)) }
                 for url in try FileManager.default.contentsOfDirectory(at: chaptersDirectory, includingPropertiesForKeys: nil)
                     where url.pathExtension.lowercased() == "json" {
                     let chapters = try decoder.decode([BookChapter].self, from: Data(contentsOf: url))
-                    if let bookURL = chapters.first?.bookUrl, !bookURL.isEmpty {
+                    if let bookURL = chapters.first?.bookUrl, !bookURL.isEmpty, shelfURLs?.contains(bookURL) != false {
                         try replaceChapters(chapters, bookURL: bookURL)
                     }
                 }
@@ -1515,7 +1526,7 @@ public actor SQLiteBookSourceRepository: BookSourceRepository {
 }
 
 public actor SQLiteBookRepository: SourceSwitchBookRepository {
-    private let database: LegadoDatabase
+    fileprivate let database: LegadoDatabase
     private let legacyFileURL: URL?
     public init(database: LegadoDatabase, legacyFileURL: URL? = nil) {
         self.database = database
@@ -1614,4 +1625,10 @@ public actor SQLiteBookGroupRepository: BookGroupRepository {
         return try await database.loadBookGroups()
     }
     public func save(_ groups: [BookGroup]) async throws { try await database.replaceBookGroups(groups) }
+    public nonisolated func sharesDatabase(with books: SQLiteBookRepository) -> Bool {
+        database === books.database
+    }
+    public func save(_ groups: [BookGroup], withBooks books: [Book]) async throws {
+        try await database.replaceBookGroups(groups, withBooks: books)
+    }
 }

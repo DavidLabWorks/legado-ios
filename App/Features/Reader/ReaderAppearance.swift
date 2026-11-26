@@ -3,10 +3,43 @@ import ImageIO
 import SwiftUI
 import UIKit
 
-private struct ReaderPositionPreferenceKey: PreferenceKey {
-    static let defaultValue: [Int: CGFloat] = [:]
-    static func reduce(value: inout [Int: CGFloat], nextValue: () -> [Int: CGFloat]) {
-        value.merge(nextValue(), uniquingKeysWith: { _, new in new })
+// Reader controls preview locally while a panel is open. All other callers keep
+// the existing AppStorage keys, defaults, and immediate update behavior.
+protocol ReaderPanelField {
+    func beginPreview()
+    func endPreview(save: Bool)
+}
+
+@propertyWrapper
+struct ReaderPanelPreference<Value: Equatable>: DynamicProperty, ReaderPanelField {
+    private var stored: AppStorage<Value>
+    @State private var preview: Value?
+    @State private var original: Value?
+
+    var wrappedValue: Value {
+        get { preview ?? stored.wrappedValue }
+        nonmutating set {
+            if preview != nil { preview = newValue }
+            else { stored.wrappedValue = newValue }
+        }
+    }
+    var projectedValue: Binding<Value> { Binding(get: { wrappedValue }, set: { wrappedValue = $0 }) }
+
+    func beginPreview() {
+        guard preview == nil else { return }
+        original = stored.wrappedValue
+        preview = original
+    }
+    func endPreview(save: Bool) {
+        if save, let preview, preview != original { stored.wrappedValue = preview }
+        original = nil
+        preview = nil
+    }
+    init(wrappedValue: String, _ key: String) where Value == String {
+        stored = AppStorage(wrappedValue: wrappedValue, key)
+    }
+    init(wrappedValue: Bool, _ key: String) where Value == Bool {
+        stored = AppStorage(wrappedValue: wrappedValue, key)
     }
 }
 
@@ -109,7 +142,7 @@ enum ReaderBackgroundStore {
         return image
     }
 
-    private static func downsample(_ data: Data) throws -> UIImage {
+    static func downsample(_ data: Data) throws -> UIImage {
         // Decode only the size used by the reader, including backgrounds saved
         // by older versions. Full-resolution camera photos can exhaust memory.
         guard let source = CGImageSourceCreateWithData(data as CFData, [kCGImageSourceShouldCache: false] as CFDictionary),
@@ -123,8 +156,6 @@ enum ReaderBackgroundStore {
         }
         return UIImage(cgImage: image)
     }
-
-    static func remove() { try? FileManager.default.removeItem(at: url) }
 }
 
 enum ReaderFontStore {
@@ -133,7 +164,7 @@ enum ReaderFontStore {
             .appendingPathComponent("Legado/fonts", isDirectory: true)
     }
 
-    static func install(from source: URL) throws -> String {
+    static func install(from source: URL, in directory: URL = directory) throws -> String {
         let accessing = source.startAccessingSecurityScopedResource()
         defer { if accessing { source.stopAccessingSecurityScopedResource() } }
         let data = try Data(contentsOf: source)
@@ -153,7 +184,9 @@ enum ReaderFontStore {
         guard !path.isEmpty else { return nil }
         // Older versions saved the absolute sandbox path. Resolve managed fonts
         // against the current container, including after an app update or restore.
-        let url = directory.appendingPathComponent(URL(fileURLWithPath: path).lastPathComponent)
+        let file = URL(fileURLWithPath: path)
+        let url = file.deletingLastPathComponent().deletingLastPathComponent().standardizedFileURL.path == FileManager.default.temporaryDirectory.standardizedFileURL.path && file.path == path
+            ? file : directory.appendingPathComponent(file.lastPathComponent)
         guard let provider = CGDataProvider(url: url as CFURL) else { return nil }
         return font(provider: provider, size: size, weight: weight)
     }

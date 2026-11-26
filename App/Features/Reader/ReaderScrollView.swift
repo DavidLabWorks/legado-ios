@@ -379,19 +379,9 @@ struct ReaderScrollView: UIViewRepresentable {
 
         @objc private func tapped(_ gesture: UITapGestureRecognizer) {
             guard let view, !view.isDragging, !view.isDecelerating else { return }
-            let point = gesture.location(in: view)
-            if let row = (view.collectionViewLayout as? ReaderContinuousLayout)?.row(at: point.y),
-               blocks[row].chapter.chapter.error != nil {
-                parent.configuration.onTapAction(0)
-                return
+            view.handleReaderTap(at: gesture.location(in: view), menu: parent.configuration.onMenuTap) { direction in
+                view.turnReaderScreen(direction)
             }
-            let x = point.x - view.bounds.minX, y = point.y - view.bounds.minY
-            let column = min(max(Int(x / max(view.bounds.width / 3, 1)), 0), 2)
-            let row = min(max(Int(y / max(view.bounds.height / 3, 1)), 0), 2)
-            let index = row * 3 + column
-            let actions = parent.configuration.clickActions
-            let action = index == 4 ? 0 : (actions.indices.contains(index) ? actions[index] : 0)
-            if action != 1, action != 2, action != -1 { parent.configuration.onTapAction(action) }
         }
 
         @objc private func step(_ link: CADisplayLink) {
@@ -526,7 +516,7 @@ final class ReaderScrollChapterLayout {
             attributed.append(NSAttributedString(string: chapter.title.readerText(simplified: configuration.simplifiedChinese) + "\n", attributes: typography.headingAttributes))
         }
         bodyStart = attributed.length
-        let body = chapter.error.map { "本章加载失败\n\n\($0)\n\n轻点打开阅读菜单。\n" } ?? (chapter.content.isEmpty ? "本章暂无正文\n" : chapter.content)
+        let body = chapter.error.map { "本章加载失败\n\n\($0)\n\n轻点屏幕中间打开阅读菜单。\n" } ?? (chapter.content.isEmpty ? "本章暂无正文\n" : chapter.content)
         attributed.append(NSAttributedString(string: body.readerText(simplified: configuration.simplifiedChinese), attributes: typography.bodyAttributes))
         storage = NSTextStorage(attributedString: attributed)
         storage.addLayoutManager(manager)

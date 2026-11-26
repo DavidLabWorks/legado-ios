@@ -56,6 +56,10 @@ enum BookshelfSort: Int, CaseIterable, Identifiable {
     }
 }
 
+extension BookGroup {
+    var bookshelfSort: BookshelfSort { BookshelfSort(rawValue: bookSort) ?? .recentRead }
+}
+
 @MainActor
 final class BookLibraryModel: ObservableObject {
     @Published private(set) var books: [Book] = []
@@ -403,12 +407,12 @@ final class BookLibraryModel: ObservableObject {
 
     // A user-requested update should finish even if SwiftUI cancels the pull gesture's task.
     @discardableResult
-    func startGroupUpdate(sources: [BookSource], group: BookGroup, defaultSort: Int = BookshelfSort.recentRead.rawValue) -> Task<Void, Never> {
-        Task { await checkForUpdates(sources: sources, group: group, defaultSort: defaultSort) }
+    func startGroupUpdate(sources: [BookSource], group: BookGroup) -> Task<Void, Never> {
+        Task { await checkForUpdates(sources: sources, group: group) }
     }
 
     func checkForUpdates(sources: [BookSource], onlyRead: Bool = false, group: BookGroup? = nil,
-                         defaultSort: Int = BookshelfSort.recentRead.rawValue, bookURL: String? = nil) async {
+                         bookURL: String? = nil) async {
         await waitForSourceSwitch()
         guard !isCheckingUpdates else { return }
         isCheckingUpdates = true
@@ -419,8 +423,7 @@ final class BookLibraryModel: ObservableObject {
         }
 
         let sourceByURL = Dictionary(sources.map { ($0.bookSourceUrl, $0) }, uniquingKeysWith: { _, latest in latest })
-        let onlyCaughtUp = group?.onlyUpdateRead ?? onlyRead
-        let candidates = group.map { books(in: $0, defaultSort: defaultSort) } ?? books
+        let candidates = group.map { books(in: $0) } ?? books
         let requestedBooks: [Book]
         if let bookURL {
             guard let selected = books.first(where: { $0.bookUrl == bookURL }) else { return }
@@ -446,7 +449,7 @@ final class BookLibraryModel: ObservableObject {
         } else {
             requestedBooks = candidates.filter {
                 $0.canUpdate && $0.origin != "local"
-                    && (!onlyCaughtUp || $0.durChapterIndex >= max($0.totalChapterNum, 1) - 1)
+                    && (!onlyRead || $0.durChapterIndex >= max($0.totalChapterNum, 1) - 1)
             }
         }
         var checked = 0
@@ -591,7 +594,7 @@ final class BookLibraryModel: ObservableObject {
         }
     }
 
-    func books(in group: BookGroup, defaultSort: Int = BookshelfSort.recentRead.rawValue) -> [Book] {
+    func books(in group: BookGroup) -> [Book] {
         let filtered: [Book]
         let customMask = groups.filter { $0.groupId > 0 }.reduce(Int64(0)) { $0 | $1.groupId }
         switch group.groupId {
@@ -604,10 +607,11 @@ final class BookLibraryModel: ObservableObject {
                 ? books.filter { ($0.group & group.groupId) != 0 }
                 : books
         }
-        let sort = BookshelfSort(rawValue: group.bookSort < 0 ? defaultSort : group.bookSort) ?? .recentRead
+        let sort = group.bookshelfSort
         return filtered.sorted { lhs, rhs in
             switch sort {
-            case .recentRead: return lhs.durChapterTime > rhs.durChapterTime
+            case .recentRead:
+                return max(lhs.durChapterTime, lhs.localImportTime ?? 0) > max(rhs.durChapterTime, rhs.localImportTime ?? 0)
             case .recentUpdate: return lhs.latestChapterTime > rhs.latestChapterTime
             case .name:
                 return lhs.name.compare(rhs.name, locale: Locale(identifier: "zh_CN")) == .orderedAscending
@@ -620,23 +624,10 @@ final class BookLibraryModel: ObservableObject {
         }
     }
 
-    func setGroupSort(_ group: BookGroup, sort: Int) async {
-        guard sort == -1 || BookshelfSort(rawValue: sort) != nil else { return }
-        await updateGroup(group) { $0.bookSort = sort }
-    }
-
-    func setGroupRefreshEnabled(_ group: BookGroup, enabled: Bool) async {
-        await updateGroup(group) { $0.enableRefresh = enabled }
-    }
-
-    func setGroupOnlyUpdateRead(_ group: BookGroup, enabled: Bool) async {
-        await updateGroup(group) { $0.onlyUpdateRead = enabled }
-    }
-
-    private func updateGroup(_ group: BookGroup, change: (inout BookGroup) -> Void) async {
+    func setGroupSort(_ group: BookGroup, sort: BookshelfSort) async {
         guard let index = groups.firstIndex(where: { $0.id == group.id }) else { return }
         var updated = groups
-        change(&updated[index])
+        updated[index].bookSort = sort.rawValue
         await persistGroups(updated)
     }
 
@@ -653,17 +644,53 @@ final class BookLibraryModel: ObservableObject {
         await persist(ordered)
     }
 
+    func nextGroupID(reserving draft: [BookGroup] = []) -> Int64? {
+        let used = (groups + draft).filter { $0.groupId > 0 }.reduce(Int64(0)) { $0 | $1.groupId }
+            | books.reduce(Int64(0)) { $0 | $1.group }
+            | deletingGroupIDs.reduce(Int64(0), |)
+        return (0..<63).map { Int64(1) << $0 }.first { used & $0 == 0 }
+    }
+
     func createGroup(name: String) async {
         let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !name.isEmpty, !groups.contains(where: { $0.groupName == name }) else { return }
-        let used = groups.filter { $0.groupId > 0 }.reduce(Int64(0)) { $0 | $1.groupId }
-            | books.reduce(Int64(0)) { $0 | $1.group }
-            | deletingGroupIDs.reduce(Int64(0), |)
-        guard let nextID = (0..<63).map({ Int64(1) << $0 }).first(where: { used & $0 == 0 }) else {
+        guard let nextID = nextGroupID() else {
             errorMessage = "自定义分组已达到上限（63 个），请先删除不再使用的分组。"
             return
         }
         await persistGroups(groups + [.init(groupId: nextID, groupName: name, order: groups.count)])
+    }
+
+    func saveGroupDraft(_ draft: [BookGroup], original: [BookGroup]) async -> Bool {
+        guard draft != original else { return true }
+        guard groups == original else {
+            errorMessage = "书架分组已变化，请重新打开后再编辑。"
+            return false
+        }
+        let removed = Set(original.map(\.id)).subtracting(draft.map(\.id)).filter { $0 > 0 }
+        guard !removed.isEmpty else { return await persistGroups(draft) }
+        deletingGroupIDs.formUnion(removed)
+        defer { deletingGroupIDs.subtract(removed) }
+        let mask = removed.reduce(Int64(0), |)
+        return await persistGroups(draft) {
+            await self.waitForSourceSwitch()
+            var shelf = self.books
+            for i in shelf.indices { shelf[i].group &= ~mask }
+            let updated = shelf
+            let saved = await self.persist(updated) { [repository = self.repository, groups = self.groupRepository] in
+                if let sqlite = groups as? SQLiteBookGroupRepository,
+                   let books = repository as? SQLiteBookRepository, sqlite.sharesDatabase(with: books) {
+                    try await sqlite.save(draft, withBooks: updated)
+                } else {
+                    try await groups.save(draft)
+                    do { try await repository.save(updated) }
+                    catch { try await groups.save(original); throw error }
+                }
+            }
+            if !saved { throw NSError(domain: "BookGroups", code: 1, userInfo: [
+                NSLocalizedDescriptionKey: self.errorMessage ?? "书架分组未保存"
+            ]) }
+        }
     }
 
     func renameGroup(_ group: BookGroup, name: String) async {
@@ -718,16 +745,17 @@ final class BookLibraryModel: ObservableObject {
         await persist(updated)
     }
 
-    func setBook(_ book: Book, groupIDs: Set<Int64>) async {
+    @discardableResult
+    func setBook(_ book: Book, groupIDs: Set<Int64>) async -> Bool {
         await waitForSourceSwitch()
-        guard let index = books.firstIndex(where: { $0.id == book.id }) else { return }
+        guard let index = books.firstIndex(where: { $0.id == book.id }) else { return false }
         let customMask = groups.reduce(Int64(0)) { value, group in
             group.groupId > 0 ? value | group.groupId : value
         }
         let selectedMask = groupIDs.reduce(Int64(0), |)
         var updated = books
         updated[index].group = (updated[index].group & ~customMask) | selectedMask
-        await persist(updated)
+        return await persist(updated)
     }
 
     func remove(bookURL: String) async {
@@ -749,10 +777,12 @@ final class BookLibraryModel: ObservableObject {
         await importPickedLocalFiles(urls.map { LocalBookImportFile(url: $0) })
     }
 
-    func importPickedLocalFiles(_ files: [LocalBookImportFile]) async {
+    @discardableResult
+    func importPickedLocalFiles(_ files: [LocalBookImportFile]) async -> Set<String> {
         // Keep the picker grants alive through the review and asynchronous copy.
         defer { withExtendedLifetime(files) {} }
         var failures: [String] = []
+        var failedPaths = Set<String>()
         for file in files {
             let url = file.url
             do {
@@ -766,10 +796,12 @@ final class BookLibraryModel: ObservableObject {
                     throw error
                 }
             } catch {
+                failedPaths.insert(url.path)
                 failures.append("\(url.lastPathComponent)：\(error.localizedDescription)")
             }
         }
         errorMessage = failures.isEmpty ? nil : failures.joined(separator: "\n")
+        return failedPaths
     }
 
     func addLocalFile(at url: URL) async throws {
@@ -782,7 +814,9 @@ final class BookLibraryModel: ObservableObject {
         await waitForSourceSwitch()
         guard !books.contains(where: { $0.bookUrl == url.absoluteString }) else { return }
         let chapters = url.pathExtension.lowercased() == "txt" ? report.chapters : []
-        guard await addOrUpdate(report.book, chapters: chapters) else {
+        var book = report.book
+        book.localImportTime = Int64(Date().timeIntervalSince1970 * 1_000)
+        guard await addOrUpdate(book, chapters: chapters) else {
             throw LocalFileError.saveFailed(errorMessage ?? "无法写入数据库")
         }
     }
@@ -955,7 +989,7 @@ final class BookLibraryModel: ObservableObject {
     }
 
     @discardableResult
-    private func persistGroups(_ updated: [BookGroup]) async -> Bool {
+    private func persistGroups(_ updated: [BookGroup], write: (@MainActor () async throws -> Void)? = nil) async -> Bool {
         groups = updated
         groupSaveGeneration &+= 1
         let generation = groupSaveGeneration
@@ -963,7 +997,8 @@ final class BookLibraryModel: ObservableObject {
         let save = Task { @MainActor [weak self, groupRepository] in
             _ = await previousSave?.value
             do {
-                try await groupRepository.save(updated)
+                if let write { try await write() }
+                else { try await groupRepository.save(updated) }
                 self?.persistedGroups = updated
                 if self?.groupSaveGeneration == generation { self?.errorMessage = nil }
                 return true

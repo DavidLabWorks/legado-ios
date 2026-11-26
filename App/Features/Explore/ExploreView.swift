@@ -271,7 +271,7 @@ private struct ExploreSourceView: View {
                 ScrollView {
                     LazyVStack(spacing: 0) {
                         content
-                        if model.isLoadingMore { ProgressView("继续加载…").padding(.vertical, 12) }
+                        if model.isLoadingMore { RagdollLoading("继续加载…").padding(.vertical, 12) }
                         if let error = model.paginationError {
                             VStack(spacing: 8) {
                                 Text(error).font(.caption).foregroundStyle(.secondary)
@@ -327,7 +327,7 @@ private struct ExploreSourceView: View {
     private var content: some View {
         switch model.state {
         case .idle, .loading:
-            ProgressView("正在加载小说…")
+            RagdollLoading("正在加载小说…", width: 72, axis: .vertical)
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 80)
         case .empty:

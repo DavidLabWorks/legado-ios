@@ -14,7 +14,7 @@ struct EPUBIllustrationsView: View {
             ScrollView {
                 LazyVStack(spacing: 24) {
                     if isLoading {
-                        ProgressView("正在读取插图…").padding()
+                        RagdollLoading("正在读取插图…", width: 72, axis: .vertical).padding()
                     } else if let errorMessage {
                         ReadingUnavailableView("无法读取插图", systemImage: "photo", description: Text(errorMessage))
                     } else if images.isEmpty {
@@ -31,9 +31,12 @@ struct EPUBIllustrationsView: View {
                 }.padding()
             }
             .background(ReadingTheme.canvas)
-            .navigationTitle("本章插图")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("完成") { dismiss() } } }
+            .readingSheetTitle("本章插图")
+            .toolbar {
+                ReadingSheetActions {
+                    ReadingSheetCloseButton { dismiss() }
+                }
+            }
             .task(id: chapter.id) {
                 isLoading = true
                 errorMessage = nil

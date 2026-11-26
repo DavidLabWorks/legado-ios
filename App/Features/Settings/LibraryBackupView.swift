@@ -10,30 +10,51 @@ struct LibraryBackupView: View {
     @State private var message: String?
 
     var body: some View {
-        List {
-            Section {
-                Button { export() } label: { Label("导出备份 JSON", systemImage: "square.and.arrow.up") }
-                Button { picking = true } label: { Label("导入 JSON 文件", systemImage: "square.and.arrow.down") }
-            } footer: {
-                Text("一个备份包含书架、文件管理中的 TXT 和 EPUB 原文件、阅读进度、书签、书源、网站源、收藏、规则，以及阅读、听书、网络与缓存设置。也可从“文件”或分享菜单用喵阅打开 JSON。")
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                exportCard
+                if let message { Text(message).font(.callout).textSelection(.enabled) }
+
+                Text("备份范围").font(.headline).accessibilityAddTraits(.isHeader)
+                ReadingSoftCard {
+                    VStack(spacing: 0) {
+                        backupRow("书架与本地书", "书架分组、TXT 和 EPUB 原文件", icon: "book")
+                        Divider()
+                        backupRow("阅读记录", "阅读进度、书签与网站收藏", icon: "bookmark")
+                        Divider()
+                        backupRow("源、规则与偏好", "书源、网站源、规则及阅读、听书与网络设置", icon: "slider.horizontal.3")
+                    }
+                }
+
+                Text("恢复备份").font(.headline).accessibilityAddTraits(.isHeader)
+                ReadingSoftCard {
+                    Button { picking = true } label: {
+                        HStack {
+                            backupRow("选择备份文件", "恢复前可预览备份内容", icon: "square.and.arrow.down")
+                            Image(systemName: "chevron.right").font(.caption).foregroundStyle(.secondary)
+                                .padding(.trailing, 16)
+                        }
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityIdentifier("导入 JSON 文件")
+                }
+                VStack(alignment: .leading, spacing: 6) {
+                    Label("备份可能包含请求头与服务器配置中的账号或密钥，分享前请检查。", systemImage: "lock.shield")
+                    Text("章节缓存和离线语音包需重新下载，网站需重新登录。也可从“文件”或分享菜单打开备份 JSON。")
+                }
+                .font(.footnote).foregroundStyle(.secondary)
             }
-            Section {
-                Text("备份包含阅读记录、请求头和服务器配置，分享前请留意其中的账号或密钥。下载的章节正文不随备份导出。网站登录会话须重新登录，离线语音包须重新下载。")
-                    .font(.footnote).foregroundStyle(.secondary)
-            }
-            if working { ProgressView("正在生成备份…") }
-            if let message { Text(message) }
+            .padding(.horizontal, 20)
+            .padding(.vertical, 12)
+            .frame(maxWidth: 680)
         }
-        .navigationTitle("数据备份与恢复")
+        .frame(maxWidth: .infinity)
+        .background(ReadingTheme.canvas)
+        .navigationTitle("备份与恢复")
+        .navigationBarTitleDisplayMode(.large)
         .disabled(working)
-        .fileImporter(isPresented: $picking, allowedContentTypes: [.json], allowsMultipleSelection: false) { result in
-            switch result {
-            case .success(let urls):
-                let files = urls.map(SourceImportFile.init)
-                Task { await library.sources.previewPickedFiles(files) }
-            case .failure(let error): if !Self.cancelled(error) { message = error.localizedDescription }
-            }
-        }
+        .modifier(JSONImportPicker(isPresented: $picking))
         .fileExporter(isPresented: $exporting, document: document, contentType: .json,
                       defaultFilename: "喵阅备份-" + Date().formatted(.iso8601.year().month().day())) { result in
             document = nil
@@ -42,6 +63,49 @@ struct LibraryBackupView: View {
             case .failure(let error): if !Self.cancelled(error) { message = error.localizedDescription }
             }
         }
+    }
+
+    @Environment(\.colorScheme) private var colorScheme
+
+    private var exportCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                VStack(alignment: .leading, spacing: 5) {
+                    Text("本机资料").font(.caption)
+                    Text("导出阅读备份").font(.system(.title2, design: .serif).bold())
+                    Text("书架、原文件与阅读设置").font(.subheadline)
+                }
+                Spacer(minLength: 0)
+                Image("StatisticsBookArtwork").resizable().scaledToFit()
+                    .frame(maxWidth: 96, maxHeight: 74).accessibilityHidden(true)
+            }
+            if working {
+                RagdollLoading("正在生成备份…")
+            } else {
+                Button(action: export) {
+                    Label("导出 JSON 文件", systemImage: "square.and.arrow.up")
+                        .frame(maxWidth: .infinity, minHeight: 32)
+                }
+                .readingProminentButtonStyle()
+                .accessibilityIdentifier("导出备份 JSON")
+            }
+        }
+        .padding(16)
+        .foregroundStyle(.primary)
+        .background(colorScheme == .dark ? ReadingTheme.surface : ReadingTheme.paper, in: RoundedRectangle(cornerRadius: 18))
+    }
+
+    private func backupRow(_ title: String, _ detail: String, icon: String) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: icon).frame(width: 24).accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title).font(.body.weight(.medium))
+                Text(detail).font(.caption).foregroundStyle(.secondary)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 14).padding(.vertical, 12)
+        .accessibilityElement(children: .combine)
     }
 
     private static func cancelled(_ error: Error) -> Bool { (error as? CocoaError)?.code == .userCancelled }
@@ -113,12 +177,16 @@ struct BackupRestoreView: View {
                 } footer: {
                     Text("恢复会用备份覆盖当前书架、源、收藏、规则、记录及设置。同名本地书籍文件将使用备份版本。")
                 }
-                if saving { ProgressView("正在恢复…") }
+                if saving { RagdollLoading("正在恢复…") }
                 if let errorMessage { Text(errorMessage).foregroundStyle(.red) }
             }
             .disabled(saving)
-            .navigationTitle("恢复喵阅备份")
-            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("取消") { library.sources.cancelPendingImport() }.disabled(saving) } }
+            .readingSheetTitle("恢复喵阅备份")
+            .toolbar {
+                ReadingSheetActions {
+                    Button("取消") { library.sources.cancelPendingImport() }.disabled(saving)
+                }
+            }
             .interactiveDismissDisabled(saving)
         }
     }

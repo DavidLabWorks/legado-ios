@@ -98,14 +98,6 @@ struct FileManagementView: View {
 
     private var fileList: some View {
         List(selection: $selection) {
-            Section {
-                Picker("文件类型", selection: $tab) {
-                    Text("本地文件").tag(0)
-                    Text("缓存正文").tag(1)
-                }
-                .pickerStyle(.segmented)
-                .disabled(selecting)
-            }
             if tab == 0 { localFilesSection }
             else { cachedBooksSection }
             if !selecting {
@@ -114,12 +106,31 @@ struct FileManagementView: View {
                         Label("章节缓存与空间清理", systemImage: "internaldrive")
                     }
                 }
+                .listRowBackground(ReadingTheme.surface)
             }
         }
         .listStyle(.insetGrouped)
+        .readingListTopMargin(8)
+        .readingScrollContentBackgroundHidden()
+        .background(ReadingTheme.canvas)
+        .safeAreaInset(edge: .top, spacing: 0) {
+            VStack(spacing: 0) {
+                ReadingPillSearchField(placeholder: tab == 0 ? "搜索本地文件" : "搜索缓存书籍", text: $query)
+                Picker("文件类型", selection: $tab) {
+                    Text("本地文件").tag(0)
+                    Text("缓存正文").tag(1)
+                }
+                .pickerStyle(.segmented)
+                .padding(.horizontal, 20)
+                .padding(.vertical, 8)
+                .disabled(selecting)
+            }
+            .background(ReadingTheme.canvas)
+        }
         .environment(\.editMode, .constant(selecting ? .active : .inactive))
         .navigationTitle("文件管理")
-        .searchable(text: $query, prompt: tab == 0 ? "搜索本地文件" : "搜索缓存书籍")
+        .navigationBarTitleDisplayMode(.inline)
+        .readingScrollDismissesKeyboard()
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 if selecting {
@@ -154,7 +165,7 @@ struct FileManagementView: View {
             }
         }
         .disabled(model.isWorking)
-        .overlay { if model.isWorking { ProgressView("正在处理文件…").padding().background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12)) } }
+        .overlay { if model.isWorking { RagdollLoading("正在处理文件…").padding().background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12)) } }
         .task { await model.reload(library) }
         .onChange(of: library.books) { _ in Task { await model.reload(library) } }
         .onChange(of: query) { _ in selection.removeAll() }
@@ -234,13 +245,14 @@ struct FileManagementView: View {
 
     @ViewBuilder private var localFilesSection: some View {
         Section {
-            ReadingLabeledContent("本地文件", value: "\(model.files.count) 个")
-            ReadingLabeledContent("占用空间", value: ByteCountFormatter.string(fromByteCount: model.files.reduce(0) { $0 + $1.bytes }, countStyle: .file))
-        }
-        Section("文件") {
             if displayedFiles.isEmpty {
-                ReadingUnavailableView(query.isEmpty ? "还没有本地文件" : "没有匹配的文件", systemImage: "doc.text", description: Text("可从系统“文件”导入 TXT 或 EPUB，文件会复制到应用中。"))
-                Button("导入 TXT / EPUB", systemImage: "plus") { importsFile = true }
+                if query.isEmpty {
+                    ReadingUnavailableView("还没有本地文件", systemImage: "doc.text",
+                                           description: Text("从系统“文件”导入 TXT 或 EPUB，即可离线阅读。"))
+                    Button("导入 TXT / EPUB", systemImage: "plus") { importsFile = true }
+                } else {
+                    ReadingUnavailableView.search(text: query)
+                }
             }
             ForEach(displayedFiles) { file in
                 Group {
@@ -262,7 +274,12 @@ struct FileManagementView: View {
                     Button("导出", systemImage: "square.and.arrow.up") { export(file) }.tint(.blue)
                 }
             }
+        } header: {
+            let totalBytes = model.files.reduce(0) { $0 + $1.bytes }
+            Text("共 \(model.files.count) 个文件 · \(totalBytes == 0 ? "0 KB" : ByteCountFormatter.string(fromByteCount: totalBytes, countStyle: .file))")
+                .textCase(nil)
         }
+        .listRowBackground(ReadingTheme.surface)
         if !missingBooks.isEmpty {
             Section("文件已丢失") {
                 ForEach(missingBooks) { book in
@@ -284,18 +301,22 @@ struct FileManagementView: View {
 
     private var cachedBooksSection: some View {
         Section {
-            Text("将书架中已缓存的网络正文导出为 TXT，按目录顺序排列。导出过程不下载新章节。")
-                .font(.footnote).foregroundStyle(.secondary)
             if networkBooks.isEmpty {
-                ReadingUnavailableView("没有可导出的书籍", systemImage: "books.vertical", description: Text("将网络书加入书架并缓存章节后，可在这里导出。"))
+                if query.isEmpty {
+                    ReadingUnavailableView("没有可导出的书籍", systemImage: "books.vertical", description: Text("将网络书加入书架并缓存章节后，可在这里导出。"))
+                } else {
+                    ReadingUnavailableView.search(text: query)
+                }
             }
             ForEach(networkBooks) { book in
                 Button {
                     Task { await model.exportCached(book, library: library) }
                 } label: {
-                    HStack {
+                    HStack(spacing: 12) {
+                        BookCoverArtwork(title: book.name, author: book.author, remoteURL: book.displayCoverURL,
+                                         width: 34, height: 48)
                         VStack(alignment: .leading, spacing: 4) {
-                            Text(book.name).foregroundStyle(.primary)
+                            Text(book.name).font(.headline).foregroundStyle(.primary)
                             Text(book.author.isEmpty ? "导出缓存正文" : book.author).font(.caption).foregroundStyle(.secondary)
                         }
                         Spacer()
@@ -303,14 +324,21 @@ struct FileManagementView: View {
                     }
                 }
             }
-        } header: { Text("缓存正文") }
+        } header: { Text("导出缓存正文") } footer: {
+            Text("按目录顺序导出已缓存的章节为 TXT。导出过程不下载新章节。")
+        }
+        .listRowBackground(ReadingTheme.surface)
     }
 
     private func fileLabel(_ file: LocalFileEntry) -> some View {
         HStack(spacing: 12) {
-            Image(systemName: "doc.text").foregroundStyle(.tint)
+            Image(systemName: file.url.pathExtension.lowercased() == "epub" ? "book.closed" : "doc.text")
+                .font(.title3)
+                .frame(width: 40, height: 48)
+                .background(ReadingTheme.groupedCanvas, in: RoundedRectangle(cornerRadius: 9))
+                .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 4) {
-                Text(filename(for: file.url)).foregroundStyle(.primary).lineLimit(2)
+                Text(filename(for: file.url)).font(.headline).foregroundStyle(.primary).lineLimit(2)
                 HStack(spacing: 8) {
                     Text(ByteCountFormatter.string(fromByteCount: file.bytes, countStyle: .file))
                     if let modified = file.modified { Text(modified, style: .date) }

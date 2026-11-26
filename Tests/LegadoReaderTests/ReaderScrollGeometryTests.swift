@@ -140,6 +140,104 @@ final class ReaderPagingGeometryTests: XCTestCase {
         XCTAssertEqual(view.contentOffset.y, pages[1].offset, accuracy: 0.5)
     }
 
+    func testReaderSlidesVisiblyWhenTappingIntoNextChapter() async throws {
+        try XCTSkipIf(UIAccessibility.isReduceMotionEnabled)
+        var book = DemoContent.books[0]
+        let body = String(repeating: "用于验证跨章翻页的多页正文。\n", count: 100)
+        book.durChapterIndex = 0
+        book.durChapterPos = body.utf16.count - 1
+        var config = BookReadConfig()
+        config.pageAnim = 1
+        book.readConfig = config
+        let chapters = DemoContent.readerChapters
+        let reader = ReaderView(demoBook: book, chapters: chapters, initialIndex: 0,
+                                content: body)
+            .environmentObject(BookLibraryModel.demo(books: [book]))
+            .environmentObject(SourceLibraryModel.demo(sources: []))
+            .environmentObject(ReplaceRuleLibraryModel.demo())
+            .environmentObject(ReadingActivityModel.demo())
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let window = UIWindow(windowScene: scene)
+        let host = UIHostingController(rootView: reader)
+        window.rootViewController = host
+        window.makeKeyAndVisible()
+        defer { window.isHidden = true }
+        host.view.layoutIfNeeded()
+        try await Task.sleep(nanoseconds: 150_000_000)
+        let view = try XCTUnwrap(findTextView(host.view))
+        let coordinator = try XCTUnwrap(view.delegate as? ReaderTextView.Coordinator)
+        XCTAssertGreaterThan(view.contentOffset.y, 0)
+        coordinator.turnPage(1)
+
+        let overlay = try XCTUnwrap(view.superview?.subviews.first { sibling in
+            sibling !== view && sibling.subviews.compactMap { ($0 as? UIImageView)?.image }.count == 2
+        }, "点击时应立即开始跨章滑动")
+        var sawSlide = false
+        for _ in 0..<100 {
+            try await Task.sleep(nanoseconds: 10_000_000)
+            if let x = overlay.subviews[1].layer.presentation()?.frame.minX, x > 1 && x < view.bounds.width - 1 {
+                sawSlide = true
+            }
+            if view.text.hasPrefix(chapters[1].title) && overlay.superview == nil { break }
+        }
+        XCTAssertTrue(sawSlide, "下一章第一页应从右侧滑入")
+        XCTAssertTrue(view.text.hasPrefix(chapters[1].title))
+        XCTAssertEqual(view.contentOffset.y, 0, accuracy: 0.5)
+    }
+
+    func testBoundaryTapsSlideBetweenRenderedChaptersInBothDirections() async throws {
+        try XCTSkipIf(UIAccessibility.isReduceMotionEnabled)
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let window = UIWindow(windowScene: scene)
+        let body = String(repeating: "跨章翻页的正文。\n", count: 100)
+        for direction in [1, -1] {
+            var boundaryCalls = 0
+            let reader = pagedReader(text: body, title: "当前章", animation: 1,
+                                     adjacent: { _ in ("相邻章", nil) },
+                                     onBoundary: { boundaryCalls += $0 })
+            let host = UIHostingController(rootView: reader)
+            window.rootViewController = host
+            window.makeKeyAndVisible()
+            host.view.layoutIfNeeded()
+            let view = try XCTUnwrap(findTextView(host.view))
+            let coordinator = try XCTUnwrap(view.delegate as? ReaderTextView.Coordinator)
+            let pages = ReaderTextPage.layout(in: view, height: view.bounds.height - 32)
+            XCTAssertGreaterThan(pages.count, 1)
+            if direction > 0 {
+                view.setContentOffset(CGPoint(x: 0, y: try XCTUnwrap(pages.last).offset), animated: false)
+            }
+            coordinator.turnPage(direction)
+            XCTAssertEqual(boundaryCalls, direction)
+            if direction < 0 {
+                var waiting = reader
+                waiting.holdsDisplayedPage = true
+                host.rootView = waiting
+                host.view.setNeedsLayout()
+                host.view.layoutIfNeeded()
+            }
+            var next = pagedReader(text: body, title: "相邻章", animation: 1,
+                                   requestedPosition: direction > 0 ? 0 : .max)
+            next.chapterGeneration = 1
+            host.rootView = next
+            host.view.setNeedsLayout()
+            host.view.layoutIfNeeded()
+
+            let overlay = try XCTUnwrap(view.superview?.subviews.first { sibling in
+                sibling !== view && sibling.subviews.compactMap { ($0 as? UIImageView)?.image }.count == 2
+            }, "跨章时应该同时显示移出的旧页和移入的新页")
+            XCTAssertEqual(overlay.subviews[0].frame.minX, -CGFloat(direction) * view.bounds.width, accuracy: 0.5)
+            XCTAssertFalse(overlay.subviews[0].layer.animationKeys()?.isEmpty ?? true)
+            try await Task.sleep(nanoseconds: 450_000_000)
+            XCTAssertNil(overlay.superview)
+            XCTAssertTrue(view.text.hasPrefix("相邻章"))
+            let targetPages = ReaderTextPage.layout(in: view, height: view.bounds.height - 32)
+            XCTAssertEqual(view.contentOffset.y, direction > 0 ? 0 : try XCTUnwrap(targetPages.last).offset, accuracy: 0.5)
+            XCTAssertEqual(boundaryCalls, direction)
+            coordinator.invalidate()
+        }
+        window.isHidden = true
+    }
+
     func testCoverTurnKeepsNewChapterHeadingVisibleDuringReflow() async throws {
         let text = String(repeating: "这是一段用来测试覆盖翻页的正文。\n", count: 100)
         let first = pagedReader(text: text, title: "第一章 雨夜", animation: 0)
@@ -184,25 +282,28 @@ final class ReaderPagingGeometryTests: XCTestCase {
     }
 
     private func pagedReader(text: String, title: String, animation: Int = 4,
+                             requestedPosition: Int = 0,
+                             adjacent: @escaping (Int) -> (title: String, text: String?)? = { _ in nil },
+                             onBoundary: @escaping (Int) -> Void = { _ in },
                              ranges: Binding<[NSRange]> = .constant([]),
                              currentPage: Binding<Int> = .constant(1),
                              totalPages: Binding<Int> = .constant(1)) -> ReaderTextView {
         ReaderTextView(
-            adjacentPagePreview: { _ in nil }, text: text, title: title, previousTitle: nil, previousText: "", isPreviousReady: false,
+            adjacentPagePreview: adjacent, text: text, title: title, previousTitle: nil, previousText: "", isPreviousReady: false,
             continuationTitle: nil, continuationText: "", isContinuationReady: false, isVolume: false,
             fontSize: 32, fontPath: "", letterSpacing: 0, lineSpacing: 8, paragraphSpacing: 12,
             paragraphIndent: "　　", paddingLeft: 18, paddingRight: 18, paddingTop: 16, paddingBottom: 16,
             headerInset: 0, footerInset: 0, fontWeight: 0, titleMode: 0, titleSize: 4,
             titleTopSpacing: 16, titleBottomSpacing: 24, underlineMode: 0,
-            fullJustify: true, pageAnimation: animation, isEInkMode: false, clickActions: Array(repeating: 0, count: 9),
-            backgroundColor: .white, foregroundColor: .black, requestedPosition: 0, jumpPosition: nil,
+            fullJustify: true, pageAnimation: animation, isEInkMode: false,
+            backgroundColor: .white, foregroundColor: .black, requestedPosition: requestedPosition, jumpPosition: nil,
             renderRevision: 0, readerPosition: .constant(0), pageRanges: ranges,
             currentPage: currentPage,
             totalPages: totalPages, isAutoReading: false,
             isAutoReadPaused: false, isLoadingNextChapter: false, secondsPerScreen: 10,
-            onReachedEnd: { _ in }, onReachedStart: { _ in }, onEnteredPrevious: { _ in },
+            onReachedEnd: { _ in onBoundary(1) }, onReachedStart: { _ in onBoundary(-1) }, onEnteredPrevious: { _ in },
             onEnteredContinuation: { _ in }, onDeferredRender: {}, onCancelNextLoading: {},
-            onPageChanged: {}, onTapAction: { _ in })
+            onPageChanged: {}, onMenuTap: {})
     }
 }
 
@@ -573,14 +674,14 @@ final class ReaderScrollGeometryTests: XCTestCase {
               paragraphIndent: "　　", paddingLeft: 20, paddingRight: 20, paddingTop: 16, paddingBottom: 16,
               headerInset: 0, footerInset: 0, fontWeight: 0, titleMode: 0, titleSize: 4,
               titleTopSpacing: 16, titleBottomSpacing: 24, underlineMode: 0,
-              fullJustify: true, pageAnimation: 3, isEInkMode: false, clickActions: Array(repeating: 0, count: 9),
+              fullJustify: true, pageAnimation: 3, isEInkMode: false,
               backgroundColor: .white, foregroundColor: .black, requestedPosition: 0, jumpPosition: nil,
               renderRevision: 0, readerPosition: .constant(0), pageRanges: .constant([]),
               currentPage: .constant(1), totalPages: .constant(1), isAutoReading: false,
               isAutoReadPaused: false, isLoadingNextChapter: false, secondsPerScreen: 10,
               onReachedEnd: { _ in }, onReachedStart: { _ in }, onEnteredPrevious: { _ in },
               onEnteredContinuation: { _ in }, onDeferredRender: {}, onCancelNextLoading: {},
-              onPageChanged: {}, onTapAction: { _ in })
+              onPageChanged: {}, onMenuTap: {})
     }
 }
 
@@ -602,7 +703,8 @@ final class ReaderComicGeometryTests: XCTestCase {
         let reader = ReaderComicView(blocks: blocks,
             source: BookSource(bookSourceUrl: book.origin, bookSourceName: "测试源"), book: book, chapter: chapter,
             background: .white, foreground: .black, fontSize: 20, requestedPosition: requested, jumpPosition: nil,
-            onPosition: { position, page, count in lastPosition = position; lastPage = page; XCTAssertEqual(count, 4) }, onTap: {})
+            onPosition: { position, page, count in lastPosition = position; lastPage = page; XCTAssertEqual(count, 4) },
+            onMenuTap: {}, onChapterBoundary: { _ in })
         let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 400, height: 700))
         let host = UIHostingController(rootView: reader)
         window.rootViewController = host

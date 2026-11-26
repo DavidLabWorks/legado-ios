@@ -77,6 +77,129 @@ private struct ReadingUnavailableLabelStyle: LabelStyle {
 }
 
 extension View {
+    /// Shared destinations can also be pushed normally from a navigation stack.
+    @ViewBuilder
+    func readingRouteHeader<Actions: View>(
+        _ title: String, close: (() -> Void)?, displayMode: NavigationBarItem.TitleDisplayMode = .inline,
+        @ViewBuilder actions: () -> Actions
+    ) -> some View {
+        if let close {
+            readingSheetTitle(title).toolbar {
+                ToolbarItemGroup(placement: .topBarTrailing) { actions().labelStyle(.iconOnly) }
+                ReadingSheetActions { ReadingSheetCloseButton(action: close) }
+            }
+        } else {
+            navigationTitle(title).navigationBarTitleDisplayMode(displayMode)
+                .toolbar { ToolbarItemGroup(placement: .topBarTrailing) { actions() } }
+        }
+    }
+
+    @ViewBuilder
+    func readingSheetTitle(_ title: String) -> some View {
+        let heading = ToolbarItem(placement: .topBarLeading) {
+            Text(title).font(.headline).lineLimit(1)
+                .frame(width: min(168, ceil((title as NSString).size(withAttributes: [
+                    .font: UIFont.preferredFont(forTextStyle: .headline)
+                ]).width) + 2), alignment: .leading)
+                .fixedSize()
+                .accessibilityAddTraits(.isHeader)
+                .accessibilityIdentifier("sheet.heading")
+        }
+        let page = navigationTitle(title).navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                // Replace the centered visual title while retaining the native navigation identifier.
+                ToolbarItem(placement: .principal) {
+                    Color.clear.frame(width: 1, height: 1).accessibilityHidden(true)
+                }
+            }
+        if #available(iOS 26.0, *) {
+            page.toolbar { heading.sharedBackgroundVisibility(.hidden) }
+        } else {
+            page.toolbar { heading }
+        }
+    }
+}
+
+struct ReadingSheetActions<Actions: View>: ToolbarContent {
+    @ViewBuilder let actions: Actions
+
+    var body: some ToolbarContent {
+        ToolbarItem(placement: .topBarTrailing) {
+            HStack(spacing: 0) { actions }
+                .buttonStyle(ReadingSheetSecondaryButtonStyle())
+                .foregroundStyle(.primary)
+                .padding(.horizontal, 2)
+                .background(ReadingTheme.accentSoft, in: Capsule())
+        }
+    }
+}
+
+private struct ReadingSheetSecondaryButtonStyle: ButtonStyle {
+    @Environment(\.isEnabled) private var isEnabled
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .padding(.horizontal, 8)
+            .frame(minWidth: 44, minHeight: 44)
+            .contentShape(Rectangle())
+            .opacity(isEnabled ? (configuration.isPressed ? 0.55 : 1) : 0.45)
+    }
+}
+
+struct ReadingSheetCloseButton: View {
+    let action: () -> Void
+    var body: some View {
+        Button(action: action) { Image(systemName: "xmark").font(.body.weight(.semibold)) }
+            .accessibilityLabel("关闭")
+    }
+}
+
+struct ReadingSheetActionButton: View {
+    let title: String
+    let busyTitle: String
+    let isWorking: Bool
+    let action: () -> Void
+
+    init(_ title: String = "保存", busyTitle: String = "保存中", isWorking: Bool = false, action: @escaping () -> Void) {
+        self.title = title
+        self.busyTitle = busyTitle
+        self.isWorking = isWorking
+        self.action = action
+    }
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 5) {
+                if isWorking {
+                    ProgressView().controlSize(.small).tint(ReadingTheme.onAccent)
+                }
+                Text(isWorking ? busyTitle : title)
+            }
+            .font(.body.weight(.semibold))
+        }
+        .buttonStyle(ReadingSheetActionStyle(isWorking: isWorking))
+        .disabled(isWorking)
+    }
+}
+
+private struct ReadingSheetActionStyle: ButtonStyle {
+    @Environment(\.isEnabled) private var isEnabled
+    let isWorking: Bool
+
+    func makeBody(configuration: Configuration) -> some View {
+        let prominent = isEnabled || isWorking
+        configuration.label
+            .padding(.horizontal, 14)
+            .frame(minWidth: 56, minHeight: 34)
+            .foregroundStyle(prominent ? ReadingTheme.onAccent : Color.secondary)
+            .background(prominent ? ReadingTheme.accentFill : ReadingTheme.accentSoft, in: Capsule())
+            .opacity(configuration.isPressed ? 0.8 : 1)
+            .frame(minHeight: 44)
+            .contentShape(Rectangle())
+    }
+}
+
+extension View {
     /// Keep filled controls dark in both appearances, independently of icon tint.
     func readingProminentButtonStyle() -> some View {
         buttonStyle(.borderedProminent)
@@ -100,7 +223,16 @@ extension View {
         }
     }
 
+    @ViewBuilder
     func readingSearchable(text: Binding<String>, isPresented: Binding<Bool>, prompt: String) -> some View {
+        if #available(iOS 17.0, *), !ReadingCompatibility.usesLegacyUI {
+            searchable(text: text, isPresented: isPresented, prompt: prompt)
+        } else {
+            readingSearchField(text: text, isPresented: isPresented, prompt: prompt)
+        }
+    }
+
+    func readingSearchField(text: Binding<String>, isPresented: Binding<Bool>, prompt: String) -> some View {
         modifier(ReadingSearchModifier(text: text, isPresented: isPresented, prompt: prompt))
     }
 
@@ -119,50 +251,49 @@ private struct ReadingSearchModifier: ViewModifier {
     @Binding var isPresented: Bool
     let prompt: String
     @FocusState private var isFocused: Bool
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     func body(content: Content) -> some View {
-        if #available(iOS 17.0, *), !ReadingCompatibility.usesLegacyUI {
-            content.searchable(text: $text, isPresented: $isPresented, prompt: prompt)
-        } else {
-            content
-                .safeAreaInset(edge: .top, spacing: 0) {
+        content
+            .safeAreaInset(edge: .top, spacing: 0) {
+                HStack(spacing: 8) {
                     HStack(spacing: 8) {
-                        HStack(spacing: 8) {
-                            Image(systemName: "magnifyingglass")
-                                .foregroundStyle(.secondary)
-                                .accessibilityHidden(true)
-                            TextField(prompt, text: $text)
-                                .focused($isFocused)
-                                .textInputAutocapitalization(.never)
-                                .disableAutocorrection(true)
-                                .submitLabel(.search)
-                            if !text.isEmpty {
-                                Button {
-                                    text = ""
-                                } label: {
-                                    Image(systemName: "xmark.circle.fill")
-                                        .foregroundStyle(.secondary)
-                                }
-                                .accessibilityLabel("清除搜索")
-                            }
-                        }
-                        .padding(10)
-                        .background(ReadingTheme.groupedCanvas, in: RoundedRectangle(cornerRadius: 10))
-                        if isFocused {
-                            Button("取消") {
+                        Image(systemName: "magnifyingglass")
+                            .foregroundStyle(.secondary)
+                            .accessibilityHidden(true)
+                        TextField(prompt, text: $text)
+                            .focused($isFocused)
+                            .accessibilityAddTraits(.isSearchField)
+                            .textInputAutocapitalization(.never)
+                            .disableAutocorrection(true)
+                            .submitLabel(.search)
+                        if !text.isEmpty {
+                            Button {
                                 text = ""
-                                isFocused = false
+                            } label: {
+                                Image(systemName: "xmark.circle.fill")
+                                    .foregroundStyle(.secondary)
                             }
+                            .accessibilityLabel("清除搜索")
                         }
                     }
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 8)
-                    .background(ReadingTheme.canvas)
+                    .padding(10)
+                    .background(ReadingTheme.groupedCanvas, in: RoundedRectangle(cornerRadius: 10))
+                    if isFocused {
+                        Button("取消") {
+                            text = ""
+                            isFocused = false
+                        }
+                    }
                 }
-                .onAppear { isFocused = isPresented }
-                .onChange(of: isPresented) { isFocused = $0 }
-                .onChange(of: isFocused) { isPresented = $0 }
-        }
+                .animation(reduceMotion ? nil : .easeOut(duration: 0.2), value: isFocused)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 8)
+                .background(ReadingTheme.canvas)
+            }
+            .onAppear { isFocused = isPresented }
+            .onChange(of: isPresented) { isFocused = $0 }
+            .onChange(of: isFocused) { isPresented = $0 }
     }
 }
 
@@ -177,6 +308,8 @@ enum ReadingTheme {
     static let paper = Color(red: 0.965, green: 0.945, blue: 0.895)
     static let ink = Color.primary
     static let canvas = adaptive(0xFCFCFC, dark: 0x111113)
+    static let managementSecondary = adaptive(0x60645B, dark: 0xB7BAB3)
+    static let managementCanvas = adaptive(0xF9F8F5, dark: 0x151515)
     static let groupedCanvas = adaptive(0xF3F3F4, dark: 0x1C1C1F)
     static let surface = adaptive(0xFFFFFF, dark: 0x232326)
     static let separator = adaptive(0xE6E6E8, dark: 0x363639)
@@ -309,18 +442,96 @@ struct ReadingToolbarIcon: View {
     }
 }
 
+struct SourceManagementSearchHeader: View {
+    let total: Int
+    let enabled: Int
+    @Binding var searchText: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text("共 \(total) 个来源 · 已启用 \(enabled) 个")
+                .font(.subheadline)
+                .foregroundStyle(ReadingTheme.managementSecondary)
+                .monospacedDigit()
+                .padding(.horizontal, 20)
+            ReadingPillSearchField(placeholder: "名称、地址或分组", text: $searchText, cornerRadius: 14)
+        }
+        .padding(.top, 4)
+    }
+}
+
 struct SourceGroupPicker: View {
+    let title: String
     let groups: [String]
     @Binding var selection: String?
 
+    private var selectionName: String {
+        guard let selection else { return "全部分组" }
+        return selection.isEmpty ? "未分组" : selection
+    }
+
     var body: some View {
-        Picker("分组", selection: $selection) {
-            Text("全部").tag(String?.none)
-            Text("未分组").tag(String?.some(""))
-            ForEach(groups, id: \.self) { group in
-                Text(group).tag(String?.some(group))
+        HStack {
+            Text(title).font(.headline).accessibilityAddTraits(.isHeader)
+            Spacer()
+            Menu {
+                Picker("分组", selection: $selection) {
+                    Text("全部").tag(String?.none)
+                    Text("未分组").tag(String?.some(""))
+                    ForEach(groups, id: \.self) { group in
+                        Text(group).tag(String?.some(group))
+                    }
+                }
+            } label: {
+                HStack(spacing: 6) {
+                    Text(selectionName).font(.subheadline)
+                    Image(systemName: "chevron.down").font(.caption2)
+                }
+                .padding(.horizontal, 12).padding(.vertical, 6)
+                .background(ReadingTheme.surface, in: Capsule())
+                .overlay { Capsule().strokeBorder(ReadingTheme.separator, lineWidth: 1) }
+                .frame(minHeight: 44)
+                .contentShape(Rectangle())
             }
+            .accessibilityLabel("分组")
+            .accessibilityValue(selectionName)
         }
+        .foregroundStyle(ReadingTheme.ink)
+        .textCase(nil)
+    }
+}
+
+struct ManagementRowIcon: View {
+    let systemName: String
+    var active = true
+    @ScaledMetric(relativeTo: .body) private var size: CGFloat = 36
+
+    var body: some View {
+        Image(systemName: systemName)
+            .font(.subheadline.weight(.medium))
+            .foregroundStyle(active ? ReadingTheme.ink : .secondary)
+            .frame(width: size, height: size)
+            .background(active ? ReadingTheme.coral.opacity(0.13) : ReadingTheme.accentSoft,
+                        in: RoundedRectangle(cornerRadius: 11, style: .continuous))
+            .accessibilityHidden(true)
+    }
+}
+
+extension View {
+    func managementPrimaryAction() -> some View {
+        font(.body.weight(.semibold))
+            .padding(.horizontal, 24)
+            .frame(minWidth: 150, minHeight: 44)
+            .foregroundStyle(ReadingTheme.onAccent)
+            .background(ReadingTheme.accentFill, in: Capsule())
+    }
+
+    func readingManagementList() -> some View {
+        listStyle(.insetGrouped)
+            .readingListTopMargin(4)
+            .readingScrollContentBackgroundHidden()
+            .readingScrollDismissesKeyboard()
+            .background(ReadingTheme.managementCanvas)
     }
 }
 
@@ -328,20 +539,17 @@ struct SourceManagementRow: View {
     let name: String
     let url: String
     let groups: [String]
+    let systemImage: String
     let enabled: Bool
     var showsToggle = true
     let onEnabledChanged: @MainActor @Sendable (Bool) -> Void
 
     var body: some View {
         HStack(spacing: 12) {
-            Image(systemName: enabled ? "network" : "network.slash")
-                .font(.system(size: 20))
-                .frame(width: 28)
-                .foregroundStyle(.secondary)
-                .accessibilityHidden(true)
+            ManagementRowIcon(systemName: systemImage, active: enabled)
             VStack(alignment: .leading, spacing: 4) {
                 Text(name)
-                    .font(.body)
+                    .font(.body.weight(.semibold))
                     .foregroundStyle(enabled ? Color.primary : .secondary)
                 Text(groups.isEmpty ? (URL(string: url)?.host ?? url) : groups.joined(separator: " · "))
                     .font(.caption)
@@ -357,7 +565,7 @@ struct SourceManagementRow: View {
                     }
                 ))
                 .labelsHidden()
-                .tint(.green)
+                .tint(ReadingTheme.toggleTint)
                 .accessibilityLabel("启用\(name)")
             }
         }
@@ -488,7 +696,7 @@ struct BookCoverArtwork: View {
                     .buttonStyle(.plain)
                     .accessibilityLabel("查看封面")
                     .fullScreenCover(isPresented: $showsPreview) {
-                        PhotoViewer(imageLabel: title) { _ in loadedCover.photo }
+                        PhotoViewer(imageLabel: title) { _, _ in loadedCover.photo }
                     }
                 } else {
                     artwork(placeholder)
@@ -628,6 +836,7 @@ struct StatusPill: View {
 struct ReadingPillSearchField: View {
     let placeholder: String
     @Binding var text: String
+    var cornerRadius: CGFloat = 22
 
     var body: some View {
         HStack(spacing: 12) {
@@ -635,7 +844,7 @@ struct ReadingPillSearchField: View {
                 .font(.system(size: 20, weight: .regular))
                 .accessibilityHidden(true)
             TextField(placeholder, text: $text)
-                .font(.system(size: 16))
+                .font(.body)
                 .textInputAutocapitalization(.never)
                 .disableAutocorrection(true)
                 .submitLabel(.search)
@@ -643,15 +852,16 @@ struct ReadingPillSearchField: View {
                 Button { text = "" } label: {
                     Image(systemName: "xmark.circle.fill")
                         .foregroundStyle(.secondary)
+                        .frame(minWidth: 44, minHeight: 44)
+                        .contentShape(Rectangle())
                 }
                 .accessibilityLabel("清除搜索")
-                .frame(minWidth: 28, minHeight: 28)
             }
         }
         .foregroundStyle(ReadingTheme.ink)
         .padding(.horizontal, 18)
         .frame(minHeight: 44)
-        .background(ReadingTheme.accentSoft, in: Capsule())
+        .background(ReadingTheme.accentSoft, in: RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
         .padding(.horizontal, 20)
         .padding(.top, 14)
         .padding(.bottom, 8)
@@ -675,12 +885,13 @@ struct ReadingIllustratedEmptyState<Actions: View>: View {
                         .frame(width: 164, height: 128)
                         .accessibilityHidden(true)
                     Text(title)
-                        .font(.system(size: 20, weight: .semibold))
+                        .font(.title3.weight(.semibold))
+                        .multilineTextAlignment(.center)
                         .foregroundStyle(ReadingTheme.ink)
                         .padding(.top, 16)
                         .accessibilityAddTraits(.isHeader)
                     Text(message)
-                        .font(.system(size: 14))
+                        .font(.subheadline)
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.center)
                         .fixedSize(horizontal: false, vertical: true)
@@ -695,6 +906,13 @@ struct ReadingIllustratedEmptyState<Actions: View>: View {
             }
             .readingScrollDismissesKeyboard()
         }
+    }
+}
+
+extension View {
+    func readingSheetGroup() -> some View {
+        background(Color(uiColor: .secondarySystemBackground),
+                   in: RoundedRectangle(cornerRadius: 16, style: .continuous))
     }
 }
 

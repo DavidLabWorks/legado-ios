@@ -43,7 +43,10 @@ struct RSSHomeView: View {
 
     @ViewBuilder private var sourceList: some View {
         let sources = enabledSources
-        if sources.isEmpty {
+        if sources.isEmpty, !library.hasLoadedSources {
+            RagdollLoading("正在加载网站", width: 72, axis: .vertical)
+                .frame(maxWidth: .infinity).padding(.top, 54)
+        } else if sources.isEmpty {
             VStack(spacing: 16) {
                 ReadingUnavailableView("暂无已启用的网站", systemImage: "globe",
                                        description: Text("在网站源管理中添加或启用站点。"))
@@ -87,6 +90,10 @@ private struct WebsiteActivityList: View {
             if showsStars {
                 VStack(spacing: 0) {
                     ReadingPillSearchField(placeholder: "搜索文章", text: $searchText)
+                    if !library.stars.isEmpty {
+                        Text("共 \(library.stars.count) 条收藏").font(.footnote).foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal)
+                    }
                     starList
                 }
                 .navigationBarTitleDisplayMode(.large)
@@ -106,7 +113,7 @@ private struct WebsiteActivityList: View {
             }
         }
         .sheet(item: $editingStar) { value in
-            RSSStarEditSheet(star: value) { updated in Task { await library.saveStar(updated) } }
+            RSSStarEditSheet(star: value, save: library.saveStar)
         }
         .modifier(WebsiteOperationStatus())
     }
@@ -124,7 +131,16 @@ private struct WebsiteActivityList: View {
                 let values = offsets.map { stars[$0] }
                 Task { for value in values { await library.removeStar(value) } }
             }
-        }.overlay { if stars.isEmpty { ReadingUnavailableView("没有收藏", systemImage: "star") } }.listStyle(.plain)
+        }.overlay { if library.stars.isEmpty {
+            ReadingUnavailableView("没有收藏", systemImage: "star")
+        } else if stars.isEmpty {
+            VStack(spacing: 12) {
+                Text("未找到匹配的收藏").font(.headline)
+                Text("没有与「\(searchText)」匹配的收藏。").foregroundStyle(.secondary)
+                Button("清除搜索，查看全部 \(library.stars.count) 条") { searchText = "" }
+                    .readingSecondaryButtonStyle()
+            }.padding()
+        } }.listStyle(.plain)
     }
     private var recordList: some View {
         List {
@@ -173,8 +189,12 @@ struct WebsiteSourceManagementView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            ReadingPillSearchField(placeholder: "名称、地址或分组", text: $searchText)
-            if library.sources.isEmpty {
+            SourceManagementSearchHeader(total: library.sources.count, enabled: library.sources.filter(\.enabled).count,
+                                         searchText: $searchText)
+            if library.sources.isEmpty, !library.hasLoadedSources {
+                RagdollLoading("正在加载网站源", width: 72, axis: .vertical)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if library.sources.isEmpty {
                 ReadingIllustratedEmptyState(artwork: "SourceEmptyArtwork", title: "还没有网站源",
                                              message: "新建网站源，或从文件、链接、JSON 导入", bottomBalance: 116) {
                     Menu {
@@ -191,12 +211,11 @@ struct WebsiteSourceManagementView: View {
                 }
             } else {
                 List {
-                    Section { SourceGroupPicker(groups: groups, selection: $selectedGroup) }
                     Section {
                         ForEach(sources) { source in
                             NavigationLink { RSSSourceEditorView(source: source) } label: {
                                 SourceManagementRow(name: source.sourceName, url: source.sourceUrl, groups: source.groups,
-                                                    enabled: source.enabled, showsToggle: !editMode.isEditing) { enabled in
+                                                    systemImage: "globe", enabled: source.enabled, showsToggle: !editMode.isEditing) { enabled in
                                     Task { await library.setEnabled(enabled, source: source) }
                                 }
                             }
@@ -213,26 +232,24 @@ struct WebsiteSourceManagementView: View {
                             Text("未找到网站源").foregroundStyle(.secondary)
                         }
                     } header: {
-                        Text("\(sources.count) 个网站源")
-                    } footer: {
-                        Text("共 \(library.sources.count) 个网站源，\(library.sources.filter(\.enabled).count) 个已启用")
+                        SourceGroupPicker(title: searchText.isEmpty && selectedGroup == nil ? "网站源" : "网站源 · \(sources.count)",
+                                          groups: groups, selection: $selectedGroup)
                     }
+                    .listRowBackground(ReadingTheme.surface)
                 }
-                .listStyle(.insetGrouped)
-                .readingScrollContentBackgroundHidden()
-                .background(ReadingTheme.groupedCanvas)
+                .readingManagementList()
                 .environment(\.editMode, $editMode)
             }
         }
         .onChange(of: groups) { available in
             if let selectedGroup, !selectedGroup.isEmpty, !available.contains(selectedGroup) { self.selectedGroup = nil }
         }
-        .background(ReadingTheme.canvas)
+        .background(ReadingTheme.managementCanvas)
         .navigationTitle("网站源管理")
-        .navigationBarTitleDisplayMode(.inline)
+        .navigationBarTitleDisplayMode(.large)
         .navigationBarHidden(false)
         .toolbar {
-            ToolbarItem(placement: .topBarLeading) {
+            ToolbarItem(placement: .topBarTrailing) {
                 Button(editMode.isEditing ? "完成" : "编辑") {
                     withAnimation { editMode = editMode.isEditing ? .inactive : .active }
                 }
@@ -275,7 +292,7 @@ private extension RssSource {
 private struct WebsiteOperationStatus: ViewModifier {
     @EnvironmentObject private var library: RSSLibraryModel
     func body(content: Content) -> some View {
-        content.overlay { if library.isWorking { ProgressView().controlSize(.large) } }
+        content.overlay { if library.isWorking { RagdollLoading(width: 72) } }
             .alert("网站操作失败", isPresented: Binding(get: { library.errorMessage != nil }, set: { if !$0 { library.errorMessage = nil } })) {
                 Button("好") { library.errorMessage = nil }
             } message: { Text(library.errorMessage ?? "") }
@@ -293,16 +310,44 @@ private struct WebsitePaginationVisible: PreferenceKey {
 private struct RSSArticleListView: View {
     @EnvironmentObject private var library: RSSLibraryModel
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let source: RssSource
-    @State private var searchKey = ""
+    var sheetClose: (() -> Void)? = nil
+    @State private var showsSearch = false
+    @State private var searchText = ""
+    @State private var searchKey: String?
+    @FocusState private var searchFocused: Bool
     @State private var sorts: [RSSSort] = []
+    @State private var resolvingSorts = true
     @State private var selectedSort = 0
     @State private var lastPullSignal = -Double.infinity
     @State private var pullInProgress = false
+    @State private var confirmsClear = false
 
     var body: some View {
         VStack(spacing: 0) {
-            if sorts.count > 1 {
+            if showsSearch {
+                HStack(spacing: 12) {
+                    TextField("源内搜索", text: $searchText)
+                        .textFieldStyle(.roundedBorder)
+                        .focused($searchFocused)
+                        .textInputAutocapitalization(.never)
+                        .disableAutocorrection(true)
+                        .submitLabel(.search)
+                        .onSubmit {
+                            searchFocused = false
+                            searchKey = searchText.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+                            Task { await refresh(preferCache: searchKey == nil) }
+                        }
+                        .accessibilityAddTraits(.isSearchField)
+                        .accessibilityIdentifier("website.sourceSearchField")
+                    Button("取消", action: closeSearch)
+                        .accessibilityLabel("取消搜索")
+                }
+                .padding(.horizontal)
+                .padding(.vertical, 8)
+                .transition(reduceMotion ? .opacity : .move(edge: .top).combined(with: .opacity))
+            } else if sorts.count > 1 {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack { ForEach(Array(sorts.enumerated()), id: \.element.id) { index, sort in
                         Button(sort.name.isEmpty ? "默认" : sort.name) { selectedSort = index; Task { await refresh(preferCache: true) } }
@@ -312,6 +357,18 @@ private struct RSSArticleListView: View {
             }
             GeometryReader { viewport in
                 articleCollection(viewport: viewport.size)
+                    .opacity(resolvingSorts ? 0 : 1)
+                    .accessibilityHidden(resolvingSorts)
+                    .overlay {
+                        if resolvingSorts || (library.articles.isEmpty && library.refreshingFeed) {
+                            RagdollLoading("正在加载列表", width: 80, axis: .vertical)
+                                .accessibilityIdentifier("website.list.loading")
+                        } else if library.articles.isEmpty, !library.canLoadMore {
+                            ReadingIllustratedEmptyState(artwork: "RSSArticleEmptyArtwork", title: "没有文章",
+                                                         message: "下拉可以重新加载文章。", bottomBalance: 0) { EmptyView() }
+                                .allowsHitTesting(false)
+                        }
+                    }
                     .coordinateSpace(name: "websiteArticleList")
                     .onPreferenceChange(WebsitePaginationVisible.self) { visible in
                         if visible { requestNextPage() }
@@ -329,30 +386,70 @@ private struct RSSArticleListView: View {
                 await Task { await refresh() }.value
             }
         }
-        .overlay { if library.articles.isEmpty, !library.isWorking, !library.canLoadMore { ReadingUnavailableView("没有文章", systemImage: "newspaper").allowsHitTesting(false) } }
-        .navigationTitle(source.sourceName)
-        .navigationBarTitleDisplayMode(.inline)
-        .searchable(text: $searchKey, placement: .navigationBarDrawer(displayMode: .always), prompt: "源内搜索")
-        .onSubmit(of: .search) { Task { await refresh() } }
-        .toolbar {
-            ToolbarItem(placement: .primaryAction) { NavigationLink { RSSSourceEditorView(source: source) } label: { Label("编辑", systemImage: "pencil") } }
+        .readingRouteHeader(source.sourceName, close: sheetClose) {
+            Menu {
+                if searchURL != nil, !showsSearch {
+                    Button {
+                        withAnimation(searchAnimation) { showsSearch = true }
+                    } label: { Label("源内搜索", systemImage: "magnifyingglass") }
+                }
+                if source.loginUrl?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false {
+                    NavigationLink { SourceLoginView(source: source.bookSourceAdapter) } label: { Label("源登录", systemImage: "person.badge.key") }
+                }
+                NavigationLink { RSSSourceEditorView(source: source) } label: {
+                    Label("编辑", systemImage: "square.and.pencil")
+                }
+                Button(role: .destructive) { confirmsClear = true } label: {
+                    if #available(iOS 16, *) {
+                        Label("清空数据", systemImage: "eraser.line.dashed")
+                    } else {
+                        Label("清空数据", systemImage: "delete.left")
+                    }
+                }
+            } label: {
+                Label("更多", systemImage: "ellipsis").labelStyle(.iconOnly)
+            }
+            .confirmationDialog("清空「\(source.sourceName)」所有分类的文章缓存？", isPresented: $confirmsClear, titleVisibility: .visible) {
+                Button("清空数据", role: .destructive) { Task { await library.clearArticleCache(for: source) } }
+                Button("取消", role: .cancel) {}
+            }
         }
         .task {
             if sorts.isEmpty { sorts = await RSSSortResolver().resolve(source) }
+            guard !Task.isCancelled else { return }
+            resolvingSorts = false
             await refresh(preferCache: true)
+        }
+        .onChange(of: showsSearch) { searchFocused = $0 }
+        .onChange(of: searchURL) { url in
+            if url == nil, showsSearch { closeSearch() }
         }
         .readingTabBarHidden()
     }
 
     private var activeSort: RSSSort { sorts.indices.contains(selectedSort) ? sorts[selectedSort] : .init(name: "", url: source.sourceUrl) }
-    private var activeName: String { searchKey.nilIfEmpty == nil ? activeSort.name : "搜索" }
+
+    private var searchURL: String? { source.searchUrl?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty }
+    private var activeName: String { searchKey == nil ? activeSort.name : "搜索" }
+    private var searchAnimation: Animation { .easeInOut(duration: reduceMotion ? 0.15 : 0.25) }
+
+    private func closeSearch() {
+        searchFocused = false
+        withAnimation(searchAnimation) { showsSearch = false }
+        searchText = ""
+        if searchKey != nil {
+            searchKey = nil
+            Task { await refresh(preferCache: true) }
+        }
+    }
+
     private func refresh(preferCache: Bool = false) async {
-        let url = searchKey.nilIfEmpty == nil ? activeSort.url : (source.searchUrl?.nilIfEmpty ?? activeSort.url)
-        await library.refresh(source, sortName: activeName, sortURL: url, key: searchKey.nilIfEmpty, preferCache: preferCache)
+        let url = searchKey == nil ? activeSort.url : (searchURL ?? activeSort.url)
+        await library.refresh(source, sortName: activeName, sortURL: url, key: searchKey, preferCache: preferCache)
     }
 
     private func requestNextPage() {
-        Task { await library.loadMore(source, sortName: activeName, key: searchKey.nilIfEmpty) }
+        Task { await library.loadMore(source, sortName: activeName, key: searchKey) }
     }
 
     @ViewBuilder private func paginationFooter(viewportHeight: CGFloat) -> some View {
@@ -360,7 +457,7 @@ private struct RSSArticleListView: View {
             VStack(spacing: 4) {
                 if library.isLoadingMore {
                     HStack(spacing: 8) {
-                        ProgressView().controlSize(.small).accessibilityHidden(true)
+                        RagdollLoading(width: 28).accessibilityHidden(true)
                         Text("正在加载下一页")
                             .font(.footnote)
                             .foregroundStyle(.secondary)
@@ -470,7 +567,7 @@ private struct RSSArticleListView: View {
     }
 
     private func reader(for article: RssArticle) -> some View {
-        RSSFeedReader(article: article, source: source, sortName: activeName, searchKey: searchKey.nilIfEmpty)
+        RSSFeedReader(article: article, source: source, sortName: activeName, searchKey: searchKey)
     }
 }
 
@@ -521,21 +618,14 @@ private struct RSSSourceDestinationView: View {
 private struct RSSStandaloneReaderView: View {
     let source: RssSource
     let mode: RSSReadingMode
+    var sheetClose: (() -> Void)? = nil
     @State private var pageTitle: String?
     @State private var route: RSSNativeRoute?
     var body: some View {
         RSSContentReader(mode: mode, source: source, pageTitle: $pageTitle, onAction: handle)
-            .navigationTitle(pageTitle ?? source.sourceName).navigationBarTitleDisplayMode(.inline)
+            .readingRouteHeader(pageTitle ?? source.sourceName, close: sheetClose) { EmptyView() }
             .sheet(item: $route) { route in
-                switch route {
-                case .search(let value): ReadingNavigationStack { SearchView(initialKeyword: value) }
-                case .rss(let article): ReadingNavigationStack { RSSArticleDetailView(article: article, source: source) }
-                case .login: ReadingNavigationStack { SourceLoginView(source: source.bookSourceAdapter) }
-                case .sort(let value): ReadingNavigationStack { RSSArticleListView(source: value) }
-                case .addBook(let value): ReadingNavigationStack { RSSAddBookView(bookURL: value) }
-                case .download(let url, let fileName): ReadingNavigationStack { RSSDownloadView(url: url, fileName: fileName, source: source) }
-                case .start(let mode): ReadingNavigationStack { RSSStandaloneReaderView(source: source, mode: mode) }
-                }
+                RSSRouteSheet(route: route, source: source)
             }
     }
     private func handle(_ action: RSSWebAction) {
@@ -559,10 +649,22 @@ private struct RSSStandaloneReaderView: View {
     }
 }
 
+struct RSSGalleryPhoto {
+    let url: String
+    var omitReferer = false
+    var displayedInArticle = false
+
+    // HTTP requests and WebKit's archived resources omit the URL fragment.
+    static func resourceKey(_ url: String) -> String {
+        String(url.prefix { $0 != "#" })
+    }
+}
+
 struct RSSGallerySelection: Identifiable {
     let id = UUID()
-    let urls: [String]
+    let photos: [RSSGalleryPhoto]
     let index: Int
+    let displayedImages: Task<[String: Data], Never>?
     let onLocate: ((Int) -> Void)?
 }
 
@@ -572,7 +674,7 @@ private struct RSSContentReader: View {
     @Binding var pageTitle: String?
     var articleURL: String?
     var nextArticle: RSSNextArticle?
-    var onTextChange: (String) -> Void = { _ in }
+    var onRefresh: (() -> Void)?
     let onAction: (RSSWebAction) -> Void
     @State private var gallery: RSSGallerySelection?
     @State private var videoURL: URL?
@@ -591,7 +693,6 @@ private struct RSSContentReader: View {
             let travelY = max(0, geometry.size.height - miniHeight - 2 * inset)
             let progress = miniVideo ? 1 : collapseProgress
             article
-                .padding(.top, videoURL == nil ? 0 : inlineHeight * (1 - progress))
                 .overlay(alignment: .topLeading) {
                     if let videoURL {
                         RSSVideoPlayer(url: videoURL, referer: URL(string: articleURL ?? source.sourceUrl),
@@ -622,7 +723,7 @@ private struct RSSContentReader: View {
                 }
         }
         .fullScreenCover(item: $gallery) { selection in
-            RSSPhotoView(urls: selection.urls, index: selection.index, source: source, referer: articleURL ?? source.sourceUrl, onLocate: selection.onLocate)
+            RSSPhotoView(photos: selection.photos, index: selection.index, source: source, referer: articleURL ?? source.sourceUrl, displayedImages: selection.displayedImages, onLocate: selection.onLocate)
         }
     }
 
@@ -635,12 +736,12 @@ private struct RSSContentReader: View {
     }
 
     private var article: some View {
-        RSSWebReaderView(mode: mode, source: source, pageTitle: $pageTitle, onTextChange: onTextChange,
+        RSSWebReaderView(mode: mode, source: source, pageTitle: $pageTitle,
                          imageBaseURL: articleURL, onShowPhoto: { gallery = $0 }, onPlayVideo: { url in
                              setMini(false)
                              if url != videoURL { miniPosition = .bottomTrailing }
                              videoURL = url
-                         }, nextArticle: nextArticle, onAction: onAction)
+                         }, nextArticle: nextArticle, onRefresh: onRefresh, onAction: onAction)
     }
 }
 
@@ -771,7 +872,7 @@ private struct RSSArticleCard: View {
                     AsyncImage(url: url) { phase in
                         if let image = phase.image { image.resizable().scaledToFill() }
                         else if phase.error != nil { placeholder }
-                        else { ProgressView() }
+                        else { RagdollLoading() }
                     }
                 } else { placeholder }
             }
@@ -797,136 +898,41 @@ private struct RSSArticleCard: View {
     }
 }
 
-private struct RSSArticleLoadingView: View {
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var start = Date()
-
-    var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 30, paused: reduceMotion)) { timeline in
-            let cycle = timeline.date.timeIntervalSince(start).truncatingRemainder(dividingBy: 1.8)
-            let progress = min(max(cycle / 1.45, 0), 1)
-            let angle = reduceMotion ? 0.95 : .pi * progress * progress * (3 - 2 * progress)
-            RSSLoadingBook(angle: angle)
-        }
-        .frame(width: 56, height: 39)
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel("正在加载文章")
-    }
-}
-
-private struct RSSLoadingBook: View {
-    @Environment(\.colorScheme) private var colorScheme
-    let angle: Double
-
-    var body: some View {
-        Canvas { context, size in
-            context.scaleBy(x: size.width / 84, y: size.height / 58)
-            let edge = ReadingTheme.accent
-            let paper = colorScheme == .dark ? ReadingTheme.surface : ReadingTheme.paper
-            let stroke = StrokeStyle(lineWidth: 1.35, lineCap: .round, lineJoin: .round)
-
-            // Each leaf shares the slanted spine. Its outer edge rises halfway through a turn.
-            func leaf(at angle: Double, cover: Bool = false) {
-                let span = cos(angle) * (cover ? 34 : 32)
-                let lift = sin(angle) * 19
-                func point(_ width: Double, _ depth: Double) -> CGPoint {
-                    CGPoint(x: 44 - 5 * depth + span * width,
-                            y: 25 + 25 * depth - (4 + lift) * width - 14 * width * (1 - width))
-                }
-                func curve(_ path: inout Path, from a: Double, to b: Double, depth: Double) {
-                    var control = point((a + b) / 2, depth)
-                    control.y -= 3.5 * (b - a) * (b - a)
-                    path.addQuadCurve(to: point(b, depth), control: control)
-                }
-                var page = Path()
-                page.move(to: point(0, 0))
-                curve(&page, from: 0, to: 1, depth: 0)
-                page.addLine(to: point(1, 1))
-                curve(&page, from: 1, to: 0, depth: 1)
-                page.closeSubpath()
-                if cover {
-                    context.fill(page.offsetBy(dx: 0, dy: 3.5), with: .color(edge))
-                    return
-                }
-                context.fill(page, with: .color(paper))
-                context.stroke(page, with: .color(edge), style: stroke)
-                var lines = Path()
-                for (depth, end) in [(0.33, 0.82), (0.52, 0.69)] {
-                    lines.move(to: point(0.20, depth))
-                    curve(&lines, from: 0.20, to: end, depth: depth)
-                }
-                context.stroke(lines, with: .color(edge.opacity(0.38)), style: StrokeStyle(lineWidth: 1, lineCap: .round))
-            }
-
-            leaf(at: .pi, cover: true)
-            leaf(at: 0, cover: true)
-            var ribbon = Path()
-            ribbon.addLines([CGPoint(x: 57, y: 42), CGPoint(x: 64, y: 42), CGPoint(x: 62, y: 55),
-                             CGPoint(x: 59, y: 52), CGPoint(x: 55, y: 55)])
-            ribbon.closeSubpath()
-            context.fill(ribbon, with: .color(ReadingTheme.coral))
-            leaf(at: .pi)
-            leaf(at: 0)
-            leaf(at: angle)
-        }
-    }
-}
-
 private struct RSSArticleDetailView: View {
     @EnvironmentObject private var library: RSSLibraryModel
     let article: RssArticle
     let source: RssSource
     var nextArticle: RSSNextArticle?
+    var sheetClose: (() -> Void)? = nil
     @State private var mode: RSSReadingMode?
     @State private var pageTitle: String?
-    @State private var speechText = ""
-    @State private var reloadID = UUID()
-    @State private var forceRefresh = false
+    @State private var reloadID = 0
     @State private var loadedRequest: String?
-    @StateObject private var speech = ReaderSpeechController()
-    @State private var showsVoicePack = false
+    @State private var showsBrowser = false
     @State private var nativeRoute: RSSNativeRoute?
 
     var body: some View {
+        let browserURL = URL.originalWebPage(from: article.link, relativeTo: article.origin)
         Group {
             if let mode {
-                RSSContentReader(mode: mode, source: source, pageTitle: $pageTitle, articleURL: article.link, nextArticle: nextArticle, onTextChange: { speechText = $0 }, onAction: handleWebAction)
-                    .id(reloadID)
+                RSSContentReader(mode: mode, source: source, pageTitle: $pageTitle, articleURL: article.link,
+                                 nextArticle: nextArticle, onRefresh: { reloadID += 1 }, onAction: handleWebAction)
+                    .id(loadedRequest)
             } else {
-                RSSArticleLoadingView()
+                RagdollLoading("正在加载文章", width: 80, axis: .vertical)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
-        .navigationTitle(pageTitle ?? article.title)
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbar {
-            ToolbarItem(placement: .primaryAction) {
-                Button(library.isStarred(article) ? "取消收藏" : "收藏", systemImage: library.isStarred(article) ? "star.fill" : "star") { Task { await library.toggleStar(article) } }
+        .readingRouteHeader(pageTitle ?? article.title, close: sheetClose) {
+            Button(library.isStarred(article) ? "取消收藏" : "收藏", systemImage: library.isStarred(article) ? "star.fill" : "star") { Task { await library.toggleStar(article) } }
+            if let url = URL(string: article.link) { ReadingShareLink(item: url) }
+            if browserURL != nil {
+                Button("浏览器打开", systemImage: "safari") { showsBrowser = true }
             }
-            ToolbarItem(placement: .primaryAction) {
-                if let url = URL(string: article.link) { ReadingShareLink(item: url) }
-            }
-            ToolbarItem(placement: .primaryAction) {
-                Menu("阅读操作", systemImage: "ellipsis.circle") {
-                    if let nextArticle {
-                        Button("下一篇", systemImage: "arrow.down") { nextArticle.open() }
-                    }
-                    Button(speech.isSpeaking ? "停止朗读" : "朗读正文", systemImage: speech.isSpeaking ? "stop.fill" : "speaker.wave.2.fill") {
-                        if speech.isSpeaking { speech.stop() }
-                        else if OfflineVoicePack.selected == nil { showsVoicePack = true }
-                        else {
-                            speech.configure(speechRate: 5, bookName: source.sourceName,
-                                             chapterTitle: pageTitle ?? article.title, coverAddress: article.image)
-                            speech.speak(speechText)
-                        }
-                    }.disabled(speechText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                    Button("刷新", systemImage: "arrow.clockwise") { forceRefresh = true; reloadID = UUID() }
-                    if let url = URL(string: article.link) { Link("浏览器打开", destination: url) }
-                    if source.loginUrl?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false {
-                        NavigationLink { SourceLoginView(source: source.bookSourceAdapter) } label: { Label("源登录", systemImage: "person.badge.key") }
-                    }
-                    NavigationLink { RSSSourceEditorView(source: source) } label: { Label("编辑源", systemImage: "pencil") }
-                }
+        }
+        .sheet(isPresented: $showsBrowser) {
+            if let browserURL {
+                InAppWebBrowser(url: browserURL, close: { showsBrowser = false }).ignoresSafeArea()
             }
         }
         .task(id: "\(article.id):\(reloadID)") {
@@ -934,29 +940,14 @@ private struct RSSArticleDetailView: View {
             guard loadedRequest != request else { return }
             mode = nil
             pageTitle = nil
-            speechText = ""
-            speech.stop()
             await library.read(article)
-            let loaded = await library.readingMode(for: article, source: source, forceRefresh: forceRefresh)
+            let loaded = await library.readingMode(for: article, source: source, forceRefresh: reloadID > 0)
             guard !Task.isCancelled else { return }
             loadedRequest = request
             mode = loaded
         }
-        .sheet(isPresented: $showsVoicePack) { OfflineVoicePackSheet() }
-        .onDisappear { speech.stop() }
-        .alert("朗读失败", isPresented: Binding(get: { speech.errorMessage != nil }, set: { if !$0 { speech.clearError() } })) {
-            Button("好") { speech.clearError() }
-        } message: { Text(speech.errorMessage ?? "") }
         .sheet(item: $nativeRoute) { route in
-            switch route {
-            case .search(let key): ReadingNavigationStack { SearchView(initialKeyword: key) }
-            case .rss(let target): ReadingNavigationStack { RSSArticleDetailView(article: target, source: source) }
-            case .login: ReadingNavigationStack { SourceLoginView(source: source.bookSourceAdapter) }
-            case .sort(let target): ReadingNavigationStack { RSSArticleListView(source: target) }
-            case .addBook(let value): ReadingNavigationStack { RSSAddBookView(bookURL: value) }
-            case .download(let url, let fileName): ReadingNavigationStack { RSSDownloadView(url: url, fileName: fileName, source: source) }
-            case .start(let value): ReadingNavigationStack { RSSStandaloneReaderView(source: source, mode: value) }
-            }
+            RSSRouteSheet(route: route, source: source)
         }
     }
 
@@ -1002,6 +993,33 @@ private enum RSSNativeRoute: Identifiable {
     }
 }
 
+private struct RSSRouteSheet: View {
+    let route: RSSNativeRoute
+    let source: RssSource
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        ReadingNavigationStack {
+            switch route {
+            case .search(let key):
+                SearchView(initialKeyword: key, sheetClose: dismiss.callAsFunction)
+            case .rss(let article):
+                RSSArticleDetailView(article: article, source: source, sheetClose: dismiss.callAsFunction)
+            case .login:
+                SourceLoginView(source: source.bookSourceAdapter, sheetClose: dismiss.callAsFunction)
+            case .sort(let target):
+                RSSArticleListView(source: target, sheetClose: dismiss.callAsFunction)
+            case .addBook(let url):
+                RSSAddBookView(bookURL: url)
+            case .download(let url, let name):
+                RSSDownloadView(url: url, fileName: name, source: source)
+            case .start(let mode):
+                RSSStandaloneReaderView(source: source, mode: mode, sheetClose: dismiss.callAsFunction)
+            }
+        }
+    }
+}
+
 private struct RSSDownloadView: View {
     @Environment(\.dismiss) private var dismiss
     let url: String
@@ -1014,7 +1032,7 @@ private struct RSSDownloadView: View {
 
     var body: some View {
         VStack(spacing: 16) {
-            if loading { ProgressView("正在下载…") }
+            if loading { RagdollLoading("正在下载…") }
             else if let errorMessage { ReadingUnavailableView("下载失败", systemImage: "exclamationmark.arrow.triangle.2.circlepath", description: Text(errorMessage)) }
             else {
                 Image(systemName: "doc.badge.arrow.up").font(.system(size: 48)).foregroundStyle(ReadingTheme.accent)
@@ -1022,7 +1040,11 @@ private struct RSSDownloadView: View {
                 Text(ByteCountFormatter.string(fromByteCount: Int64(data.count), countStyle: .file)).foregroundStyle(.secondary)
                 Button("选择保存位置", systemImage: "folder") { showsExporter = true }.readingProminentButtonStyle()
             }
-        }.padding().navigationTitle("文件下载").toolbar { ToolbarItem(placement: .cancellationAction) { Button("关闭") { dismiss() } } }
+        }.padding().readingSheetTitle("文件下载").toolbar {
+            ReadingSheetActions {
+                ReadingSheetCloseButton { dismiss() }
+            }
+        }
             .task(id: url) { await download() }
             .fileExporter(isPresented: $showsExporter, document: RSSBinaryDocument(data: data), contentType: .data, defaultFilename: fileName) { result in if case .failure(let error) = result { errorMessage = error.localizedDescription } }
     }
@@ -1050,21 +1072,23 @@ private struct RSSBinaryDocument: FileDocument {
 }
 
 struct RSSPhotoView: View {
-    let urls: [String]
+    let photos: [RSSGalleryPhoto]
     let index: Int
     let source: RssSource
     let referer: String
+    var displayedImages: Task<[String: Data], Never>?
     var onLocate: ((Int) -> Void)?
 
     var body: some View {
-        PhotoViewer(pageCount: urls.count, index: index, onLocate: onLocate) { page in
-            let data = try await imageData(for: urls[page])
+        PhotoViewer(pageCount: photos.count, index: index, onLocate: onLocate) { page, retry in
+            let data = try await imageData(for: photos[page], retry: retry)
             try Task.checkCancellation()
             return try PreviewPhoto(data: data)
         }
     }
 
-    private func imageData(for value: String) async throws -> Data {
+    private func imageData(for photo: RSSGalleryPhoto, retry: Bool) async throws -> Data {
+        let value = photo.url
         if value.lowercased().hasPrefix("data:image/"), let comma = value.firstIndex(of: ",") {
             let payload = String(value[value.index(after: comma)...])
             if value[..<comma].lowercased().contains(";base64") {
@@ -1074,14 +1098,22 @@ struct RSSPhotoView: View {
             return Data((payload.removingPercentEncoding ?? payload).utf8)
         }
 
+        if photo.displayedInArticle {
+            if let data = await displayedImages?.value[RSSGalleryPhoto.resourceKey(value)] { return data }
+            // Only an explicit retry may re-request an image the article already displayed.
+            if !retry { throw URLError(.resourceUnavailable) }
+        }
+        try Task.checkCancellation()
         guard let url = URL(string: value), ["https", "http"].contains(url.scheme?.lowercased()) else { throw URLError(.badURL) }
-        var request = URLRequest(url: url)
+        var request = URLRequest(url: url, timeoutInterval: 15)
         let site = URL(string: source.sourceUrl)
         for (key, header) in try BookSourceHeaderResolver().resolve(source.bookSourceAdapter) {
             if ["authorization", "cookie"].contains(key.lowercased()), url.host != site?.host { continue }
             request.setValue(header, forHTTPHeaderField: key)
         }
-        if request.value(forHTTPHeaderField: "Referer") == nil, let ref = URL(string: referer),
+        if photo.omitReferer {
+            request.setValue(nil, forHTTPHeaderField: "Referer")
+        } else if request.value(forHTTPHeaderField: "Referer") == nil, let ref = URL(string: referer),
            let host = ref.host, let scheme = ref.scheme, ["https", "http"].contains(scheme) {
             let origin = scheme + "://" + host + (ref.port.map { ":\($0)" } ?? "") + "/"
             request.setValue(origin, forHTTPHeaderField: "Referer")
@@ -1097,16 +1129,28 @@ struct RSSPhotoView: View {
 private struct RSSImportSheet: View {
     @EnvironmentObject private var library: RSSLibraryModel
     @Environment(\.dismiss) private var dismiss
+    @State private var importing = false
     @State private var text = ""
     var body: some View {
         ReadingNavigationStack {
             TextEditor(text: $text).font(.system(.body, design: .monospaced)).padding()
-                .navigationTitle("导入网站源")
+                .readingSheetTitle("导入网站源")
                 .toolbar {
-                    ToolbarItem(placement: .cancellationAction) { Button("取消") { dismiss() } }
-                    ToolbarItem(placement: .confirmationAction) { Button("导入") { Task { await library.importText(text); dismiss() } }.disabled(text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) }
+                    ReadingSheetActions {
+                        Button("取消") { dismiss() }
+                        ReadingSheetActionButton("导入", busyTitle: "导入中", isWorking: importing) {
+                            importing = true
+                            Task {
+                                if await library.importText(text) { dismiss() }
+                                importing = false
+                            }
+                        }.disabled(text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    }
                 }
         }
+        .disabled(importing)
+        .interactiveDismissDisabled(importing)
+        .modifier(WebsiteOperationStatus())
     }
 }
 
@@ -1124,19 +1168,35 @@ private struct RSSExportDocument: FileDocument {
 private struct RSSStarEditSheet: View {
     @Environment(\.dismiss) private var dismiss
     @State private var value: RssStar
-    let save: (RssStar) -> Void
-    init(star: RssStar, save: @escaping (RssStar) -> Void) { _value = State(initialValue: star); self.save = save }
+    @State private var saving = false
+    @State private var saveError: String?
+    let save: (RssStar) async throws -> Void
+    init(star: RssStar, save: @escaping (RssStar) async throws -> Void) { _value = State(initialValue: star); self.save = save }
     var body: some View {
         ReadingNavigationStack {
             Form {
                 TextField("标题", text: $value.title)
                 TextField("分组", text: $value.group)
                 ReadingLabeledContent("链接", value: value.link).textSelection(.enabled)
-            }.navigationTitle("编辑RSS收藏").toolbar {
-                ToolbarItem(placement: .cancellationAction) { Button("取消") { dismiss() } }
-                ToolbarItem(placement: .confirmationAction) { Button("保存") { save(value); dismiss() }.disabled(value.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) }
+            }.readingSheetTitle("编辑RSS收藏").toolbar {
+                ReadingSheetActions {
+                    Button("取消") { dismiss() }
+                    ReadingSheetActionButton(isWorking: saving) {
+                        saving = true
+                        Task {
+                            do { try await save(value); dismiss() }
+                            catch { saveError = error.localizedDescription }
+                            saving = false
+                        }
+                    }.disabled(value.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
             }
         }
+        .disabled(saving)
+        .interactiveDismissDisabled(saving)
+        .alert("收藏未保存", isPresented: Binding(get: { saveError != nil }, set: { if !$0 { saveError = nil } })) {
+            Button("好") { saveError = nil }
+        } message: { Text(saveError ?? "") }
     }
 }
 

@@ -1,4 +1,0 @@
-module CQwenSpeech {
-    header "Speech.h"
-    export *
-}

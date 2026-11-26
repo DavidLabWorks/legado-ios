@@ -152,12 +152,11 @@ enum BackupPreferences {
         "auto_refresh", "bookSourceSortDescending", "enableReadRecord", "epubPublisherStyles", "epubScroll",
         "ignoreAudioFocus", "mediaButtonPerNext", "onlyUpdateRead", "pauseReadAloudWhilePhoneCalls",
         "precisionSearch", "readAloudByPage", "readAloudWakeLock", "readerFullJustify", "readerHideHomeIndicator",
-        "readerHideStatusBar", "readerKeepScreenOn", "readerShowBrightness", "readerSimplifiedChinese",
+        "readerHideStatusBar", "readerKeepScreenOn", "readerSimplifiedChinese",
         "readerUseBackgroundImage", "showFooterLine", "showHeaderLine", "recordWebsiteBrowsingHistory"
     ]
     static let numbers: Set<String> = [
-        "autoReadSpeed", "bookshelfSort", "clickActionBottomCenter", "clickActionBottomLeft", "clickActionBottomRight",
-        "clickActionMiddleLeft", "clickActionMiddleRight", "clickActionTopCenter", "clickActionTopLeft", "clickActionTopRight",
+        "autoReadSpeed", "bookshelfSort",
         "epubFontScale", "footerMode", "footerPaddingBottom", "footerPaddingLeft", "footerPaddingRight", "footerPaddingTop",
         "headerMode", "headerPaddingBottom", "headerPaddingLeft", "headerPaddingRight", "headerPaddingTop",
         "letterSpacing", "lineSpacingExtra", "paddingBottom", "paddingLeft", "paddingRight", "paddingTop",
@@ -172,11 +171,18 @@ enum BackupPreferences {
         for key in numbers where defaults.object(forKey: key) != nil { values[key] = .number(defaults.double(forKey: key)) }
         return values
     }
+    // Older backups may contain the retired tap assignments. Accept them on
+    // import without applying them or writing them into new backups.
+    private static let legacyTapKeys: Set<String> = [
+        "clickActionTopLeft", "clickActionTopCenter", "clickActionTopRight", "clickActionMiddleLeft",
+        "clickActionMiddleRight", "clickActionBottomLeft", "clickActionBottomCenter", "clickActionBottomRight"
+    ]
+
     static func validate(_ values: [String: JSONValue]) throws {
         for (key, value) in values {
             switch value {
-            case .string where strings.contains(key), .bool where flags.contains(key): continue
-            case .number(let n) where numbers.contains(key) && n.isFinite && abs(n) <= 100000: continue
+            case .string where strings.contains(key), .bool where flags.contains(key) || key == "readerShowBrightness": continue
+            case .number(let n) where (numbers.contains(key) || legacyTapKeys.contains(key)) && n.isFinite && abs(n) <= 100000: continue
             default: throw BackupError.invalid("备份中的设置无效：" + key)
             }
         }

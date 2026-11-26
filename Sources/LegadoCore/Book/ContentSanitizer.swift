@@ -87,18 +87,18 @@ enum ChapterImageMarkup {
         return ranges
     }
 
-    static func mapText(in content: String, transform: (String, Bool) -> String) -> String {
+    static func mapText(in content: String, transform: (String) -> String) -> String {
         let ranges = ranges(in: content)
-        guard !ranges.isEmpty else { return transform(content, true) }
+        guard !ranges.isEmpty else { return transform(content) }
         var parts: [String] = []
         var start = content.startIndex
         for range in ranges {
-            let text = transform(String(content[start..<range.lowerBound]), start == content.startIndex)
+            let text = transform(String(content[start..<range.lowerBound]))
             if !text.isEmpty { parts.append(text) }
             parts.append(String(content[range]))
             start = range.upperBound
         }
-        let text = transform(String(content[start...]), start == content.startIndex)
+        let text = transform(String(content[start...]))
         if !text.isEmpty { parts.append(text) }
         return parts.joined(separator: "\n")
     }
@@ -157,7 +157,7 @@ public struct ContentSanitizer: Sendable {
         content: String,
         rules: [ReplaceRule],
         removeDuplicateTitle: Bool = true,
-        resegment: Bool = true
+        trimParagraphs: Bool = true
     ) -> ContentProcessingReport {
         let ordered = rules.filter(\.isEnabled).sorted { $0.sortOrder == $1.sortOrder ? $0.id < $1.id : $0.sortOrder < $1.sortOrder }
         var title = chapter.title
@@ -193,14 +193,9 @@ public struct ContentSanitizer: Sendable {
             }
         }
 
-        if resegment {
-            body = ChapterImageMarkup.mapText(in: body) { text, isFirstText in
-                // Images are paragraph boundaries, not dialogue. Processing
-                // only text also keeps the stable split seed free of random
-                // protection tokens and preserves signed URLs byte-for-byte.
-                let processed = book.readConfig?.reSegment == true
-                    ? ChapterResegmenter().process(text, chapterName: isFirstText ? chapter.title : "") : text
-                return processed.components(separatedBy: .newlines)
+        if trimParagraphs {
+            body = ChapterImageMarkup.mapText(in: body) { text in
+                text.components(separatedBy: .newlines)
                     .map { $0.trimmingCharacters(in: .whitespacesAndNewlines.union(CharacterSet(charactersIn: "　"))) }
                     .filter { !$0.isEmpty }
                     .joined(separator: "\n")
@@ -208,7 +203,7 @@ public struct ContentSanitizer: Sendable {
         }
 
         for rule in ordered where rule.scopeContent && applies(rule, to: book) {
-            let result = apply(rule, to: body, book: book, chapter: chapter)
+            let result = apply(rule, to: body, book: book, chapter: chapter, removeEmptiedParagraphs: true)
             diagnostics += result.diagnostics
             if result.value != body {
                 body = result.value
@@ -230,13 +225,18 @@ public struct ContentSanitizer: Sendable {
     private func applies(_ rule: ReplaceRule, to book: Book) -> Bool {
         if let excluded = rule.excludeScope, !excluded.isEmpty,
            (!book.name.isEmpty && excluded.contains(book.name)) || (!book.origin.isEmpty && excluded.contains(book.origin)) { return false }
+        if let bookURL = rule.scopeBookURL { return bookURL == book.bookUrl }
         guard let scope = rule.scope, !scope.isEmpty else { return true }
         return (!book.name.isEmpty && scope.contains(book.name)) || (!book.origin.isEmpty && scope.contains(book.origin))
     }
 
-    private func apply(_ rule: ReplaceRule, to input: String, book: Book, chapter: BookChapter) -> (value: String, diagnostics: [RuleDiagnostic]) {
+    private func apply(_ rule: ReplaceRule, to input: String, book: Book, chapter: BookChapter,
+                       removeEmptiedParagraphs: Bool = false) -> (value: String, diagnostics: [RuleDiagnostic]) {
         guard !rule.pattern.isEmpty else { return (input, []) }
         do {
+            if removeEmptiedParagraphs && rule.replacement.isEmpty {
+                return (try deletingBodyText(rule, from: input), [])
+            }
             if rule.isRegex {
                 if rule.replacement.hasPrefix("@js:") {
                     let evaluate = JavaScriptRuleEvaluator().replacementEvaluator(
@@ -257,6 +257,58 @@ public struct ContentSanitizer: Sendable {
                 rule: rule.pattern
             )])
         }
+    }
+
+    private func deletingBodyText(_ rule: ReplaceRule, from input: String) throws -> String {
+        var deletions = IndexSet()
+        let value: String
+        if rule.isRegex {
+            let source = input as NSString
+            var removedLength = 0
+            value = try regex.replacingStrict(pattern: rule.pattern, in: input, timeoutMilliseconds: rule.timeoutMillisecond) { _, match in
+                if Self.canLeaveEmptyParagraph(source.substring(with: match.range)) {
+                    deletions.insert(match.range.location - removedLength)
+                }
+                removedLength += match.range.length
+                return ""
+            }
+        } else {
+            let parts = input.components(separatedBy: rule.pattern)
+            guard parts.count > 1 else { return input }
+            value = parts.joined()
+            if Self.canLeaveEmptyParagraph(rule.pattern) {
+                var offset = 0
+                for part in parts.dropLast() {
+                    offset += part.utf16.count
+                    deletions.insert(offset)
+                }
+            }
+        }
+        guard !deletions.isEmpty else { return value }
+
+        // Keep the separator of each retained paragraph until there is another one to append.
+        // This also removes the preceding separator when the filter deletes the last paragraph.
+        let text = value as NSString
+        var result = ""
+        var separator = ""
+        var start = 0
+        while true {
+            var end = 0, contentsEnd = 0
+            text.getLineStart(nil, end: &end, contentsEnd: &contentsEnd, for: NSRange(location: start, length: 0))
+            let line = text.substring(with: NSRange(location: start, length: contentsEnd - start))
+            if !deletions.intersects(integersIn: start..<(contentsEnd + 1)) || !line.trimmingCharacters(in: .whitespaces).isEmpty {
+                result += separator + line
+                separator = text.substring(with: NSRange(location: contentsEnd, length: end - contentsEnd))
+            }
+            if end == contentsEnd { return result }
+            start = end
+        }
+    }
+
+    private static func canLeaveEmptyParagraph(_ match: String) -> Bool {
+        // A match that already consumes its line break must not absorb an adjacent blank paragraph.
+        let trimmed = match.trimmingCharacters(in: .whitespaces)
+        return trimmed.first?.isNewline == false && trimmed.last?.isNewline == false
     }
 
     private func normalize(_ value: String) -> String {

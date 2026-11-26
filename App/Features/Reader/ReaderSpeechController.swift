@@ -113,7 +113,7 @@ final class ReaderSpeechController: NSObject, ObservableObject {
             errorMessage = "请先下载或导入 ZipVoice 离线语音包。"
             return
         }
-        offlineVoice = selectedPack.resolve(voice)
+        offlineVoice = voice
         pack = selectedPack
         chapterLength = text.utf16.count
         phrases = SpokenPassage.passages(in: text, reading: range)
@@ -246,8 +246,8 @@ final class ReaderSpeechController: NSObject, ObservableObject {
             controller.stop()
             controller.onRemoteStop?()
         }
-        addRemoteTarget(center.nextTrackCommand) { $0.skipForward(usesChapterPreference: true) }
-        addRemoteTarget(center.previousTrackCommand) { $0.skipBackward(usesChapterPreference: true) }
+        addRemoteTarget(center.nextTrackCommand) { $0.skipForward() }
+        addRemoteTarget(center.previousTrackCommand) { $0.skipBackward() }
     }
 
     private func addRemoteTarget(_ command: MPRemoteCommand, action: @escaping @MainActor (ReaderSpeechController) -> Void) {
@@ -262,18 +262,8 @@ final class ReaderSpeechController: NSObject, ObservableObject {
         remoteCommandTargets.append((command, target))
     }
 
-    func nextSegment() {
-        guard isSpeaking || isPaused else { return }
-        skipForward(usesChapterPreference: false)
-    }
-
-    func previousSegment() {
-        guard isSpeaking || isPaused else { return }
-        skipBackward(usesChapterPreference: false)
-    }
-
-    private func skipForward(usesChapterPreference: Bool) {
-        if usesChapterPreference && mediaButtonPerNext {
+    private func skipForward() {
+        if mediaButtonPerNext {
             onNextChapter?()
         } else if phraseIndex + 1 < phrases.count {
             stopCurrentPlayback()
@@ -284,8 +274,8 @@ final class ReaderSpeechController: NSObject, ObservableObject {
         }
     }
 
-    private func skipBackward(usesChapterPreference: Bool) {
-        if usesChapterPreference && mediaButtonPerNext {
+    private func skipBackward() {
+        if mediaButtonPerNext {
             onPreviousChapter?()
         } else if phraseIndex > 0 {
             stopCurrentPlayback()
@@ -383,7 +373,7 @@ final class ReaderSpeechController: NSObject, ObservableObject {
         elapsedInBuffer = 0
         bufferStartedAt = nil
         updateNowPlaying()
-        guard let pack else { return }
+        guard pack != nil else { return }
         let voice = offlineVoice
         let run = generation
         let start = phraseIndex
@@ -398,7 +388,7 @@ final class ReaderSpeechController: NSObject, ObservableObject {
                 }
                 speed.rate = Self.playbackRate(for: speechRate)
                 try engine.start()
-                try await prepareAudio(from: start, voice: voice, pack: pack, run: run)
+                try await prepareAudio(from: start, voice: voice, run: run)
                 try Task.checkCancellation()
                 producerFinished = true
                 if queue.isEmpty { finishNaturally() }
@@ -409,17 +399,9 @@ final class ReaderSpeechController: NSObject, ObservableObject {
         }
     }
 
-    private enum PreparedSpeech {
-        case codes(OfflineSpeech.Passage)
-        case pcm(Data)
-    }
-
-    private func prepareAudio(from start: Int, voice: OfflineVoice, pack: OfflineVoicePack, run: Int) async throws {
-        let speech = OfflineSpeech.shared
-        if pack == .zipvoice { await speech.unload() }
-        else { await ZipVoiceSpeech.shared.unload() }
+    private func prepareAudio(from start: Int, voice: OfflineVoice, run: Int) async throws {
         var index = start
-        try await withThrowingTaskGroup(of: Void.self) { decoding in
+        try await withThrowingTaskGroup(of: Void.self) { processing in
             while index < phrases.count {
                 try Task.checkCancellation()
                 while isPaused || queuedPlaybackSeconds >= 48 {
@@ -430,22 +412,11 @@ final class ReaderSpeechController: NSObject, ObservableObject {
                 let paragraphEnds = end < phrases.count && phrases[end - 1].paragraph != phrases[end].paragraph
                 let started = ProcessInfo.processInfo.systemUptime
                 let text = group.map(\.text).joined(separator: " ")
-                let prepared: PreparedSpeech
-                if pack == .zipvoice {
-                    prepared = .pcm(try await ZipVoiceSpeech.shared.synthesize(text, voice: voice))
-                } else {
-                    prepared = .codes(try await speech.prepare(text, voice: voice, pack: pack))
-                }
-                // The preceding decode can play immediately. Wait for it before submitting
-                // this one, so cached passages and retries cannot reorder the audio.
-                _ = try await decoding.next()
+                let audio = try await ZipVoiceSpeech.shared.synthesize(text, voice: voice)
+                // Enqueue groups in reading order while the next group is synthesized.
+                _ = try await processing.next()
                 try Task.checkCancellation()
-                decoding.addTask { [self] in
-                    let audio: Data
-                    switch prepared {
-                    case .codes(let passage): audio = try await speech.decoder.decode(passage)
-                    case .pcm(let samples): audio = samples
-                    }
+                processing.addTask { [self] in
                     try Task.checkCancellation()
                     var clips = SpokenPassage.splitAudio(audio, for: group)
                     if paragraphEnds { SpokenPassage.finishParagraph(&clips[clips.count - 1]) }
@@ -455,7 +426,7 @@ final class ReaderSpeechController: NSObject, ObservableObject {
                             let characters = Double(group.reduce(0) { $0 + $1.text.count })
                             let synthesis = ProcessInfo.processInfo.systemUptime - started
                             let playback = Double(audio.count / MemoryLayout<Float>.size) / (24_000 * Double(speed.rate))
-                            if pack == .zipvoice, spokenRange == nil, end < phrases.count {
+                            if spokenRange == nil, end < phrases.count {
                                 // Cover the next synthesis call, especially after a short opening line.
                                 let nextEnd = SpokenPassage.groupEnd(in: phrases, from: end, characterLimit: 24)
                                 let nextCharacters = phrases[end..<nextEnd].reduce(0) { $0 + $1.text.count }
@@ -477,7 +448,7 @@ final class ReaderSpeechController: NSObject, ObservableObject {
                 }
                 index = end
             }
-            try await decoding.waitForAll()
+            try await processing.waitForAll()
         }
     }
 

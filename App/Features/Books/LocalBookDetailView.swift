@@ -60,7 +60,7 @@ struct LocalBookDetailView: View {
             .frame(maxWidth: .infinity)
             .listRowSeparator(.hidden)
             if model.isLoading {
-                HStack { Spacer(); ProgressView("正在识别章节…"); Spacer() }.padding(.vertical, 28)
+                HStack { Spacer(); RagdollLoading("正在识别章节…", width: 72, axis: .vertical); Spacer() }.padding(.vertical, 28)
             } else if let error = model.errorMessage {
                 ReadingUnavailableView("无法读取本地书", systemImage: "doc.badge.ellipsis", description: Text(error))
             } else {
@@ -125,7 +125,7 @@ private struct LocalBookTocRuleView: View {
                     choice("自动识别", value: "automatic")
                     choice("不识别章节标题", value: "none")
                     ForEach(rules) { rule in choice(rule.name, value: String(rule.id)) }
-                    if isLoading { ProgressView("正在读取规则…") }
+                    if isLoading { RagdollLoading("正在读取规则…") }
                 }
                 Section {
                     Toggle("拆分超长章节", isOn: $splitLongChapter)
@@ -135,14 +135,11 @@ private struct LocalBookTocRuleView: View {
                 if let errorMessage { Section { Text(errorMessage).foregroundStyle(.red) } }
             }
             .disabled(isSaving)
-            .navigationTitle("重新分章")
-            .navigationBarTitleDisplayMode(.inline)
+            .readingSheetTitle("重新分章")
             .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
+                ReadingSheetActions {
                     Button("取消") { dismiss() }.disabled(isSaving)
-                }
-                ToolbarItem(placement: .confirmationAction) {
-                    Button(isSaving ? "正在重建…" : "重建目录") {
+                    ReadingSheetActionButton("重建目录", busyTitle: "正在重建…", isWorking: isSaving) {
                         isSaving = true
                         errorMessage = nil
                         Task {

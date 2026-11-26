@@ -5,6 +5,27 @@ import LegadoCore
 
 @MainActor
 struct LocalFileManagementTests {
+    @Test func localImportLeadsDefaultShelfAfterReloadAndStaysUnread() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let file = root.appendingPathComponent("新书.txt")
+        try "第一章 开始\n正文".write(to: file, atomically: true, encoding: .utf8)
+        let database = try LegadoDatabase(url: root.appendingPathComponent("shelf.sqlite3"))
+        let model = BookLibraryModel(repository: SQLiteBookRepository(database: database),
+                                     localDirectory: root.appendingPathComponent("library"),
+                                     chapterRepository: SQLiteBookChapterRepository(database: database))
+        var previous = Book(bookUrl: "old", name: "读过的书")
+        previous.durChapterTime = 1
+        await model.addOrUpdate(previous)
+        await model.importLocalFiles([file])
+        await model.load()
+        let all = BookGroup(groupId: BookGroup.idAll, groupName: "全部")
+        let shelf = model.books(in: all)
+        #expect(shelf.map(\.name) == ["新书", "读过的书"])
+        #expect(shelf.first?.durChapterTime == 0)
+    }
+
     @Test func localImportUsesLatestManagedTocRulesAndPersistsTheSelection() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -144,7 +165,8 @@ struct LocalFileManagementTests {
                                      chapterRepository: InMemoryBookChapterRepository())
         await model.load()
 
-        await model.importPickedLocalFiles(files)
+        let failedPaths = await model.importPickedLocalFiles(files)
+        #expect(failedPaths == Set(files.filter { $0.url.pathExtension.lowercased() == "json" }.map { $0.url.path }))
 
         let book = try #require(model.books.first)
         #expect(model.books.count == 1)

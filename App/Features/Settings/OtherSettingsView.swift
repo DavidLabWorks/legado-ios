@@ -4,7 +4,6 @@ import WebKit
 struct OtherSettingsView: View {
     @AppStorage("auto_refresh") private var autoRefresh = false
     @AppStorage("onlyUpdateRead") private var onlyUpdateRead = false
-    @AppStorage("bookshelfSort") private var bookshelfSort = 0
     @AppStorage("defaultHomePage") private var defaultHomePage: AppTab = .bookshelf
     @State private var settings = ApplicationSettingsStore.shared.settings
     @State private var confirmsCacheClear = false
@@ -25,9 +24,6 @@ struct OtherSettingsView: View {
                     Text("发现").tag(AppTab.explore)
                     Text("网站").tag(AppTab.websites)
                     Text("我的").tag(AppTab.my)
-                }
-                Picker("默认书架排序", selection: $bookshelfSort) {
-                    ForEach(BookshelfSort.allCases) { sort in Text(sort.title).tag(sort.rawValue) }
                 }
                 Toggle("启动时更新书架", isOn: $autoRefresh)
                 if autoRefresh {
@@ -97,7 +93,7 @@ struct OtherSettingsView: View {
                     }
                     Spacer(minLength: 0)
                     if running == operation {
-                        ProgressView().controlSize(.small)
+                        RagdollLoading(width: 28)
                     } else {
                         Text(finished ? done : action)
                             .font(.subheadline.weight(.medium))
@@ -146,50 +142,22 @@ struct NetworkSettingsView: View {
     @State private var errorMessage: String?
     @State private var isSaving = false
 
+    enum Tab: String, CaseIterable { case cache = "章节缓存", connection = "连接", advanced = "高级网络" }
+    @State private var tab: Tab
+
+    init(initialTab: Tab = .connection) { _tab = State(initialValue: initialTab) }
+
     var body: some View {
         Form {
-            Section {
-                ReadingTextField("留空使用默认浏览器 UA", text: $settings.userAgent, axis: .vertical)
-                    .textInputAutocapitalization(.never).disableAutocorrection(true)
-                    .accessibilityLabel("User-Agent")
-            } header: { Text("默认 User-Agent") } footer: {
-                Text("书源或 RSS 单独设置的 UA 优先于此项。")
+            Picker("设置分类", selection: $tab) {
+                ForEach(Tab.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+            }.pickerStyle(.segmented)
+            switch tab {
+            case .advanced: advancedSettings
+            case .connection: connectionSettings
+            case .cache: cacheSettings
             }
-            Section {
-                TextField("例如 http://127.0.0.1:7890", text: $settings.proxy)
-                    .keyboardType(.URL).textInputAutocapitalization(.never).disableAutocorrection(true)
-                    .accessibilityLabel("全局代理")
-            } header: { Text("全局代理") } footer: {
-                Text("支持 HTTP、HTTPS 和 SOCKS5 地址，不含账号密码。书源代理优先于全局代理；使用代理时由代理解析域名。")
-            }
-            Section {
-                TextEditor(text: $settings.hosts)
-                    .font(.system(.footnote, design: .monospaced)).frame(minHeight: 130)
-                    .textInputAutocapitalization(.never).disableAutocorrection(true)
-                    .accessibilityLabel("Hosts")
-            } header: { Text("自定义 Hosts") } footer: {
-                Text("每行填写 IP地址 域名，例如 192.168.1.2 books.example.com。支持 IPv4、IPv6 和 # 注释。适用于应用内 HTTP/HTTPS 请求；系统网页、登录网页和系统媒体播放器使用系统网络设置。")
-            }
-            Section("连接") {
-                Picker("请求超时", selection: $settings.timeoutSeconds) {
-                    Text("跟随书源").tag(0)
-                    ForEach([5, 10, 15, 30, 60, 120, 180, 300], id: \.self) { Text("\($0) 秒").tag($0) }
-                }
-                Stepper("搜索并发数：\(settings.concurrentSources)", value: $settings.concurrentSources, in: 1...64)
-                Toggle("兼容无效证书的书源", isOn: $settings.ignoreCertificateErrors)
-                Text("证书兼容开启时允许自签名或过期证书；关闭后由系统验证 HTTPS 证书。")
-                    .font(.footnote).foregroundStyle(.secondary)
-            }
-            Section("章节缓存") {
-                Picker("容量上限", selection: $settings.chapterCacheMB) {
-                    ForEach([16, 32, 64, 128, 256, 512, 1024, 2048, 4096], id: \.self) {
-                        Text($0 >= 1024 ? "\($0 / 1024) GB" : "\($0) MB").tag($0)
-                    }
-                }
-                Stepper(settings.prefetchChapters == 0 ? "已关闭自动预读" : "前后各预读 \(settings.prefetchChapters) 章", value: $settings.prefetchChapters, in: 0...20)
-                Text("超出上限时清理最久未读取的章节；容量调整在保存时生效。")
-                    .font(.footnote).foregroundStyle(.secondary)
-            }
+
             Section {
                 Button("恢复本页默认值") {
                     let recordLog = settings.recordLog
@@ -202,7 +170,10 @@ struct NetworkSettingsView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .confirmationAction) {
-                Button("保存") { Task { await save() } }.disabled(isSaving)
+                ReadingSheetActionButton(isWorking: isSaving) {
+                    isSaving = true
+                    Task { await save() }
+                }
             }
         }
         .disabled(isSaving)
@@ -211,8 +182,84 @@ struct NetworkSettingsView: View {
         } message: { Text(errorMessage ?? "") }
     }
 
+    @ViewBuilder private var advancedSettings: some View {
+        Section {
+            ReadingTextField("留空使用默认浏览器 UA", text: $settings.userAgent, axis: .vertical)
+                .textInputAutocapitalization(.never).disableAutocorrection(true)
+                .accessibilityLabel("User-Agent")
+        } header: { Text("默认 User-Agent") } footer: {
+            Text("书源或 RSS 单独设置的 UA 优先于此项。")
+        }
+        Section {
+            TextField("例如 http://127.0.0.1:7890", text: $settings.proxy)
+                .keyboardType(.URL).textInputAutocapitalization(.never).disableAutocorrection(true)
+                .accessibilityLabel("全局代理")
+        } header: { Text("全局代理") } footer: {
+            Text("支持 HTTP、HTTPS 和 SOCKS5 地址，不含账号密码。书源代理优先于全局代理；使用代理时由代理解析域名。")
+        }
+        Section {
+            TextEditor(text: $settings.hosts)
+                .font(.system(.footnote, design: .monospaced)).frame(minHeight: 130)
+                .textInputAutocapitalization(.never).disableAutocorrection(true)
+                .accessibilityLabel("Hosts")
+        } header: { Text("自定义 Hosts") } footer: {
+            Text("每行填写 IP地址 域名，例如 192.168.1.2 books.example.com。支持 IPv4、IPv6 和 # 注释。适用于应用内 HTTP/HTTPS 请求；系统网页、登录网页和系统媒体播放器使用系统网络设置。")
+        }
+    }
+
+    @ViewBuilder private var connectionSettings: some View {
+        Section("连接") {
+            Picker("请求超时", selection: $settings.timeoutSeconds) {
+                Text("跟随书源").tag(0)
+                ForEach([5, 10, 15, 30, 60, 120, 180, 300], id: \.self) { Text("\($0) 秒").tag($0) }
+            }
+            Stepper("搜索并发数：\(settings.concurrentSources)", value: $settings.concurrentSources, in: 1...64)
+            Toggle("兼容无效证书的书源", isOn: $settings.ignoreCertificateErrors)
+            Text("证书兼容开启时允许自签名或过期证书；关闭后由系统验证 HTTPS 证书。")
+                .font(.footnote).foregroundStyle(.secondary)
+        }
+    }
+
+    @ViewBuilder private var cacheSettings: some View {
+        Section {
+            Menu {
+                Picker("容量上限", selection: $settings.chapterCacheMB) {
+                    ForEach([16, 32, 64, 128, 256, 512, 1024, 2048, 4096], id: \.self) {
+                        Text(capacityLabel($0)).tag($0)
+                    }
+                }
+            } label: {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Label("容量上限", systemImage: "internaldrive")
+                        Spacer()
+                        Image(systemName: "chevron.down")
+                    }
+                    Text(capacityLabel(settings.chapterCacheMB)).font(.largeTitle.bold().monospacedDigit())
+                }.foregroundStyle(ReadingTheme.onAccent).padding(.vertical, 8)
+            }
+            .accessibilityLabel("容量上限")
+            .accessibilityValue(capacityLabel(settings.chapterCacheMB))
+            .listRowBackground(ReadingTheme.accentFill)
+        }
+        Section {
+            Stepper(value: $settings.prefetchChapters, in: 0...20) {
+                VStack(alignment: .leading, spacing: 6) {
+                    Label("自动预读", systemImage: "book")
+                    Text(settings.prefetchChapters == 0 ? "已关闭自动预读" : "前后各预读 \(settings.prefetchChapters) 章")
+                        .font(.headline.monospacedDigit())
+                }
+            }
+        } footer: {
+            Text("超出上限时清理最久未读取的章节；容量调整在保存时生效。")
+        }
+    }
+
+    private func capacityLabel(_ megabytes: Int) -> String {
+        megabytes >= 1024 ? "\(megabytes / 1024) GB" : "\(megabytes) MB"
+    }
+
     @MainActor private func save() async {
-        isSaving = true
         defer { isSaving = false }
         do {
             settings.recordLog = ApplicationSettingsStore.shared.settings.recordLog

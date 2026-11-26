@@ -70,19 +70,23 @@ final class ReplaceRuleLibraryModel: ObservableObject {
 
     func importText(_ value: String) async {
         do {
-            let input = try RuleImportInput.parse(value, kind: "replaceRule")
-            let data: Data
-            switch input {
-            case .json(let value): data = Data(value.utf8)
-            case .remote:
-                let (body, response) = try await URLSessionHTTPTransport.shared.download(for: input.request()!)
-                if let response = response as? HTTPURLResponse, !(200...299).contains(response.statusCode) { throw URLError(.badServerResponse) }
-                data = body
-            }
-            let incoming = try importer.decode(data)
-            try await importRules(incoming)
-            notice = .init(kind: .success, title: "净化规则已导入", detail: "本次读取 \(incoming.count) 条，当前共 \(rules.count) 条。")
+            notice = try await importTextReportingResult(value)
         } catch { notice = .init(kind: .error, title: "净化规则导入失败", detail: error.localizedDescription) }
+    }
+
+    func importTextReportingResult(_ value: String) async throws -> Notice {
+        let input = try RuleImportInput.parse(value, kind: "replaceRule")
+        let data: Data
+        switch input {
+        case .json(let value): data = Data(value.utf8)
+        case .remote:
+            let (body, response) = try await URLSessionHTTPTransport.shared.download(for: input.request()!)
+            if let response = response as? HTTPURLResponse, !(200...299).contains(response.statusCode) { throw URLError(.badServerResponse) }
+            data = body
+        }
+        let incoming = try importer.decode(data)
+        try await importRules(incoming)
+        return .init(kind: .success, title: "净化规则已导入", detail: "本次读取 \(incoming.count) 条，当前共 \(rules.count) 条。")
     }
 
     func newRule(copying original: ReplaceRule? = nil) -> ReplaceRule {

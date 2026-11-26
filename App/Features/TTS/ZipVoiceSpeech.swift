@@ -2,13 +2,42 @@ import Accelerate
 import Foundation
 import ZipVoiceBridge
 
+enum OfflineVoice: String, CaseIterable {
+    case uncleFu = "qwen.uncle_fu"
+    case serena = "qwen.serena"
+
+    var title: String {
+        switch self {
+        case .uncleFu: "Uncle_Fu（离线男声）"
+        case .serena: "Serena（离线女声）"
+        }
+    }
+
+    static let preferenceKey = "appTtsEngine"
+    static var preferred: Self {
+        Self(rawValue: UserDefaults.standard.string(forKey: preferenceKey) ?? "") ?? .uncleFu
+    }
+
+    var speaker: String { String(rawValue.dropFirst("qwen.".count)) }
+}
+
+enum OfflineSpeechError: LocalizedError {
+    case model, synthesis
+    var errorDescription: String? {
+        switch self {
+        case .model: "无法载入离线语音包，请在「我的 → 离线朗读」中检查已选档位。"
+        case .synthesis: "离线语音合成失败，请重新播放。"
+        }
+    }
+}
+
 actor ZipVoiceSpeech {
     static let shared = ZipVoiceSpeech()
     private var engine: OpaquePointer?
     private var releaseTask: Task<Void, Never>?
     private var references: [OfflineVoice: [Float]] = [:]
 
-    func unload() {
+    private func unload() {
         releaseTask?.cancel()
         releaseTask = nil
         if let engine { SherpaOnnxDestroyOfflineTts(engine) }
@@ -25,8 +54,7 @@ actor ZipVoiceSpeech {
                 unload()
             }
         }
-        guard OfflineVoicePack.zipvoice.voices.contains(voice),
-              let resources = Bundle.main.url(forResource: "ZipVoice", withExtension: nil) else {
+        guard let resources = Bundle.main.url(forResource: "ZipVoice", withExtension: nil) else {
             throw OfflineSpeechError.model
         }
         if engine == nil {

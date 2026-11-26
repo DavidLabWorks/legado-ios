@@ -35,9 +35,155 @@ final class DarkModeUITests: XCTestCase {
         for _ in 0..<5 where !row.isHittable { scroll.swipeUp() }
         row.tap()
         XCTAssertTrue(app.buttons["导入 JSON 文件"].waitForExistence(timeout: 5))
+        attach(app, name: "备份与恢复首屏")
         app.buttons["导出备份 JSON"].tap()
-        let save = app.buttons.matching(NSPredicate(format: "label IN %@", ["Save", "存储", "保存"])).firstMatch
+        // iOS 17 Files labels the export confirmation “Move”.
+        let save = app.buttons.matching(NSPredicate(format: "label IN %@", ["Save", "存储", "保存", "Move", "移动"])).firstMatch
         XCTAssertTrue(save.waitForExistence(timeout: 12))
+    }
+
+    func testWebsiteSourceDraftKeepsAdvancedSettingsAcrossNavigation() {
+        continueAfterFailure = false
+        let app = launch(["-uiDemoTab", "rss", "-themeMode", "1"])
+        app.buttons["网站源管理"].tap()
+        app.buttons["网站源操作"].tap()
+        app.buttons["新建网站源"].tap()
+        let request = app.buttons["请求与登录"]
+        XCTAssertTrue(request.waitForExistence(timeout: 5))
+        attach(app, name: "网站源编辑首屏")
+        request.tap()
+        let cookies = app.switches["自动保存Cookie"]
+        let previous = cookies.value as? String
+        cookies.coordinate(withNormalizedOffset: CGVector(dx: 0.92, dy: 0.5)).tap()
+        app.navigationBars["请求与登录"].buttons["保存"].tap()
+        request.tap()
+        XCTAssertNotEqual(previous, cookies.value as? String)
+        app.navigationBars["请求与登录"].buttons["取消"].tap()
+
+        for title in ["图标与注释", "请求与登录", "分类与列表规则", "WebView 规则", "其他设置"] {
+            let entry = app.buttons[title]
+            scrollTo(entry, in: app)
+            entry.tap()
+            let bar = app.navigationBars[title]
+            XCTAssertTrue(bar.staticTexts["sheet.heading"].waitForExistence(timeout: 5))
+            XCTAssertTrue(bar.buttons["保存"].isHittable)
+            attach(app, name: title)
+            bar.buttons["取消"].tap()
+        }
+    }
+
+    func testTocRuleSwitchPersistsIndependentlyOfOpeningTheEditor() {
+        continueAfterFailure = false
+        let app = launch(["-uiDemoTab", "settings", "-themeMode", "1"])
+        let entry = app.buttons["profile.list.bullet.rectangle"]
+        scrollTo(entry, in: app)
+        entry.tap()
+
+        let name = "目录(去空白)"
+        let toggle = app.switches["启用" + name]
+        XCTAssertTrue(toggle.waitForExistence(timeout: 5))
+        let original = toggle.value as? String
+        attach(app, name: "TXT 目录规则列表")
+        toggle.tap()
+        XCTAssertNotEqual(toggle.value as? String, original)
+        let title = app.navigationBars["TXT 目录规则"]
+        XCTAssertTrue(title.exists)
+        title.buttons.element(boundBy: 0).tap()
+        entry.tap()
+        XCTAssertTrue(toggle.waitForExistence(timeout: 5))
+        XCTAssertNotEqual(toggle.value as? String, original)
+
+        let row = app.buttons.containing(.staticText, identifier: name).firstMatch
+        row.tap()
+        XCTAssertTrue(app.navigationBars["编辑目录规则"].waitForExistence(timeout: 5))
+        app.buttons["取消"].tap()
+        row.swipeRight()
+        app.buttons[original == "1" ? "启用" : "停用"].tap()
+        XCTAssertEqual(toggle.value as? String, original)
+        title.buttons["更多"].tap()
+        app.buttons["调整顺序"].tap()
+        XCTAssertTrue(title.buttons["完成"].waitForExistence(timeout: 5), app.debugDescription)
+        title.buttons["完成"].tap()
+        XCTAssertTrue(title.buttons["新建"].waitForExistence(timeout: 5))
+    }
+
+    func testBookSourceFilterAndSwitchCanBeUsedFromTheList() {
+        continueAfterFailure = false
+        let app = launch(["-uiDemoTab", "sources", "-themeMode", "1"])
+        let filter = app.buttons["分组"]
+        XCTAssertTrue(filter.waitForExistence(timeout: 5))
+        attach(app, name: "书源管理列表")
+        filter.tap()
+        app.buttons["文学"].tap()
+
+        let toggle = app.switches["启用经典文学馆"].firstMatch
+        XCTAssertTrue(toggle.waitForExistence(timeout: 5))
+        XCTAssertFalse(app.staticTexts["听见故事"].exists)
+        let original = toggle.value as? String
+        toggle.coordinate(withNormalizedOffset: CGVector(dx: 0.85, dy: 0.5)).tap()
+        XCTAssertTrue(app.navigationBars["书源管理"].exists)
+        XCTAssertNotEqual(toggle.value as? String, original)
+        toggle.coordinate(withNormalizedOffset: CGVector(dx: 0.85, dy: 0.5)).tap()
+        filter.tap()
+        app.buttons["全部"].tap()
+        XCTAssertTrue(app.staticTexts["听见故事"].waitForExistence(timeout: 5))
+    }
+
+    func testSubscriptionEditorKeepsSaveValidationAndUpdateOptions() {
+        continueAfterFailure = false
+        let app = launch(["-uiDemoTab", "settings", "-themeMode", "1"])
+        let entry = app.buttons["profile.link"]
+        scrollTo(entry, in: app)
+        entry.tap()
+        let title = app.navigationBars["规则订阅"]
+        XCTAssertTrue(title.waitForExistence(timeout: 5))
+        attach(app, name: "规则订阅列表")
+        title.buttons["新建"].tap()
+        XCTAssertTrue(app.navigationBars["新建订阅"].waitForExistence(timeout: 5))
+        let save = app.buttons["保存"]
+        XCTAssertFalse(save.isEnabled)
+        attach(app, name: "新建订阅表单")
+        app.segmentedControls.buttons["净化规则"].tap()
+        let automatic = app.switches["自动更新"]
+        automatic.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.5)).tap()
+        XCTAssertTrue(app.switches["静默更新"].waitForExistence(timeout: 5))
+        let url = app.descendants(matching: .any).matching(identifier: "subscription.url").firstMatch
+        url.tap()
+        url.typeText("https://rules.invalid/books.json")
+        XCTAssertTrue(save.isEnabled)
+        app.buttons["取消"].tap()
+        XCTAssertTrue(title.waitForExistence(timeout: 5))
+    }
+
+    func testTocMatchTabRetainsSampleAndReportsSourceLines() {
+        continueAfterFailure = false
+        let app = launch(["-uiDemoTab", "settings", "-themeMode", "2"])
+        let entry = app.buttons["profile.list.bullet.rectangle"]
+        scrollTo(entry, in: app)
+        entry.tap()
+        app.buttons["新建"].tap()
+        let bar = app.navigationBars["编辑目录规则"]
+        bar.buttons["保存"].tap()
+        let error = app.alerts["保存失败"]
+        XCTAssertTrue(error.staticTexts["名称和正则不能为空"].waitForExistence(timeout: 5))
+        error.buttons["好"].tap()
+        XCTAssertTrue(bar.exists)
+        let pattern = app.textViews["目录正则"]
+        pattern.tap()
+        pattern.typeText("^#.*")
+        let tabs = app.segmentedControls
+        tabs.buttons["匹配测试"].tap()
+        app.buttons["输入或粘贴测试文本"].tap()
+        app.textViews["测试文本"].typeText("#1\nbody\n#2")
+        app.buttons["完成编辑"].tap()
+        XCTAssertTrue(app.staticTexts["命中 2 条"].waitForExistence(timeout: 5))
+        attach(app, name: "目录规则匹配测试")
+        let thirdLine = app.descendants(matching: .any).matching(NSPredicate(format: "label == %@ AND value == %@", "#2", "第 3 行")).firstMatch
+        XCTAssertTrue(thirdLine.exists, app.debugDescription)
+        tabs.buttons["规则设置"].tap()
+        XCTAssertEqual(pattern.value as? String, "^#.*")
+        tabs.buttons["匹配测试"].tap()
+        XCTAssertTrue(thirdLine.exists)
     }
 
     func testProfileAndAboutShowCurrentAppName() {
@@ -132,6 +278,40 @@ final class DarkModeUITests: XCTestCase {
         XCTAssertTrue(scroll.waitForExistence(timeout: 5))
     }
 
+    func testSearchScopeSaveUsesThePrimaryFillInBothAppearances() throws {
+        for theme in ["1", "2"] {
+            let app = launch(["-uiDemoTab", "search", "-themeMode", theme])
+            let entry = app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "搜索范围")).firstMatch
+            XCTAssertTrue(entry.waitForExistence(timeout: 12))
+            entry.tap()
+            let bar = app.navigationBars["搜索范围"]
+            let save = bar.buttons["保存"]
+            XCTAssertTrue(save.waitForExistence(timeout: 5))
+            let title = bar.staticTexts["sheet.heading"]
+            XCTAssertEqual(title.label, "搜索范围")
+            XCTAssertGreaterThan(title.frame.width, 60)
+            let cancel = bar.buttons["取消"]
+            XCTAssertLessThan(title.frame.minX, app.frame.width * 0.2)
+            XCTAssertGreaterThan(cancel.frame.midX, app.frame.midX)
+            XCTAssertLessThan(cancel.frame.midX, save.frame.midX)
+            try assertReadableDarkFill(save, in: app)
+            attach(app, name: "搜索范围 · 保存按钮 · \(theme)")
+            app.terminate()
+        }
+    }
+
+    func testCacheEntryOpensCacheControlsOnSmallScreen() {
+        let app = launch(["-uiDemoTab", "settings", "-uiDemoOtherSettings"])
+        let entry = app.buttons["章节缓存管理"]
+        scrollTo(entry, in: app)
+        entry.tap()
+        app.buttons["网络与缓存设置"].tap()
+        XCTAssertTrue(app.segmentedControls.buttons["章节缓存"].isSelected)
+        XCTAssertTrue(app.buttons["容量上限"].isHittable)
+        app.segmentedControls.buttons["高级网络"].tap()
+        XCTAssertTrue(app.textFields["全局代理"].exists)
+    }
+
     func testPrimaryActionsKeepDarkFillInBothAppearances() throws {
         continueAfterFailure = false
         for theme in ["2", "1"] {
@@ -150,16 +330,17 @@ final class DarkModeUITests: XCTestCase {
         let app = launch([
             "-uiDemoReader", "-uiDemoReaderStyle", "-themeMode", "2",
             "-readerTheme", "night", "-readerUseBackgroundImage", "NO",
-            "-lineSpacingExtra", "12", "-pageAnim", "0"
+            "-pageAnim", "0"
         ])
         XCTAssertTrue(app.navigationBars["阅读样式"].waitForExistence(timeout: 20))
-        // Expand the sheet so the controls can be inspected without clipping.
-        app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.48))
-            .press(forDuration: 0.1, thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.12)))
-        let standard = app.buttons["标准"]
-        XCTAssertTrue(standard.waitForExistence(timeout: 5))
-        try assertReadableDarkFill(standard, in: app)
-        attach(app, name: "Night reader spacing selection")
+        XCTAssertFalse(app.buttons["标准"].exists)
+        try assertReadableDarkFill(app.buttons["随系统"], in: app)
+        attach(app, name: "Night reader style panel")
+        app.buttons["更多"].tap()
+        app.buttons["字体与间距"].tap()
+        XCTAssertTrue(app.staticTexts["行间距"].waitForExistence(timeout: 5))
+        app.navigationBars["字体与间距"].buttons.firstMatch.tap()
+        XCTAssertTrue(app.navigationBars["页面设置"].waitForExistence(timeout: 5))
         let cover = app.buttons["覆盖"]
         for _ in 0..<16 {
             if cover.exists && cover.isHittable && cover.frame.maxY < app.frame.height - 50 { break }
@@ -182,7 +363,7 @@ final class DarkModeUITests: XCTestCase {
         }
         scrollTo(app.buttons["profile.globe"], in: app)
         app.buttons["profile.globe"].tap()
-        XCTAssertTrue(app.navigationBars["书源"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.navigationBars["书源管理"].waitForExistence(timeout: 10))
         attach(app, name: "Dark source library")
         app.buttons["更多"].firstMatch.tap()
         app.buttons["新建书源"].tap()
@@ -255,7 +436,7 @@ final class DarkModeUITests: XCTestCase {
             ("bookmark", "书签", nil),
             ("link", "规则订阅", "新建"),
             ("text.badge.checkmark", "净化规则", "新建规则"),
-            ("list.bullet.rectangle", "TXT目录规则", "新建"),
+            ("list.bullet.rectangle", "TXT 目录规则", "新建"),
             ("folder", "文件管理", nil),
             ("gearshape", "其他设置", nil)
         ]
@@ -306,7 +487,7 @@ final class DarkModeUITests: XCTestCase {
         XCTAssertTrue(app.buttons["search.options"].waitForExistence(timeout: 10))
         app.buttons["search.options"].tap()
         app.buttons["分组或书源"].tap()
-        XCTAssertTrue(app.navigationBars["分组或书源"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.navigationBars["搜索范围"].waitForExistence(timeout: 5))
         try captureDarkPage(app, name: "Search group filter")
         app.segmentedControls.buttons["书源"].tap()
         try captureDarkPage(app, name: "Search source filter")
@@ -315,7 +496,7 @@ final class DarkModeUITests: XCTestCase {
 
         app.launchArguments = ["-uiDemo", "-uiDemoTab", "sources", "-themeMode", "2"]
         app.launch()
-        XCTAssertTrue(app.navigationBars["书源"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.navigationBars["书源管理"].waitForExistence(timeout: 10))
         app.buttons["排序"].tap()
         XCTAssertTrue(app.buttons["倒序"].waitForExistence(timeout: 5))
         try assertReadableDarkFill(app.buttons["倒序"], in: app)
@@ -340,7 +521,7 @@ final class DarkModeUITests: XCTestCase {
         XCTAssertTrue(app.buttons["explore.search"].isHittable && bookManager.isHittable)
         attach(app, name: "Explore header")
         bookManager.tap()
-        XCTAssertTrue(app.navigationBars["书源"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.navigationBars["书源管理"].waitForExistence(timeout: 5))
         app.tabBars.buttons["网站"].tap()
         let count = app.buttons["websites.sourceCount"]
         XCTAssertTrue(count.isHittable)
@@ -392,11 +573,11 @@ final class DarkModeUITests: XCTestCase {
         app.buttons["设置"].tap()
         XCTAssertTrue(app.navigationBars["阅读设置"].waitForExistence(timeout: 5))
         try captureDarkPage(app, name: "Night reader settings")
-        let click = app.buttons["点击区域设置"]
-        scrollTo(click, in: app)
-        click.tap()
-        XCTAssertTrue(app.navigationBars["点击区域设置"].waitForExistence(timeout: 5))
-        try captureDarkPage(app, name: "Night click action grid")
+        XCTAssertFalse(app.switches["两端对齐"].exists)
+        XCTAssertTrue(app.switches["reader.simplifiedChinese"].exists)
+        XCTAssertTrue(app.staticTexts["屏幕方向"].exists)
+        XCTAssertTrue(app.switches["阅读时隐藏小横条"].isHittable)
+        XCTAssertTrue(app.switches["隐藏状态栏"].isHittable)
     }
 
     func testAppearanceMenuRestoresSystemAndUpdatesVisiblePage() throws {

@@ -75,20 +75,20 @@ struct SourceSwitchView: View {
         Group {
             if model.candidates.isEmpty && (model.state == .searching || model.state == .idle) {
                 VStack(spacing: 14) {
-                    ProgressView()
+                    RagdollLoading()
                     Text("正在从其他书源查找同名作品…").foregroundStyle(.secondary)
                 }
             } else if model.state == .empty {
                 ReadingUnavailableView(
                     "没有可用换源",
-                    systemImage: "arrow.triangle.2.circlepath",
+                    systemImage: "books.vertical",
                     description: Text("仅显示书名一致的候选，并优先匹配作者。请确认其他书源已启用且支持搜索。")
                 )
             } else {
                 List {
                     if model.state == .searching {
                         HStack(spacing: 10) {
-                            ProgressView()
+                            RagdollLoading()
                             Text("仍在查找其他书源，可直接选择已找到的结果")
                                 .font(.caption).foregroundStyle(.secondary)
                         }
@@ -102,10 +102,11 @@ struct SourceSwitchView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(ReadingTheme.canvas)
-        .navigationTitle("为《\(model.bookName)》换源")
-        .navigationBarTitleDisplayMode(.inline)
+        .readingSheetTitle("为《\(model.bookName)》换源")
         .toolbar {
-            ToolbarItem(placement: .cancellationAction) { Button("取消") { dismiss() }.disabled(isSaving) }
+            ReadingSheetActions {
+                Button("取消") { dismiss() }.disabled(isSaving)
+            }
         }
         .interactiveDismissDisabled(isSaving)
         .task { await model.load(sources: sources) }
@@ -151,7 +152,7 @@ struct SourceSwitchView: View {
                 }
                 Spacer()
                 if model.switchingID == candidate.id {
-                    ProgressView()
+                    RagdollLoading(width: 28)
                 } else {
                     Image(systemName: "arrow.right.circle.fill").foregroundStyle(ReadingTheme.coral)
                 }

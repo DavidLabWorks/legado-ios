@@ -22,11 +22,12 @@ struct BookCoverSearchView: View {
                 } onError: { problem = $0 }
                 .disabled(pendingSave != nil)
             }
-            .overlay { if pendingSave != nil { ProgressView("正在保存封面…").padding().background(.regularMaterial) } }
-            .navigationTitle("必应图片")
-            .navigationBarTitleDisplayMode(.inline)
+            .overlay { if pendingSave != nil { RagdollLoading("正在保存封面…").padding().background(.regularMaterial) } }
+            .readingSheetTitle("必应图片")
             .toolbar {
-                ToolbarItem(placement: .cancellationAction) { Button("关闭") { dismiss() }.disabled(pendingSave != nil) }
+                ReadingSheetActions {
+                    ReadingSheetCloseButton { dismiss() }.disabled(pendingSave != nil)
+                }
             }
             .alert("将这张图片设为《\(book.name)》的封面？", isPresented: Binding(
                 get: { candidate != nil }, set: { if !$0 { candidate = nil } }
@@ -89,7 +90,7 @@ private struct CoverImageBrowser: UIViewRepresentable {
         configuration.websiteDataStore = .nonPersistent()
         let disableCallout = "document.documentElement.style.webkitTouchCallout = 'none'"
         configuration.userContentController.addUserScript(.init(source: disableCallout, injectionTime: .atDocumentEnd, forMainFrameOnly: true, in: .defaultClient))
-        let web = WKWebView(frame: .zero, configuration: configuration)
+        let web = ReadingWebView(frame: .zero, configuration: configuration)
         web.scrollView.contentInsetAdjustmentBehavior = .never
         web.allowsBackForwardNavigationGestures = true
         web.allowsLinkPreview = false

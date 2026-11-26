@@ -1,3 +1,5 @@
+import Libavfilter
+import Libavformat
 import UIKit
 import WebKit
 import XCTest
@@ -5,6 +7,28 @@ import XCTest
 
 @MainActor
 final class WebReaderBridgeTests: XCTestCase {
+    func testPlayerKeepsNativeVideoAndAudioFilters() {
+        var iterator: UnsafeMutableRawPointer?
+        var names = Set<String>()
+        while let filter = av_filter_iterate(&iterator) {
+            names.insert(String(cString: filter.pointee.name))
+        }
+        XCTAssertTrue(Set(["buffer", "buffersink", "transpose", "rotate", "hflip", "vflip",
+                           "scale_vt", "yadif_videotoolbox", "aresample", "atempo"]).isSubset(of: names))
+        XCTAssertFalse(names.contains("libplacebo"))
+        XCTAssertFalse(names.contains { $0.hasSuffix("_vulkan") })
+    }
+
+    func testVideoInputProtocolsSupportWebStreamsAndExcludeSMB() {
+        var iterator: UnsafeMutableRawPointer?
+        var names = Set<String>()
+        while let name = avio_enum_protocols(&iterator, 0) {
+            names.insert(String(cString: name))
+        }
+        XCTAssertTrue(Set(["http", "https", "httpproxy", "tcp", "tls", "crypto"]).isSubset(of: names))
+        XCTAssertFalse(names.contains("smb"))
+    }
+
     private func webPrepared(script: String?, resource: String? = nil) throws -> PreparedRequest {
         let html = "<html><body><p>原始页面</p></body></html>"
         let address = "data:text/html;base64," + Data(html.utf8).base64EncodedString()
@@ -69,12 +93,71 @@ final class WebReaderBridgeTests: XCTestCase {
         catch { XCTAssertTrue(error is CancellationError) }
     }
 
+    func testArticleLoaderHidesWhileAnImageIsStillLoading() async throws {
+        let imageRequested = expectation(description: "Article requested its slow images")
+        imageRequested.expectedFulfillmentCount = 2
+        let images = PendingArticleImage(requested: imageRequested)
+        let configuration = WKWebViewConfiguration()
+        configuration.setURLSchemeHandler(images, forURLScheme: "slow-image")
+        let source = RssSource(sourceUrl: "https://article.test", sourceName: "测试")
+        let html = "<p>正文</p><img id='portrait' width='240' height='360' src='slow-image://fixture/portrait'><img id='unknown' src='slow-image://fixture/unknown'>"
+        let surface = RSSWebReaderView(mode: .html(content: html, baseURL: nil), source: source)
+        let coordinator = surface.makeCoordinator()
+        configuration.userContentController.addUserScript(.init(source: coordinator.imageScript(baseURL: source.sourceUrl, isArticle: true),
+                                                                injectionTime: .atDocumentEnd, forMainFrameOnly: true, in: .defaultClient))
+        let webView = ReadingWebView(frame: CGRect(x: 0, y: 0, width: 390, height: 844), configuration: configuration)
+        webView.navigationDelegate = coordinator
+        defer { RSSWebReaderView.dismantleUIView(webView, coordinator: coordinator) }
+
+        coordinator.installRulesAndLoad(mode: surface.mode, in: webView)
+        await fulfillment(of: [imageRequested], timeout: 10)
+        let readable = try await webView.evaluateJavaScript("document.querySelector('p').getBoundingClientRect().height > 0")
+        XCTAssertEqual(readable as? Bool, true)
+        XCTAssertTrue(webView.isLoading)
+        let indicator = try XCTUnwrap(webView.subviews.compactMap { $0 as? RagdollImageView }.first)
+        XCTAssertTrue(indicator.isHidden, "The loading cat should disappear once the article is displayed")
+
+        let ratios = try await webView.evaluateJavaScript("""
+            Array.from(document.images, img => {
+              const box = img.getBoundingClientRect();
+              return img.dataset.legadoPhotoState === 'loading' && box.width > 250 &&
+                getComputedStyle(img).backgroundImage.includes('data:image/png') ? box.height / box.width : 0;
+            })
+            """)
+        let sizes = try XCTUnwrap(ratios as? [Double])
+        XCTAssertEqual(sizes, [1.5, 0.75])
+
+        _ = try await webView.evaluateJavaScript("""
+            window.portraitLoaded = new Promise(resolve => portrait.addEventListener('load', () => resolve(), {once:true}));
+            window.unknownFailed = new Promise(resolve => unknown.addEventListener('error', () => resolve(), {once:true}));
+            true
+            """, in: nil, in: .defaultClient)
+        let portrait = try XCTUnwrap(images.tasks["portrait"])
+        let data = try XCTUnwrap(UIGraphicsImageRenderer(size: CGSize(width: 240, height: 360)).image { _ in }.pngData())
+        portrait.didReceive(URLResponse(url: try XCTUnwrap(portrait.request.url), mimeType: "image/png",
+                                        expectedContentLength: data.count, textEncodingName: nil))
+        portrait.didReceive(data)
+        portrait.didFinish()
+        let state = try await webView.callAsyncJavaScript("""
+            await window.portraitLoaded;
+            return [portrait.dataset.legadoPhotoState || 'loaded', getComputedStyle(portrait).borderRadius,
+                    Math.round(100 * portrait.height / portrait.width).toString(), unknown.dataset.legadoPhotoState];
+            """, arguments: [:], in: nil, contentWorld: .defaultClient)
+        XCTAssertEqual(state as? [String], ["loaded", "6px", "150", "loading"])
+
+        try XCTUnwrap(images.tasks["unknown"]).didFailWithError(URLError(.cannotDecodeContentData))
+        let failed = try await webView.callAsyncJavaScript("""
+            await window.unknownFailed;
+            return [unknown.dataset.legadoPhotoState || 'none', getComputedStyle(unknown).backgroundImage.includes('data:image/png') ? 'cat' : 'no cat'];
+            """, arguments: [:], in: nil, contentWorld: .defaultClient)
+        XCTAssertEqual(failed as? [String], ["failed", "no cat"])
+    }
+
     func testGeneratedRSSContentFollowsAppearanceWithoutReloading() async throws {
         let source = RssSource(sourceUrl: "https://appearance-regression.test", sourceName: "测试")
-        let loaded = expectation(description: "HTML loaded")
         let surface = RSSWebReaderView(
             mode: .html(content: "<body><p>订阅正文</p><a href='#'>链接</a><button>操作</button></body>", baseURL: nil),
-            source: source, onTextChange: { _ in loaded.fulfill() }
+            source: source
         )
         let coordinator = surface.makeCoordinator()
         let webView = WKWebView(frame: CGRect(x: 0, y: 0, width: 390, height: 844))
@@ -90,6 +173,7 @@ final class WebReaderBridgeTests: XCTestCase {
             window.isHidden = true
         }
         coordinator.installRulesAndLoad(mode: surface.mode, in: webView)
+        let loaded = expectation(for: NSPredicate(format: "estimatedProgress == 1 AND loading == NO"), evaluatedWith: webView)
         await fulfillment(of: [loaded], timeout: 20)
         let appearanceScript = """
         [matchMedia('(prefers-color-scheme:dark)').matches,
@@ -121,9 +205,7 @@ final class WebReaderBridgeTests: XCTestCase {
 
     func testPageJavaScriptCanStoreVariablesAndEvaluateContentRules() async throws {
         let source = RssSource(sourceUrl: "https://bridge-regression.test/\(UUID().uuidString)", sourceName: "测试")
-        let loaded = expectation(description: "HTML loaded")
-        let surface = RSSWebReaderView(mode: .html(content: "<p>页面正文</p>", baseURL: source.sourceUrl), source: source,
-                                       onTextChange: { _ in loaded.fulfill() })
+        let surface = RSSWebReaderView(mode: .html(content: "<p>页面正文</p>", baseURL: source.sourceUrl), source: source)
         let coordinator = surface.makeCoordinator()
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = .nonPersistent()
@@ -142,6 +224,7 @@ final class WebReaderBridgeTests: XCTestCase {
             window.isHidden = true
         }
         coordinator.installRulesAndLoad(mode: surface.mode, in: webView)
+        let loaded = expectation(for: NSPredicate(format: "estimatedProgress == 1 AND loading == NO"), evaluatedWith: webView)
         await fulfillment(of: [loaded], timeout: 20)
 
         let result = try await webView.evaluateJavaScript("""
@@ -151,6 +234,20 @@ final class WebReaderBridgeTests: XCTestCase {
             """)
         XCTAssertEqual(result as? String, "已保存|规则正文")
     }
+}
+
+@MainActor
+private final class PendingArticleImage: NSObject, WKURLSchemeHandler {
+    let requested: XCTestExpectation
+    var tasks: [String: WKURLSchemeTask] = [:]
+
+    init(requested: XCTestExpectation) { self.requested = requested }
+
+    func webView(_ webView: WKWebView, start urlSchemeTask: WKURLSchemeTask) {
+        if let url = urlSchemeTask.request.url { tasks[url.lastPathComponent] = urlSchemeTask }
+        requested.fulfill()
+    }
+    func webView(_ webView: WKWebView, stop urlSchemeTask: WKURLSchemeTask) {}
 }
 
 private actor RSSPaginationTransport: HTTPTransport {

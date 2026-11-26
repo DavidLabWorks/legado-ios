@@ -3,6 +3,7 @@ import SwiftUI
 struct RSSAddBookView: View {
     @EnvironmentObject private var books: BookLibraryModel
     @EnvironmentObject private var sources: SourceLibraryModel
+    @Environment(\.dismiss) private var dismiss
     let bookURL: String
     @State private var resolved: AddBookURLResult?
     @State private var existing: (Book, BookSource)?
@@ -18,13 +19,14 @@ struct RSSAddBookView: View {
                 ReadingUnavailableView("无法添加书籍", systemImage: "books.vertical.circle", description: Text(errorMessage))
             } else {
                 VStack(spacing: 14) {
-                    ProgressView()
+                    RagdollLoading()
                     Text("正在匹配书源并解析详情…").foregroundStyle(.secondary)
                     Text(bookURL).font(.caption.monospaced()).foregroundStyle(.tertiary).lineLimit(3)
                 }.padding()
             }
         }
-        .navigationTitle("添加到书架")
+        .readingSheetTitle("添加到书架")
+        .toolbar { ReadingSheetActions { ReadingSheetCloseButton { dismiss() } } }
         .task(id: bookURL) { await load() }
     }
 

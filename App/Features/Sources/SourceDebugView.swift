@@ -90,7 +90,7 @@ struct SourceDebugView: View {
     private var runningCard: some View {
         ReadingCard {
             HStack(spacing: 12) {
-                ProgressView()
+                RagdollLoading()
                 VStack(alignment: .leading, spacing: 3) {
                     Text("端到端检查进行中").font(.subheadline.bold())
                     Text("请求只发送给这个书源，最多读取 5 页目录与正文。")
@@ -257,6 +257,7 @@ struct SourceBatchTestView: View {
                 Section {
                     ProgressView(value: Double(model.completedCount), total: Double(model.totalCount))
                     HStack {
+                        if model.isTesting { RagdollLoading(width: 28) }
                         Text("已完成 \(model.completedCount)/\(model.totalCount)")
                         Spacer()
                         Text("失败 \(model.failedCount) · 已选 \(model.selectedFailedIDs.count)")

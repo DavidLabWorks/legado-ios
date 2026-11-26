@@ -1,15 +1,12 @@
 import SwiftUI
-import UIKit
-import UniformTypeIdentifiers
 
 struct SourceManagementView: View {
     @EnvironmentObject private var library: SourceLibraryModel
     @State private var showsImporter = false
-    @State private var pickedImportFiles: [SourceImportFile] = []
-    @State private var importPickerHasDismissed = true
     @State private var showsNewSource = false
     @State private var showsQRImporter = false
     @State private var showsTextImporter = false
+    @State private var preparedImport: SourceLibraryModel.PendingImport?
     @State private var showsGroupManager = false
     @State private var showsBatchGroups = false
     @State private var selectedGroup: String?
@@ -55,7 +52,8 @@ struct SourceManagementView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            ReadingPillSearchField(placeholder: "名称、地址或分组", text: $searchText)
+            SourceManagementSearchHeader(total: library.sources.count, enabled: library.sources.filter(\.enabled).count,
+                                         searchText: $searchText)
             if library.sources.isEmpty, !library.isWorking {
                 ReadingIllustratedEmptyState(
                     artwork: "SourceEmptyArtwork",
@@ -65,7 +63,7 @@ struct SourceManagementView: View {
                 ) {
                     Menu {
                         Button("新建书源", systemImage: "plus") { showsNewSource = true }
-                        Button("从文件导入", systemImage: "doc.badge.plus", action: presentFileImporter)
+                        Button("从文件导入", systemImage: "doc.badge.plus") { showsImporter = true }
                         Button("URL 或粘贴 JSON", systemImage: "link.badge.plus") { showsTextImporter = true }
                         Button("二维码导入", systemImage: "qrcode.viewfinder") { showsQRImporter = true }
                     } label: {
@@ -81,9 +79,6 @@ struct SourceManagementView: View {
                 }
             } else {
                 List {
-                    Section {
-                        SourceGroupPicker(groups: library.groups, selection: $selectedGroup)
-                    }
                     Section {
                         ForEach(filteredSources) { source in
                             if isSelecting {
@@ -125,26 +120,27 @@ struct SourceManagementView: View {
                             let ids = Set(offsets.compactMap { filteredSources.indices.contains($0) ? filteredSources[$0].id : nil })
                             Task { await library.remove(sourceIDs: ids) }
                         }
+                        if filteredSources.isEmpty, !library.isWorking {
+                            Text("未找到书源").foregroundStyle(.secondary)
+                        }
                     } header: {
-                        Text("\(filteredSources.count) 个书源")
-                    } footer: {
-                        Text("共 \(library.sources.count) 个书源，\(library.sources.filter(\.enabled).count) 个已启用")
+                        SourceGroupPicker(title: searchText.isEmpty && selectedGroup == nil ? "书源" : "书源 · \(filteredSources.count)",
+                                          groups: library.groups, selection: $selectedGroup)
                     }
+                    .listRowBackground(ReadingTheme.surface)
                 }
-                .listStyle(.insetGrouped)
-                .readingScrollContentBackgroundHidden()
-                .background(ReadingTheme.groupedCanvas)
+                .readingManagementList()
                 .overlay {
-                    if library.isWorking { ProgressView() }
+                    if library.isWorking { RagdollLoading() }
                 }
             }
         }
-        .navigationTitle("书源")
-        .background(ReadingTheme.canvas)
-        .navigationBarTitleDisplayMode(.inline)
+        .navigationTitle("书源管理")
+        .background(ReadingTheme.managementCanvas)
+        .navigationBarTitleDisplayMode(.large)
         .navigationBarHidden(false)
         .toolbar {
-            ToolbarItem(placement: .topBarLeading) {
+            ToolbarItem(placement: .topBarTrailing) {
                 Button(isSelecting ? "完成" : "选择") {
                     isSelecting.toggle()
                     if !isSelecting { selectedSourceIDs.removeAll() }
@@ -154,7 +150,7 @@ struct SourceManagementView: View {
                 Menu("更多", systemImage: "ellipsis") {
                     Button("新建书源", systemImage: "plus") { showsNewSource = true }
                     Button("二维码导入", systemImage: "qrcode.viewfinder") { showsQRImporter = true }
-                    Button("从文件导入", systemImage: "doc.badge.plus", action: presentFileImporter)
+                    Button("从文件导入", systemImage: "doc.badge.plus") { showsImporter = true }
                     Button("URL 或粘贴 JSON", systemImage: "link.badge.plus") { showsTextImporter = true }
                     Divider()
                     NavigationLink {
@@ -218,11 +214,16 @@ struct SourceManagementView: View {
             Text("将删除已选的 \(selectedSourceIDs.count) 个书源，无法撤销。")
         }
         .sheet(isPresented: $showsNewSource) { SourceEditorView().environmentObject(library) }
-        .sheet(isPresented: $showsQRImporter) {
-            QRCodeImportView { value in Task { await library.previewInput(value) } }
+        .qrCodeImportSheet(isPresented: $showsQRImporter) { value in
+            Task { await library.previewInput(value) }
         }
-        .sheet(isPresented: $showsTextImporter) {
-            SourceTextImportView()
+        .sheet(isPresented: $showsTextImporter, onDismiss: {
+            if let preparedImport {
+                library.pendingImport = preparedImport
+                self.preparedImport = nil
+            }
+        }) {
+            SourceTextImportView { preparedImport = $0 }
                 .environmentObject(library)
         }
         .sheet(isPresented: $showsGroupManager) {
@@ -231,76 +232,16 @@ struct SourceManagementView: View {
         .sheet(isPresented: $showsBatchGroups) {
             SourceBatchGroupView(sourceIDs: selectedSourceIDs).environmentObject(library)
         }
-        .sheet(isPresented: $showsImporter, onDismiss: {
-            importPickerHasDismissed = true
-            previewPickedFilesWhenReady()
-        }) {
-            SourceFileImportPicker { files in
-                pickedImportFiles = files
-                showsImporter = false
-                previewPickedFilesWhenReady()
-            } onCancel: {
-                showsImporter = false
-            }
-        }
-    }
-
-    private func presentFileImporter() {
-        pickedImportFiles = []
-        importPickerHasDismissed = false
-        showsImporter = true
-    }
-
-    private func previewPickedFilesWhenReady() {
-        // Import-copy mode can dismiss before returning URLs. Other providers
-        // return URLs first, so wait for both events instead of assuming order.
-        guard importPickerHasDismissed, !pickedImportFiles.isEmpty else { return }
-        let files = pickedImportFiles
-        pickedImportFiles = []
-        Task { await library.previewPickedFiles(files) }
-    }
-}
-
-private struct SourceFileImportPicker: UIViewControllerRepresentable {
-    let onPick: @MainActor ([SourceImportFile]) -> Void
-    let onCancel: @MainActor () -> Void
-
-    func makeCoordinator() -> Coordinator { Coordinator(parent: self) }
-
-    func makeUIViewController(context: Context) -> UIDocumentPickerViewController {
-        // Ask the provider to import copies, including JSON files whose provider
-        // does not support opening documents in place. Multi-select gives Files
-        // an explicit confirmation action for the selected files.
-        let picker = UIDocumentPickerViewController(forOpeningContentTypes: [.item], asCopy: true)
-        picker.allowsMultipleSelection = true
-        picker.shouldShowFileExtensions = true
-        picker.delegate = context.coordinator
-        return picker
-    }
-
-    func updateUIViewController(_ controller: UIDocumentPickerViewController, context: Context) {}
-
-    @MainActor
-    final class Coordinator: NSObject, UIDocumentPickerDelegate {
-        private let parent: SourceFileImportPicker
-
-        init(parent: SourceFileImportPicker) { self.parent = parent }
-
-        func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
-            parent.onCancel()
-        }
-
-        func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
-            // Hold the picker grants before dismissing, until the model has
-            // finished its coordinated background reads.
-            parent.onPick(urls.map { SourceImportFile(url: $0) })
-        }
+        .modifier(JSONImportPicker(isPresented: $showsImporter))
     }
 }
 
 private struct SourceTextImportView: View {
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var library: SourceLibraryModel
+    let onPreview: (SourceLibraryModel.PendingImport) -> Void
+    @State private var preparing = false
+    @State private var errorMessage: String?
     @State private var mode = 0
     @State private var value = ""
 
@@ -328,25 +269,30 @@ private struct SourceTextImportView: View {
                         .font(.footnote).foregroundStyle(.secondary)
                 }
             }
-            .navigationTitle("导入书源")
-            .navigationBarTitleDisplayMode(.inline)
+            .readingSheetTitle("导入书源")
             .toolbar {
-                ToolbarItem(placement: .cancellationAction) { Button("取消") { dismiss() } }
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("导入") {
-                        let input = value
-                        let selectedMode = mode
-                        dismiss()
+                ReadingSheetActions {
+                    Button("取消") { dismiss() }
+                    ReadingSheetActionButton("预检", busyTitle: "预检中", isWorking: preparing) {
+                        preparing = true
                         Task {
-                            try? await Task.sleep(nanoseconds: 350_000_000)
-                            if selectedMode == 0 { await library.previewRemoteURL(input) }
-                            else { await library.previewText(input) }
+                            defer { preparing = false }
+                            do {
+                                let review = try await library.preparePreview(value)
+                                onPreview(review)
+                                dismiss()
+                            } catch { errorMessage = error.localizedDescription }
                         }
                     }
                     .disabled(value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
             }
         }
+        .disabled(preparing)
+        .interactiveDismissDisabled(preparing)
+        .alert("预检失败", isPresented: Binding(get: { errorMessage != nil }, set: { if !$0 { errorMessage = nil } })) {
+            Button("好", role: .cancel) {}
+        } message: { Text(errorMessage ?? "") }
     }
 }
 
@@ -357,7 +303,7 @@ private struct SourceRow: View {
 
     var body: some View {
         SourceManagementRow(name: source.bookSourceName, url: source.bookSourceUrl, groups: source.groups,
-                            enabled: source.enabled, showsToggle: showsToggle, onEnabledChanged: onEnabledChanged)
+                            systemImage: source.bookSourceType == 1 ? "headphones" : "book.closed", enabled: source.enabled, showsToggle: showsToggle, onEnabledChanged: onEnabledChanged)
     }
 }
 
@@ -376,11 +322,12 @@ private struct SourceGroupManagerView: View {
                         TextField("例如：文学", text: $newGroup)
                         Button("添加") {
                             let value = newGroup
-                            newGroup = ""
                             let ungrouped = Set(library.sources.filter { $0.groups.isEmpty }.map(\.id))
-                            Task { await library.addGroup(value, to: ungrouped) }
+                            Task {
+                                if await library.addGroup(value, to: ungrouped), newGroup == value { newGroup = "" }
+                            }
                         }
-                        .disabled(BookSource.parseGroups(newGroup).isEmpty)
+                        .disabled(BookSource.parseGroups(newGroup).isEmpty || !library.sources.contains { $0.groups.isEmpty })
                     }
                     Text("添加后，所有未分组的书源都会加入该分组。")
                         .font(.caption).foregroundStyle(.secondary)
@@ -417,9 +364,12 @@ private struct SourceGroupManagerView: View {
                     Text("点击分组可查看其中的书源。")
                 }
             }
-            .navigationTitle("书源分组")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("完成") { dismiss() } } }
+            .readingSheetTitle("书源分组")
+            .toolbar {
+                ReadingSheetActions {
+                    ReadingSheetCloseButton { dismiss() }
+                }
+            }
             .alert("重命名分组", isPresented: Binding(
                 get: { renaming != nil },
                 set: { if !$0 { renaming = nil } }
@@ -427,9 +377,11 @@ private struct SourceGroupManagerView: View {
                 TextField("分组名称", text: $renamedValue)
                 Button("取消", role: .cancel) { renaming = nil }
                 Button("保存") {
-                    if let old = renaming { Task { await library.renameGroup(old, to: renamedValue) } }
+                    let name = renamedValue
+                    if let old = renaming { Task { await library.renameGroup(old, to: name) } }
                     renaming = nil
                 }
+                .disabled(BookSource.parseGroups(renamedValue).isEmpty)
             }
         }
     }
@@ -485,8 +437,9 @@ private struct SourceBatchGroupView: View {
                         TextField("输入新分组", text: $customGroup)
                         Button("加入") {
                             let value = customGroup
-                            customGroup = ""
-                            Task { await library.addGroup(value, to: sourceIDs) }
+                            Task {
+                                if await library.addGroup(value, to: sourceIDs), customGroup == value { customGroup = "" }
+                            }
                         }
                         .disabled(BookSource.parseGroups(customGroup).isEmpty)
                     }
@@ -506,9 +459,12 @@ private struct SourceBatchGroupView: View {
                     }
                 }
             }
-            .navigationTitle("批量归组")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("完成") { dismiss() } } }
+            .readingSheetTitle("批量归组")
+            .toolbar {
+                ReadingSheetActions {
+                    ReadingSheetCloseButton { dismiss() }
+                }
+            }
         }
     }
 }
@@ -603,14 +559,11 @@ struct DetectedRuleImportView: View {
                 }
                 if let failure { Text(failure).foregroundStyle(.red) }
             }
-            .navigationTitle("导入" + rules.title)
-            .navigationBarTitleDisplayMode(.inline)
+            .readingSheetTitle("导入" + rules.title)
             .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
+                ReadingSheetActions {
                     Button("取消") { library.cancelPendingImport() }.disabled(saving)
-                }
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("导入") {
+                    ReadingSheetActionButton("导入", busyTitle: "导入中", isWorking: saving) {
                         saving = true
                         Task {
                             defer { saving = false }
@@ -676,6 +629,18 @@ struct SourceImportReviewView: View {
                         )
                     }
                     .listRowInsets(EdgeInsets(top: 12, leading: 16, bottom: 12, trailing: 16))
+
+                    Menu("选择") {
+                        Button("全选") { selectedIDs = Set(pending.items.map(\.id)) }
+                        Button("取消全选") { selectedIDs.removeAll() }
+                        Button("仅选择新增") {
+                            selectedIDs = Set(pending.items.filter { $0.existing == nil }.map(\.id))
+                        }
+                        Button("仅选择更新") {
+                            selectedIDs = Set(pending.items.filter { $0.existing != nil }.map(\.id))
+                        }
+                    }
+                    .disabled(pending.items.isEmpty)
 
                     Label("仅有效书源可被选择和导入", systemImage: "checkmark.shield.fill")
                         .font(.footnote)
@@ -745,30 +710,14 @@ struct SourceImportReviewView: View {
                     }
                 }
             }
-            .navigationTitle("书源导入预检")
-            .navigationBarTitleDisplayMode(.inline)
+            .readingSheetTitle("书源导入预检")
             .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
+                ReadingSheetActions {
                     Button("取消") {
                         library.cancelPendingImport()
                         dismiss()
                     }
-                }
-                ToolbarItem(placement: .topBarTrailing) {
-                    Menu("选择") {
-                        Button("全选") { selectedIDs = Set(pending.items.map(\.id)) }
-                        Button("取消全选") { selectedIDs.removeAll() }
-                        Button("仅选择新增") {
-                            selectedIDs = Set(pending.items.filter { $0.existing == nil }.map(\.id))
-                        }
-                        Button("仅选择更新") {
-                            selectedIDs = Set(pending.items.filter { $0.existing != nil }.map(\.id))
-                        }
-                    }
-                    .disabled(pending.items.isEmpty)
-                }
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("导入") {
+                    ReadingSheetActionButton("导入", busyTitle: "导入中", isWorking: isImporting) {
                         let ids = selectedIDs
                         isImporting = true
                         Task {
@@ -793,7 +742,8 @@ struct SourceImportReviewView: View {
                 }
             }
         }
-        .interactiveDismissDisabled()
+        .disabled(isImporting)
+        .interactiveDismissDisabled(isImporting)
         .alert("导入保存失败", isPresented: Binding(get: { importError != nil }, set: { if !$0 { importError = nil } })) {
             Button("好", role: .cancel) {}
         } message: { Text(importError ?? "") }

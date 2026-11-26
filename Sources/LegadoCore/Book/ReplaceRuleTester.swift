@@ -21,13 +21,13 @@ public struct ReplaceRuleTestResult: Sendable {
 
 public struct ReplaceRuleTester: Sendable {
     public init() {}
-    public func test(rule: ReplaceRule, title: String, content: String, bookName: String, sourceURL: String) throws -> ReplaceRuleTestResult {
+    public func test(rule: ReplaceRule, title: String, content: String, bookName: String, sourceURL: String, bookURL: String = "test") throws -> ReplaceRuleTestResult {
         try ReplaceRuleValidator.validate(rule)
-        let book = Book(bookUrl: "test", name: bookName, origin: sourceURL)
+        let book = Book(bookUrl: bookURL, name: bookName, origin: sourceURL)
         let chapter = BookChapter(url: "chapter", title: title, bookUrl: book.bookUrl, index: 0)
         let started = DispatchTime.now().uptimeNanoseconds
         let report = ContentSanitizer().process(book: book, chapter: chapter, content: content,
-            rules: [rule], removeDuplicateTitle: false, resegment: false)
+            rules: [rule], removeDuplicateTitle: false, trimParagraphs: false)
         return .init(report: report, elapsedMilliseconds: Double(DispatchTime.now().uptimeNanoseconds - started) / 1_000_000)
     }
 }

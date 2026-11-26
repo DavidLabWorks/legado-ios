@@ -43,7 +43,7 @@ private final class VoicePackDownloads: ObservableObject {
                 }
                 try? FileManager.default.removeItem(at: OfflineVoicePack.zipvoice.partialArchive)
                 try? FileManager.default.removeItem(at: ZipVoiceDownload.stage)
-                UserDefaults.standard.set(OfflineVoicePack.zipvoice.resolve(.preferred).rawValue, forKey: OfflineVoice.preferenceKey)
+                UserDefaults.standard.set(OfflineVoice.preferred.rawValue, forKey: OfflineVoice.preferenceKey)
             } catch {
                 if !Task.isCancelled { message = error.localizedDescription }
             }
@@ -53,7 +53,7 @@ private final class VoicePackDownloads: ObservableObject {
     private func install(from file: URL) async throws {
         installing = true
         let work = Task.detached(priority: .utility) {
-            try OfflineVoicePack.zipvoice.install(archive: file)
+            try OfflineVoicePack.installZipVoice(archive: file)
         }
         try await withTaskCancellationHandler { try await work.value } onCancel: { work.cancel() }
     }
@@ -75,10 +75,10 @@ private final class VoicePreviewPlayer: NSObject, ObservableObject, @preconcurre
     @Published private(set) var errorMessage: String?
     private var player: AVAudioPlayer?
 
-    func play(pack: OfflineVoicePack, voice: OfflineVoice, rate: Float) {
+    func play(voice: OfflineVoice, rate: Float) {
         stop()
         errorMessage = nil
-        let name = pack.rawValue + "-" + voice.speaker
+        let name = "zipvoice-" + voice.speaker
         guard let url = Bundle.main.url(forResource: name, withExtension: "m4a", subdirectory: "VoicePreviews") else {
             errorMessage = "找不到所选声音的试听音频。"
             return
@@ -135,6 +135,8 @@ private extension View {
 }
 
 struct ListeningSettingsView: View {
+    @Environment(\.dismiss) private var dismiss
+    let presented: Bool
     let isListening: Bool
     let canStart: Bool
     let speechTimerRemaining: Int
@@ -164,7 +166,8 @@ struct ListeningSettingsView: View {
 
     private var rate: Float { ReaderSpeechController.playbackRate(for: ttsSpeechRate) }
 
-    init(isListening: Bool = false, canStart: Bool = true, speechTimerRemaining: Int = 0, onStart: (() -> Void)? = nil) {
+    init(presented: Bool = false, isListening: Bool = false, canStart: Bool = true, speechTimerRemaining: Int = 0, onStart: (() -> Void)? = nil) {
+        self.presented = presented
         self.isListening = isListening
         self.canStart = canStart
         self.speechTimerRemaining = speechTimerRemaining
@@ -175,14 +178,13 @@ struct ListeningSettingsView: View {
         String(format: "%.1f", Double(bytes) / 1_000_000)
     }
 
-    var body: some View {
+    private var settingsContent: some View {
         let installedPack = OfflineVoicePack.selected
-        let canPlay = canStart && installedPack != nil && !downloads.busy
         let legacyPacks = OfflineVoicePack.allCases.filter { $0 != .zipvoice && $0.hasStoredFiles }
         return ScrollView {
             VStack(alignment: .leading, spacing: 16) {
-                if let pack = installedPack {
-                    voiceCard(pack)
+                if installedPack != nil {
+                    voiceCard
                 } else {
                     zipVoiceRow
                 }
@@ -201,6 +203,24 @@ struct ListeningSettingsView: View {
             }
             .padding(.horizontal, 16).padding(.vertical, 12)
         }
+    }
+
+    @ViewBuilder private var settingsPage: some View {
+        if presented {
+            settingsContent.readingSheetTitle("听书设置").toolbar {
+                ReadingSheetActions {
+                    ReadingSheetCloseButton { dismiss() }
+                }
+            }
+        } else {
+            settingsContent.navigationTitle("听书设置").navigationBarTitleDisplayMode(.inline)
+        }
+    }
+
+    var body: some View {
+        let installedPack = OfflineVoicePack.selected
+        let canPlay = canStart && installedPack != nil && !downloads.busy
+        return settingsPage
         .background(Color(uiColor: .systemGroupedBackground))
         .tint(accent)
         .safeAreaInset(edge: .bottom) {
@@ -219,8 +239,6 @@ struct ListeningSettingsView: View {
                 .background(.bar)
             }
         }
-        .navigationTitle("听书设置")
-        .navigationBarTitleDisplayMode(.inline)
         .onChange(of: ttsSpeechRate) { _ in preview.updateRate(rate) }
         .onChange(of: installedPack) { _ in preview.stop() }
         .onReceive(NotificationCenter.default.publisher(for: AVAudioSession.interruptionNotification)) { note in
@@ -246,15 +264,15 @@ struct ListeningSettingsView: View {
         }
     }
 
-    private func voiceCard(_ pack: OfflineVoicePack) -> some View {
-        let selectedVoice = pack.resolve(OfflineVoice(rawValue: voiceID) ?? .uncleFu)
+    private var voiceCard: some View {
+        let selectedVoice = OfflineVoice(rawValue: voiceID) ?? .uncleFu
         return VStack(alignment: .leading, spacing: 12) {
             HStack {
                 Label("朗读声音", systemImage: "headphones").font(.headline)
                 Spacer()
                 Button {
                     if preview.isPlaying { preview.stop() }
-                    else { preview.play(pack: pack, voice: selectedVoice, rate: rate) }
+                    else { preview.play(voice: selectedVoice, rate: rate) }
                 } label: {
                     Label(preview.isPlaying ? "停止试听" : "试听", systemImage: preview.isPlaying ? "stop.fill" : "play.fill")
                         .font(.subheadline.weight(.medium))
@@ -266,9 +284,9 @@ struct ListeningSettingsView: View {
                 .disabled(isListening)
             }
             if typeSize.isAccessibilitySize {
-                VStack(spacing: 8) { voiceChoices(pack, selected: selectedVoice) }
+                VStack(spacing: 8) { voiceChoices(selected: selectedVoice) }
             } else {
-                HStack(spacing: 10) { voiceChoices(pack, selected: selectedVoice) }
+                HStack(spacing: 10) { voiceChoices(selected: selectedVoice) }
             }
             if let error = preview.errorMessage { Text(error).font(.footnote) }
         }
@@ -277,8 +295,8 @@ struct ListeningSettingsView: View {
         .background(ink, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
     }
 
-    private func voiceChoices(_ pack: OfflineVoicePack, selected: OfflineVoice) -> some View {
-        ForEach(pack.voices, id: \.self) { voice in
+    private func voiceChoices(selected: OfflineVoice) -> some View {
+        ForEach(OfflineVoice.allCases, id: \.self) { voice in
             let isSelected = voice == selected
             Button {
                 preview.stop()
@@ -376,7 +394,7 @@ struct ListeningSettingsView: View {
                     .background(accent.opacity(0.09), in: RoundedRectangle(cornerRadius: 10))
                 VStack(alignment: .leading, spacing: 3) {
                     Text("ZipVoice 离线语音包").font(.headline)
-                    Text((pack.isInstalled ? "已安装" : "男声和女声") + " · " + megabytes(pack.downloadSize) + " MB")
+                    Text((pack.isInstalled ? "已安装" : "男声和女声") + " · " + megabytes(ZipVoiceDownload.size) + " MB")
                         .font(.footnote.monospacedDigit()).foregroundStyle(.secondary)
                 }
                 Spacer()
@@ -390,22 +408,22 @@ struct ListeningSettingsView: View {
                 }
             }
             if downloads.busy {
-                if downloads.installing { ProgressView("正在校验并安装…") }
+                if downloads.installing { RagdollLoading("正在校验并安装…") }
                 else {
-                    ProgressView(value: Double(downloads.progress.bytes), total: Double(pack.downloadSize))
-                    Text(downloads.progress.status).monospacedDigit()
+                    ProgressView(value: Double(downloads.progress.bytes), total: Double(ZipVoiceDownload.size))
+                    HStack { RagdollLoading(width: 32); Text(downloads.progress.status).monospacedDigit() }
                     HStack(spacing: 4) {
-                        Text(verbatim: megabytes(pack.downloadSize))
+                        Text(verbatim: megabytes(ZipVoiceDownload.size))
                             .hidden()
                             .overlay(alignment: .trailing) {
                                 Text(verbatim: megabytes(downloads.progress.bytes))
                             }
-                        Text(verbatim: "MB / " + ByteCountFormatter.string(fromByteCount: pack.downloadSize, countStyle: .decimal))
+                        Text(verbatim: "MB / " + ByteCountFormatter.string(fromByteCount: ZipVoiceDownload.size, countStyle: .decimal))
                     }
                     .font(.footnote.monospacedDigit())
                     .foregroundStyle(.secondary)
                     .accessibilityElement(children: .ignore)
-                    .accessibilityLabel("\(megabytes(downloads.progress.bytes)) MB，共 \(ByteCountFormatter.string(fromByteCount: pack.downloadSize, countStyle: .decimal))")
+                    .accessibilityLabel("\(megabytes(downloads.progress.bytes)) MB，共 \(ByteCountFormatter.string(fromByteCount: ZipVoiceDownload.size, countStyle: .decimal))")
                     .transaction { $0.animation = nil }
                 }
                 Button("取消") { downloads.cancel() }
@@ -428,13 +446,7 @@ struct ListeningSettingsView: View {
 }
 
 struct OfflineVoicePackSheet: View {
-    @Environment(\.dismiss) private var dismiss
     var body: some View {
-        ReadingNavigationStack {
-            ListeningSettingsView()
-                .toolbar {
-                    ToolbarItem(placement: .confirmationAction) { Button("完成") { dismiss() } }
-                }
-        }
+        ReadingNavigationStack { ListeningSettingsView(presented: true) }
     }
 }

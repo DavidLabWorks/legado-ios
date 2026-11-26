@@ -6,6 +6,35 @@ import LegadoCore
 
 @MainActor
 struct RSSLibraryRegressionTests {
+    @Test func clearingArticleCacheResetsAllCategoriesOfOnlyTheSelectedSource() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let database = try LegadoDatabase(url: directory.appendingPathComponent("rss.sqlite3"))
+        let model = RSSLibraryModel(database: database)
+        let source = source()
+        for origin in [source.sourceUrl, "https://other.test"] {
+            for sort in ["全部", "最新"] {
+                let article = RssArticle(origin: origin, sort: sort, title: sort, link: origin + "/one")
+                _ = try await database.saveRssFeedPage([article], origin: origin, sort: sort, page: 1, nextURL: "/two", replaceFeed: true)
+            }
+        }
+        await model.refresh(source, preferCache: true)
+        let article = try #require(model.articles.first)
+        await model.toggleStar(article)
+        #expect(model.canLoadMore)
+
+        await model.clearArticleCache(for: source)
+
+        #expect(model.errorMessage == nil)
+        #expect(model.articles.isEmpty && !model.canLoadMore)
+        #expect(model.isStarred(article))
+        for sort in ["全部", "最新"] {
+            #expect(try await database.cachedRssFeed(origin: source.sourceUrl, sort: sort) == nil)
+            let other = try await database.cachedRssFeed(origin: "https://other.test", sort: sort)
+            #expect(other?.articles.count == 1 && other?.nextURL == "/two")
+        }
+    }
+
     @Test func databaseSaveFailureReportsErrorButDoesNotRollbackEarlierRuleFileWrites() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }

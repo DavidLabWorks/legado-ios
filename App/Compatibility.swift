@@ -248,6 +248,39 @@ private struct ReadingLocalBookFileImporterModifier: ViewModifier {
     }
 }
 
+struct JSONImportPicker: ViewModifier {
+    @Binding var isPresented: Bool
+    @EnvironmentObject private var library: SourceLibraryModel
+    @State private var pickedFiles: [SourceImportFile] = []
+    @State private var pickerHasDismissed = false
+
+    func body(content: Content) -> some View {
+        content.sheet(isPresented: $isPresented, onDismiss: {
+            pickerHasDismissed = true
+            previewWhenReady()
+        }) {
+            // File providers may label JSON as generic data or support copying only.
+            // Multiple selection also gives Files an explicit Open button.
+            ReadingImportPicker(contentTypes: [.item], allowsMultipleSelection: true) { urls in
+                pickedFiles = urls.map(SourceImportFile.init)
+                isPresented = false
+                previewWhenReady()
+            } onCancel: {
+                isPresented = false
+            }
+            .onAppear { pickerHasDismissed = false }
+        }
+    }
+
+    private func previewWhenReady() {
+        // Providers can finish copying before or after the picker dismisses.
+        guard pickerHasDismissed, !pickedFiles.isEmpty else { return }
+        let files = pickedFiles
+        pickedFiles = []
+        Task { await library.previewPickedFiles(files) }
+    }
+}
+
 struct ReadingImportPicker: UIViewControllerRepresentable {
     let contentTypes: [UTType]
     let allowsMultipleSelection: Bool
@@ -343,22 +376,6 @@ extension View {
     }
 
     @ViewBuilder
-    func readingNavigationBarBackground() -> some View {
-        if #available(iOS 16.0, *), !ReadingCompatibility.usesLegacyUI {
-            toolbarBackground(ReadingTheme.canvas, for: .navigationBar)
-                .toolbarBackground(.visible, for: .navigationBar)
-        } else {
-            background(ReadingUIKitConfiguration { controller in
-                let appearance = UINavigationBarAppearance()
-                appearance.configureWithOpaqueBackground()
-                appearance.backgroundColor = UIColor(ReadingTheme.canvas)
-                controller.navigationController?.navigationBar.standardAppearance = appearance
-                controller.navigationController?.navigationBar.scrollEdgeAppearance = appearance
-            })
-        }
-    }
-
-    @ViewBuilder
     func readingTabBarBackground() -> some View {
         if #available(iOS 16.0, *), !ReadingCompatibility.usesLegacyUI {
             toolbarBackground(ReadingTheme.canvas, for: .tabBar).toolbarBackground(.visible, for: .tabBar)
@@ -388,6 +405,24 @@ extension View {
             persistentSystemOverlays(hidden ? .hidden : .automatic)
         } else {
             self
+        }
+    }
+
+    @ViewBuilder
+    func readingSheetSurface() -> some View {
+        let backgroundColor = Color(uiColor: .systemBackground)
+        let page = background(backgroundColor.ignoresSafeArea())
+        if #available(iOS 16, *) {
+            let opaqueBar = page
+                .toolbarBackground(backgroundColor, for: .navigationBar)
+                .toolbarBackground(.visible, for: .navigationBar)
+            if #available(iOS 16.4, *) {
+                opaqueBar.presentationBackground(backgroundColor)
+            } else {
+                opaqueBar
+            }
+        } else {
+            page
         }
     }
 
@@ -470,6 +505,36 @@ private struct ReadingHiddenTabBar: UIViewControllerRepresentable {
         override func viewWillDisappear(_ animated: Bool) {
             super.viewWillDisappear(animated)
             hiddenBar?.isHidden = previouslyHidden
+        }
+    }
+}
+
+struct BookshelfTabBar: UIViewControllerRepresentable {
+    func makeUIViewController(context: Context) -> Controller { Controller() }
+    func updateUIViewController(_ controller: Controller, context: Context) {}
+
+    final class Controller: UIViewController {
+        override func loadView() { view = UIView(); view.isUserInteractionEnabled = false }
+
+        override func viewWillAppear(_ animated: Bool) {
+            super.viewWillAppear(animated)
+            guard let tabs = tabBarController else { return }
+            // SwiftUI can restore the reader's hidden tab bar only after the pop finishes.
+            let wasHidden: Bool
+            let setHidden: (Bool) -> Void
+            if #available(iOS 18, *) {
+                wasHidden = tabs.isTabBarHidden
+                setHidden = { tabs.setTabBarHidden($0, animated: false) }
+            } else {
+                wasHidden = tabs.tabBar.isHidden
+                setHidden = { tabs.tabBar.isHidden = $0 }
+            }
+            setHidden(false)
+            if wasHidden, let transition = transitionCoordinator, transition.isInteractive {
+                transition.notifyWhenInteractionChanges { context in
+                    if context.isCancelled { setHidden(true) }
+                }
+            }
         }
     }
 }

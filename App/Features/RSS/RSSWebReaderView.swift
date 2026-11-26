@@ -19,28 +19,16 @@ struct RSSNextArticle {
 struct RSSWebReaderView: UIViewRepresentable {
     let mode: RSSReadingMode
     let source: RssSource
-    @Binding var pageTitle: String?
+    var pageTitle: Binding<String?> = .constant(nil)
     var imageBaseURL: String?
     var onShowPhoto: ((RSSGallerySelection) -> Void)?
     var onPlayVideo: ((URL) -> Void)?
     var nextArticle: RSSNextArticle?
-    let onTextChange: (String) -> Void
-    let onAction: (RSSWebAction) -> Void
-
-    init(mode: RSSReadingMode, source: RssSource, pageTitle: Binding<String?> = .constant(nil), onTextChange: @escaping (String) -> Void = { _ in }, imageBaseURL: String? = nil, onShowPhoto: ((RSSGallerySelection) -> Void)? = nil, onPlayVideo: ((URL) -> Void)? = nil, nextArticle: RSSNextArticle? = nil, onAction: @escaping (RSSWebAction) -> Void = { _ in }) {
-        self.mode = mode
-        self.source = source
-        self._pageTitle = pageTitle
-        self.imageBaseURL = imageBaseURL
-        self.onShowPhoto = onShowPhoto
-        self.onPlayVideo = onPlayVideo
-        self.nextArticle = nextArticle
-        self.onTextChange = onTextChange
-        self.onAction = onAction
-    }
+    var onRefresh: (() -> Void)?
+    var onAction: (RSSWebAction) -> Void = { _ in }
 
     func makeCoordinator() -> Coordinator {
-        let coordinator = Coordinator(source: source, onTextChange: onTextChange, onAction: onAction)
+        let coordinator = Coordinator(source: source, onAction: onAction)
         coordinator.onShowPhoto = onShowPhoto
         coordinator.onPlayVideo = onPlayVideo
         return coordinator
@@ -68,7 +56,7 @@ struct RSSWebReaderView: UIViewRepresentable {
         if let inject = source.injectJs?.trimmedNonEmpty {
             controller.addUserScript(.init(source: inject, injectionTime: .atDocumentEnd, forMainFrameOnly: false))
         }
-        let webView = WKWebView(frame: .zero, configuration: configuration)
+        let webView = ReadingWebView(frame: .zero, configuration: configuration)
         webView.isOpaque = false
         webView.backgroundColor = UIColor(ReadingTheme.canvas)
         webView.scrollView.backgroundColor = UIColor(ReadingTheme.canvas)
@@ -76,15 +64,26 @@ struct RSSWebReaderView: UIViewRepresentable {
         webView.uiDelegate = context.coordinator
         webView.allowsBackForwardNavigationGestures = true
         webView.scrollView.contentInsetAdjustmentBehavior = .automatic
+        if let onRefresh {
+            let refresh = UIRefreshControl()
+            refresh.addAction(UIAction { [weak webView, mode] _ in
+                if case .web = mode, let webView, webView.reloadFromOrigin() != nil {
+                    webView.scrollView.refreshControl?.endRefreshing()
+                } else {
+                    onRefresh()
+                }
+            }, for: .valueChanged)
+            webView.scrollView.refreshControl = refresh
+            webView.scrollView.alwaysBounceVertical = true
+        }
         context.coordinator.titleObservation = webView.publisher(for: \.title, options: [.new])
-            .sink { [title = $pageTitle] in title.wrappedValue = $0?.trimmedNonEmpty }
+            .sink { [pageTitle] in pageTitle.wrappedValue = $0?.trimmedNonEmpty }
         context.coordinator.installRulesAndLoad(mode: mode, in: webView)
         return webView
     }
 
     func updateUIView(_ webView: WKWebView, context: Context) {
         context.coordinator.update(source: source)
-        context.coordinator.onTextChange = onTextChange
         context.coordinator.onShowPhoto = onShowPhoto
         context.coordinator.onPlayVideo = onPlayVideo
         context.coordinator.onAction = onAction
@@ -187,7 +186,6 @@ struct RSSWebReaderView: UIViewRepresentable {
         private var videoURLs: [URL] = []
         var titleObservation: AnyCancellable?
         private var source: RssSource
-        var onTextChange: (String) -> Void
         var onAction: (RSSWebAction) -> Void
         private var loadedMode: RSSReadingMode?
         private var rulesInstalled = false
@@ -197,7 +195,10 @@ struct RSSWebReaderView: UIViewRepresentable {
         private var analyzeRedirectURL: String?
         private var analyzeVariables: [String: String] = [:]
 
-        init(source: RssSource, onTextChange: @escaping (String) -> Void, onAction: @escaping (RSSWebAction) -> Void) { self.source = source; self.onTextChange = onTextChange; self.onAction = onAction }
+        init(source: RssSource, onAction: @escaping (RSSWebAction) -> Void) {
+            self.source = source
+            self.onAction = onAction
+        }
         func update(source: RssSource) { self.source = source }
 
         func imageScript(baseURL: String, isArticle: Bool) -> String {
@@ -223,27 +224,51 @@ struct RSSWebReaderView: UIViewRepresentable {
                 style.textContent = `
                   .legado-photo-column { box-sizing:border-box; max-width:46rem; margin-inline:auto; padding-inline:12px; }
                   .legado-article-photo { display:block; box-sizing:border-box; float:none; width:100% !important;
-                    max-width:100% !important; height:auto !important; margin:12px auto; }
+                    max-width:100% !important; height:auto !important; margin:12px auto; border-radius:6px; }
+                  :where(img[data-legado-photo-state]) { aspect-ratio:var(--legado-photo-ratio, 4 / 3); }
+                  .legado-article-photo[data-legado-photo-state] {
+                    content:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg'/%3E");
+                    background:rgba(128,128,144,.13) var(--legado-loader, none) center / 48px auto no-repeat;
+                  }
+                  .legado-article-photo[data-legado-photo-state="failed"] {
+                    background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23888890' stroke-width='1.5'%3E%3Crect x='3' y='4' width='18' height='16' rx='2'/%3E%3Cpath d='m4 16 5-5 4 4 3-3 5 5M2 2l20 20'/%3E%3C/svg%3E");
+                    background-size:24px auto;
+                  }
                   .legado-photo-link { display:block; }
                   figure.legado-photo-figure { margin-inline:0; }
                   .legado-article-photo + br, .legado-photo-link + br { display:none; }
                 `;
                 document.head.append(style);
               }
+              function updatePhoto(img, root) {
+                const hasSource = img.currentSrc || img.getAttribute('src') || img.srcset ||
+                    img.parentElement?.matches('picture') && img.parentElement.querySelector('source[srcset]');
+                const state = img.complete ? (img.naturalWidth ? '' : 'failed') : 'loading';
+                const width = img.naturalWidth || Number(img.getAttribute('width')) || Number(img.dataset.width);
+                const height = img.naturalHeight || Number(img.getAttribute('height')) || Number(img.dataset.height);
+                const small = (width > 0 && width < 64) || (height > 0 && height < 64) ||
+                    (width > 0 && height > 0 && Math.max(width, height) < 160);
+                const photo = !!hasSource && !small && !img.closest(excluded);
+                img.classList.toggle('legado-article-photo', photo);
+                if (photo && state) {
+                  img.dataset.legadoPhotoState = state;
+                  if (width > 0 && height > 0) img.style.setProperty('--legado-photo-ratio', width + ' / ' + height);
+                  else img.style.removeProperty('--legado-photo-ratio');
+                } else if (img.hasAttribute('data-legado-photo-state')) {
+                  delete img.dataset.legadoPhotoState;
+                  img.style.removeProperty('--legado-photo-ratio');
+                }
+                if (!photo) return;
+                prepareColumn(root);
+                const link = img.closest('a');
+                if (link && link.childElementCount === 1 && !link.textContent.trim()) link.classList.add('legado-photo-link');
+                img.closest('figure')?.classList.add('legado-photo-figure');
+              }
               function collect() {
                 scheduled = false;
                 const root = articleRoot();
                 if (!article || !root) return;
-                for (const img of root.querySelectorAll('img')) {
-                  if (!img.closest(excluded) && Math.min(img.naturalWidth, img.naturalHeight) >= 64 &&
-                      Math.max(img.naturalWidth, img.naturalHeight) >= 160) {
-                    prepareColumn(root);
-                    img.classList.add('legado-article-photo');
-                    const link = img.closest('a');
-                    if (link && link.childElementCount === 1 && !link.textContent.trim()) link.classList.add('legado-photo-link');
-                    img.closest('figure')?.classList.add('legado-photo-figure');
-                  }
-                }
+                root.querySelectorAll('img').forEach(img => updatePhoto(img, root));
               }
               function photoURL(raw) {
                 if (!raw) return null;
@@ -255,30 +280,32 @@ struct RSSWebReaderView: UIViewRepresentable {
                 return null;
               }
               function openPhoto(target) {
-                const urls = [], nodes = [];
+                const photos = [], nodes = [];
                 const requestedURL = typeof target === 'string' ? photoURL(target) : null;
                 let index = -1;
                 for (const img of articleRoot()?.querySelectorAll('img') || []) {
                   if (img.closest(excluded) || !img.getClientRects().length) continue;
                   const link = img.closest('a[href]');
                   const original = link?.hasAttribute('data-fancybox') ? link.getAttribute('href') : null;
-                  const url = photoURL(img.dataset.original || (original && !original.startsWith('#') && original)
-                      || img.dataset.src || img.currentSrc || img.getAttribute('src'));
+                  const displayed = img.complete && img.naturalWidth > 0 ? photoURL(img.currentSrc || img.src) : null;
+                  const originalURL = photoURL(img.dataset.original || (original && !original.startsWith('#') && original)
+                      || img.dataset.src);
+                  const url = displayed || originalURL || photoURL(img.currentSrc || img.getAttribute('src'));
                   if (!url) continue;
-                  if (img === target || (requestedURL && index < 0 && (requestedURL === url || requestedURL === img.src))) index = urls.length;
-                  urls.push(url);
+                  if (img === target || (requestedURL && index < 0 && (requestedURL === url || requestedURL === originalURL || requestedURL === img.src))) index = photos.length;
+                  photos.push({url, displayed: !!displayed, omitReferer: img.referrerPolicy === 'no-referrer'});
                   nodes.push(img);
                 }
                 const canLocate = index >= 0;
                 if (!canLocate) {
                   if (!requestedURL) return false;
                   index = 0;
-                  urls.splice(0, urls.length, requestedURL);
+                  photos.splice(0, photos.length, {url: requestedURL, omitReferer: false});
                 }
                 window.legadoLocatePhoto = page => {
                   if (canLocate && nodes[page]?.isConnected) nodes[page].scrollIntoView({block:'center', inline:'nearest', behavior:'instant'});
                 };
-                window.webkit.messageHandlers.articleImages.postMessage({urls, index, canLocate});
+                window.webkit.messageHandlers.articleImages.postMessage({photos, index, canLocate});
                 return true;
               }
               window.legadoOpenPhoto = openPhoto;
@@ -300,8 +327,13 @@ struct RSSWebReaderView: UIViewRepresentable {
               if (!article) return;
               collect();
               new MutationObserver(schedule).observe(document.documentElement, {subtree:true, childList:true,
-                attributes:true, attributeFilter:['src','srcset','data-original','data-src','hidden','aria-hidden']});
-              document.addEventListener('load', event => { if (event.target.tagName === 'IMG') schedule(); }, true);
+                attributes:true, attributeFilter:['src','srcset','sizes','width','height','data-width','data-height','data-original','data-src','hidden','aria-hidden']});
+              function imageSettled(event) {
+                const root = articleRoot();
+                if (event.target.tagName === 'IMG' && root?.contains(event.target)) updatePhoto(event.target, root);
+              }
+              document.addEventListener('load', imageSettled, true);
+              document.addEventListener('error', imageSettled, true);
             })();
             """
         }
@@ -374,7 +406,7 @@ struct RSSWebReaderView: UIViewRepresentable {
             switch mode {
             case .html(let content, let baseURL):
                 let html = articleVideoLinks(in: content, baseURL: baseURL ?? source.sourceUrl)
-                webView.loadHTMLString(htmlProcessor.contentHTML(html, style: source.style), baseURL: baseURL.flatMap(URL.init(string:)))
+                webView.loadHTMLString(htmlProcessor.articleHTML(html, style: source.style), baseURL: baseURL.flatMap(URL.init(string:)))
             case .startHTML(let content, let baseURL):
                 webView.loadHTMLString(htmlProcessor.startHTML(content, source: source), baseURL: baseURL.flatMap(URL.init(string:)))
             case .web(let value): load(value, in: webView)
@@ -429,20 +461,57 @@ struct RSSWebReaderView: UIViewRepresentable {
             webView.load(request)
         }
 
+        private static func displayedImages(in webView: WKWebView, urls: Set<String>) -> Task<[String: Data], Never>? {
+            guard !urls.isEmpty else { return nil }
+            // WebKit retains the article's original image bytes, including cross-origin and animated images.
+            return Task {
+                let archive: Data? = try? await withCheckedThrowingContinuation { continuation in
+                    webView.createWebArchiveData { continuation.resume(with: $0) }
+                }
+                guard let archive else { return [:] }
+                return await imageResources(in: archive, matching: urls)
+            }
+        }
+
+        private nonisolated static func imageResources(in archive: Data, matching urls: Set<String>) async -> [String: Data] {
+            guard let plist = try? PropertyListSerialization.propertyList(from: archive, format: nil) as? [String: Any],
+                  let resources = plist["WebSubresources"] as? [[String: Any]] else { return [:] }
+            var images: [String: Data] = [:]
+            for resource in resources {
+                guard let url = resource["WebResourceURL"] as? String else { continue }
+                let key = RSSGalleryPhoto.resourceKey(url)
+                guard urls.contains(key), let data = resource["WebResourceData"] as? Data, !data.isEmpty else { continue }
+                images[key] = data
+            }
+            return images
+        }
+
         func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
             if message.name == "articleImages" {
                 guard message.frameInfo.isMainFrame, let body = message.body as? [String: Any],
-                      let urls = body["urls"] as? [String], let index = body["index"] as? Int,
-                      urls.indices.contains(index), let webView = message.webView else { return }
+                      let items = body["photos"] as? [[String: Any]], let index = body["index"] as? Int,
+                      items.indices.contains(index), let webView = message.webView else { return }
                 let policy = RSSResourcePolicy(blacklist: source.contentBlacklist, whitelist: source.contentWhitelist)
-                let allowed = urls.indices.filter { policy.allows(urls[$0]) }
-                guard let selected = allowed.firstIndex(of: index) else { return }
+                var displayedURLs = Set<String>()
+                var photos: [RSSGalleryPhoto] = []
+                var indices: [Int] = []
+                for (offset, item) in items.enumerated() {
+                    guard let url = item["url"] as? String, policy.allows(url) else { continue }
+                    let displayed = item["displayed"] as? Bool == true
+                    photos.append(.init(url: url, omitReferer: item["omitReferer"] as? Bool == true, displayedInArticle: displayed))
+                    if displayed && !url.hasPrefix("data:") {
+                        displayedURLs.insert(RSSGalleryPhoto.resourceKey(url))
+                    }
+                    indices.append(offset)
+                }
+                guard let selected = indices.firstIndex(of: index) else { return }
                 let locate: (Int) -> Void = { [weak webView] page in
-                    guard allowed.indices.contains(page) else { return }
-                    webView?.evaluateJavaScript("window.legadoLocatePhoto?.(\(allowed[page]))",
+                    guard indices.indices.contains(page) else { return }
+                    webView?.evaluateJavaScript("window.legadoLocatePhoto?.(\(indices[page]))",
                                                 in: nil, in: .defaultClient, completionHandler: nil)
                 }
-                onShowPhoto?(.init(urls: allowed.map { urls[$0] }, index: selected,
+                onShowPhoto?(.init(photos: photos, index: selected,
+                                   displayedImages: Self.displayedImages(in: webView, urls: displayedURLs),
                                    onLocate: body["canLocate"] as? Bool == true ? locate : nil))
                 return
             }
@@ -554,11 +623,9 @@ struct RSSWebReaderView: UIViewRepresentable {
             } else { decisionHandler(.allow) }
         }
 
-        func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-            webView.evaluateJavaScript("document.body ? document.body.innerText : ''") { [weak self] value, _ in
-                guard let text = value as? String else { return }
-                DispatchQueue.main.async { self?.onTextChange(text) }
-            }
+        func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+            // The article can display while WebKit is still fetching inline images.
+            (webView as? ReadingWebView)?.hideNavigationIndicator()
         }
 
         private func shouldOverride(_ url: String) -> Bool {

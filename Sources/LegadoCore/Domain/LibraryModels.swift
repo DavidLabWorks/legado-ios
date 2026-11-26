@@ -15,6 +15,7 @@ public struct Book: Codable, Hashable, Identifiable, Sendable {
     public var customIntro: String?
     public var charset: String?
     public var localTXTRevision: LocalTXTRevision?
+    public var localImportTime: Int64?
     public var type: Int
     public var group: Int64
     public var latestChapterTitle: String?
@@ -80,7 +81,7 @@ public struct Book: Codable, Hashable, Identifiable, Sendable {
         case intro, customIntro, charset, type, group, latestChapterTitle, latestChapterTime, lastCheckTime
         case lastCheckCount, totalChapterNum, durChapterTitle, durChapterIndex, durVolumeIndex
         case chapterInVolumeIndex, durChapterPos, durChapterTime, wordCount, canUpdate, order, originOrder
-        case variable, readConfig, syncTime, localTXTRevision
+        case variable, readConfig, syncTime, localTXTRevision, localImportTime
     }
 
     public init(from decoder: Decoder) throws {
@@ -98,6 +99,7 @@ public struct Book: Codable, Hashable, Identifiable, Sendable {
         intro = try value.decodeIfPresent(String.self, forKey: .intro)
         customIntro = try value.decodeIfPresent(String.self, forKey: .customIntro)
         localTXTRevision = try value.decodeIfPresent(LocalTXTRevision.self, forKey: .localTXTRevision)
+        localImportTime = try value.decodeIfPresent(Int64.self, forKey: .localImportTime)
         charset = try value.decodeIfPresent(String.self, forKey: .charset)
         type = try value.decodeIfPresent(Int.self, forKey: .type) ?? 0
         group = try value.decodeIfPresent(Int64.self, forKey: .group) ?? 0
@@ -127,7 +129,6 @@ public struct BookReadConfig: Codable, Hashable, Sendable {
     public var epubLocation: String?
     public var reverseToc = false
     public var pageAnim: Int?
-    public var reSegment = false
     public var imageStyle: String?
     public var useReplaceRule: Bool?
     public var delTag: Int64 = 0
@@ -145,7 +146,7 @@ public struct BookReadConfig: Codable, Hashable, Sendable {
     public init() {}
 
     private enum CodingKeys: String, CodingKey {
-        case reverseToc, pageAnim, reSegment, imageStyle, useReplaceRule, delTag, ttsEngine
+        case reverseToc, pageAnim, imageStyle, useReplaceRule, delTag, ttsEngine
         case splitLongChapter, readSimulating, startDate, startChapter, dailyChapters
         case openCredits, closeCredits, playMode, playSpeed, epubLocation
     }
@@ -155,7 +156,6 @@ public struct BookReadConfig: Codable, Hashable, Sendable {
         epubLocation = try value.decodeIfPresent(String.self, forKey: .epubLocation)
         reverseToc = try value.decodeIfPresent(Bool.self, forKey: .reverseToc) ?? false
         pageAnim = try value.decodeIfPresent(Int.self, forKey: .pageAnim)
-        reSegment = try value.decodeIfPresent(Bool.self, forKey: .reSegment) ?? false
         imageStyle = try value.decodeIfPresent(String.self, forKey: .imageStyle)
         useReplaceRule = try value.decodeIfPresent(Bool.self, forKey: .useReplaceRule)
         delTag = try value.decodeIfPresent(Int64.self, forKey: .delTag) ?? 0
@@ -200,7 +200,7 @@ public struct BookGroup: Codable, Hashable, Identifiable, Sendable {
         order: Int = 0,
         enableRefresh: Bool = true,
         show: Bool = true,
-        bookSort: Int = -1,
+        bookSort: Int = 0,
         onlyUpdateRead: Bool = false
     ) {
         self.groupId = groupId
@@ -477,6 +477,7 @@ public struct ReplaceRule: Codable, Hashable, Identifiable, Sendable {
     public var pattern: String
     public var replacement: String
     public var scope: String?
+    public var scopeBookURL: String?
     public var scopeTitle: Bool
     public var scopeContent: Bool
     public var excludeScope: String?
@@ -500,7 +501,7 @@ public struct ReplaceRule: Codable, Hashable, Identifiable, Sendable {
 
     private enum CodingKeys: String, CodingKey {
         case id, name, group, pattern, replacement, scope, scopeTitle, scopeContent
-        case excludeScope, isEnabled, isRegex, timeoutMillisecond, sortOrder, order
+        case scopeBookURL, excludeScope, isEnabled, isRegex, timeoutMillisecond, sortOrder, order
     }
 
     public init(from decoder: Decoder) throws {
@@ -511,6 +512,7 @@ public struct ReplaceRule: Codable, Hashable, Identifiable, Sendable {
         pattern = try values.decodeIfPresent(String.self, forKey: .pattern) ?? ""
         replacement = try values.decodeIfPresent(String.self, forKey: .replacement) ?? ""
         scope = try values.decodeIfPresent(String.self, forKey: .scope)
+        scopeBookURL = try values.decodeIfPresent(String.self, forKey: .scopeBookURL)
         scopeTitle = try values.decodeIfPresent(Bool.self, forKey: .scopeTitle) ?? false
         scopeContent = try values.decodeIfPresent(Bool.self, forKey: .scopeContent) ?? true
         excludeScope = try values.decodeIfPresent(String.self, forKey: .excludeScope)
@@ -530,6 +532,7 @@ public struct ReplaceRule: Codable, Hashable, Identifiable, Sendable {
         try values.encode(pattern, forKey: .pattern)
         try values.encode(replacement, forKey: .replacement)
         try values.encodeIfPresent(scope, forKey: .scope)
+        try values.encodeIfPresent(scopeBookURL, forKey: .scopeBookURL)
         try values.encode(scopeTitle, forKey: .scopeTitle)
         try values.encode(scopeContent, forKey: .scopeContent)
         try values.encodeIfPresent(excludeScope, forKey: .excludeScope)

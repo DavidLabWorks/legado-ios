@@ -78,6 +78,14 @@ final class EPUBReaderModel: ObservableObject, EPUBNavigatorDelegate {
 
     var progress: Double { location?.locations.totalProgression ?? 0 }
 
+    var currentTOCEntryID: Int? {
+        guard let chapter = currentChapter, let path = chapter.resourceUrl else { return nil }
+        return tableOfContents.first { entry in
+            let href = entry.link.href
+            return Self.path(href) == path && URLComponents(string: href)?.fragment == chapter.startFragmentId
+        }?.id
+    }
+
     func open(preferences: EPUBPreferences) async {
         guard navigator == nil, !isLoading else { return }
         isLoading = true
@@ -107,7 +115,8 @@ final class EPUBReaderModel: ObservableObject, EPUBNavigatorDelegate {
             )
             controller.delegate = self
             controller.view.accessibilityIdentifier = "reader.epub"
-            let adapter = DirectionalNavigationAdapter()
+            // The reader handles taps below. Keep Readium's keyboard navigation.
+            let adapter = DirectionalNavigationAdapter(pointerPolicy: .init(types: []))
             adapter.bind(to: controller)
             navigationAdapter = adapter
             var entries: [TOCEntry] = []
@@ -228,7 +237,12 @@ final class EPUBReaderModel: ObservableObject, EPUBNavigatorDelegate {
     }
 
     func navigator(_ navigator: VisualNavigator, didTapAt point: CGPoint) {
-        showsControls.toggle()
+        navigator.view.handleReaderTap(at: point, menu: { showsControls.toggle() }) { direction in
+            Task {
+                if direction < 0 { _ = await navigator.goBackward() }
+                else { _ = await navigator.goForward() }
+            }
+        }
     }
 
     func clearError() { errorMessage = nil }
@@ -278,32 +292,43 @@ struct EPUBReaderView: View {
                                                          restoresSavedLocation: restoresSavedLocation))
     }
 
+    private var pageTheme: ReadiumNavigator.Theme {
+        if theme == "sepia" { return .sepia }
+        if theme == "dark" || (theme == "system" && colorScheme == .dark) { return .dark }
+        return .light
+    }
+
+    private var pageColor: SwiftUI.Color { SwiftUI.Color(uiColor: pageTheme.backgroundColor.uiColor) }
+    private var pageInk: SwiftUI.Color { SwiftUI.Color(uiColor: pageTheme.contentColor.uiColor) }
+
     private var preferences: EPUBPreferences {
-        EPUBPreferences(fontSize: fontScale, publisherStyles: publisherStyles, scroll: scroll,
-                        theme: theme == "sepia" ? .sepia : (theme == "dark" || (theme == "system" && colorScheme == .dark) ? .dark : .light))
+        EPUBPreferences(fontSize: fontScale, publisherStyles: publisherStyles, scroll: scroll, theme: pageTheme)
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            if model.showsControls { topBar }
-            Group {
-                if let navigator = model.navigator {
-                    EPUBNavigatorHost(navigator: navigator)
-                } else if let error = model.errorMessage {
-                    VStack(spacing: 16) {
-                        Text("无法打开 EPUB").font(.headline)
-                        Text(error).font(.footnote).foregroundStyle(.secondary)
-                        Button("重试") { Task { await model.open(preferences: preferences) } }
-                        Button("返回书架") { dismiss() }
-                    }.padding()
-                } else {
-                    ProgressView("正在打开 EPUB…")
-                }
+        Group {
+            if let navigator = model.navigator {
+                EPUBNavigatorHost(navigator: navigator)
+            } else if let error = model.errorMessage {
+                VStack(spacing: 16) {
+                    Text("无法打开 EPUB").font(.headline)
+                    Text(error).font(.footnote).foregroundStyle(.secondary)
+                    Button("重试") { Task { await model.open(preferences: preferences) } }
+                    Button("返回书架") { dismiss() }
+                }.padding()
+            } else {
+                RagdollLoading("正在打开 EPUB…", width: 72, axis: .vertical)
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(pageColor, ignoresSafeAreaEdges: .bottom)
+        .overlay(alignment: .top) {
+            if model.showsControls { topBar }
+        }
+        .overlay(alignment: .bottom) {
             if model.showsControls, model.navigator != nil { bottomBar }
         }
-        .background(Color(uiColor: .systemBackground))
+        .readerPresentationColorScheme(theme == "system" ? nil : (pageTheme == .dark ? .dark : .light))
         .navigationBarHidden(true)
         .readingTabBarHidden()
         .modifier(ReaderMenuBackGesture(menuVisible: model.showsControls) {
@@ -345,7 +370,11 @@ struct EPUBReaderView: View {
                     Task { await model.go(to: link) }
                 }
         }
-        .sheet(isPresented: $showsSettings) { settingsSheet }
+        .sheet(isPresented: $showsSettings) {
+            settingsSheet
+                .readingPresentationDetents([.medium, .large])
+                .readingPresentationDragIndicator()
+        }
         .sheet(isPresented: $showsBookmarks) { bookmarksSheet }
         .alert("EPUB 阅读", isPresented: Binding(get: { model.navigator != nil && model.errorMessage != nil }, set: { if !$0 { model.clearError() } })) {
             Button("好") { model.clearError() }
@@ -353,15 +382,16 @@ struct EPUBReaderView: View {
     }
 
     private var topBar: some View {
-        HStack(spacing: 16) {
-            Button { saveProgress(); dismiss() } label: { Image(systemName: "chevron.left") }
-                .accessibilityLabel("返回书架")
+        HStack(spacing: 4) {
+            pageButton("chevron.backward", label: "返回书架") { saveProgress(); dismiss() }
             VStack(alignment: .leading, spacing: 2) {
-                Text(model.book.name).font(.subheadline.weight(.semibold)).lineLimit(1)
-                Text(model.currentChapter?.title ?? model.location?.title ?? "EPUB")
-                    .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                Text(model.book.name).font(.headline).lineLimit(1)
+                if let title = model.currentChapter?.title ?? model.location?.title, !title.isEmpty {
+                    Text(title).font(.caption).foregroundStyle(pageInk.opacity(0.7)).lineLimit(1)
+                }
             }
-            Spacer(minLength: 0)
+            .accessibilityElement(children: .combine)
+            .frame(maxWidth: .infinity, alignment: .leading)
             Menu {
                 Button("书籍信息", systemImage: "info.circle") { showsBookInfo = true }
                 Button("添加书签", systemImage: "bookmark") {
@@ -378,77 +408,143 @@ struct EPUBReaderView: View {
                     saveTask?.cancel()
                     onReadText(model.currentChapter?.index ?? model.initialIndex)
                 }
-            } label: { Image(systemName: "ellipsis.circle").font(.title3) }
+            } label: {
+                Image(systemName: "ellipsis")
+                    .frame(width: 44, height: 44)
+                    .contentShape(Rectangle())
+            }
             .accessibilityLabel("EPUB 更多")
-        }.padding(.horizontal, 18).padding(.vertical, 12)
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 3)
+        .foregroundStyle(pageInk)
+        .background(pageColor)
+        .overlay(alignment: .bottom) { Rectangle().fill(pageInk.opacity(0.1)).frame(height: 0.5) }
+    }
+
+    private func pageButton(_ symbol: String, label: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.body.weight(.medium))
+                .frame(width: 44, height: 44)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(label)
     }
 
     private var bottomBar: some View {
-        VStack(spacing: 10) {
-            HStack {
+        VStack(spacing: 0) {
+            HStack(spacing: 6) {
+                pageButton("chevron.left", label: "上一页") { Task { _ = await model.navigator?.goBackward() } }
                 Slider(value: $sliderProgress, in: 0...1) { editing in
                     isScrubbing = editing
                     if !editing {
                         let target = sliderProgress
                         Task { await model.go(toProgress: target) }
                     }
-                }.accessibilityLabel("阅读进度")
-                Text("\(Int(sliderProgress * 100))%")
-                    .font(.caption.monospacedDigit()).frame(width: 42)
+                }
+                .tint(pageInk)
+                .accessibilityLabel("阅读进度")
+                Text(sliderProgress, format: .percent.precision(.fractionLength(0)))
+                    .font(.footnote.monospacedDigit())
+                    .fixedSize()
+                pageButton("chevron.right", label: "下一页") { Task { _ = await model.navigator?.goForward() } }
             }
-            .frame(minHeight: 44)
-            HStack {
-                Button { Task { _ = await model.navigator?.goBackward() } } label: { Image(systemName: "chevron.left") }
-                    .accessibilityLabel("上一页")
-                Spacer()
-                Button("目录", systemImage: "list.bullet") { showsTOC = true }
-                Spacer()
-                Button("排版", systemImage: "textformat.size") { showsSettings = true }
-                Spacer()
-                Button { Task { _ = await model.navigator?.goForward() } } label: { Image(systemName: "chevron.right") }
-                    .accessibilityLabel("下一页")
-            }.font(.subheadline)
-        }.padding(.horizontal, 20).padding(.vertical, 12)
+            HStack(spacing: 4) {
+                readerAction("目录", icon: "list.bullet") { showsTOC = true }
+                readerAction("书签", icon: "bookmark") { showsBookmarks = true }
+                readerAction("排版", icon: "textformat.size") {
+                    showsSettings = true
+                }
+            }
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .foregroundStyle(pageInk)
+        .background(pageColor)
+        .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 20, style: .continuous).strokeBorder(pageInk.opacity(0.16))
+        }
+        .shadow(color: .black.opacity(0.09), radius: 8, y: 2)
+        .environment(\.colorScheme, pageTheme == .dark ? .dark : .light)
+        .frame(maxWidth: 560)
+        .padding(.horizontal, 12)
+        .padding(.bottom, 4)
+    }
+
+    private func readerAction(_ label: String, icon: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Label(label, systemImage: icon)
+                .font(.subheadline.weight(.medium))
+                .frame(maxWidth: .infinity, minHeight: 44)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(label)
     }
 
     private var tocSheet: some View {
-        ReadingNavigationStack {
-            List(model.visibleTableOfContents(collapsing: collapsedTOCEntries)) { entry in
-                let title = entry.link.title ?? "未命名章节"
-                let collapsed = collapsedTOCEntries.contains(entry.id)
-                let hasChildren = !entry.link.children.isEmpty
-                HStack(spacing: 4) {
-                    Button {
-                        if hasChildren && entry.link.href == "#" {
-                            toggleTOCEntry(entry.id)
-                        } else {
-                            showsTOC = false
-                            Task { await model.go(to: entry.link) }
-                        }
-                    } label: {
-                        Text(title)
-                            .fontWeight(hasChildren ? .semibold : .regular)
-                            .foregroundStyle(.primary)
+        let currentID = model.currentTOCEntryID
+        return ReadingNavigationStack {
+            ScrollViewReader { proxy in
+                List(model.visibleTableOfContents(collapsing: collapsedTOCEntries)) { entry in
+                    let title = entry.link.title ?? "未命名章节"
+                    let collapsed = collapsedTOCEntries.contains(entry.id)
+                    let hasChildren = !entry.link.children.isEmpty
+                    HStack(spacing: 4) {
+                        Button {
+                            if hasChildren && entry.link.href == "#" {
+                                toggleTOCEntry(entry.id)
+                            } else {
+                                showsTOC = false
+                                Task { await model.go(to: entry.link) }
+                            }
+                        } label: {
+                            HStack(spacing: 10) {
+                                if entry.id == currentID {
+                                    Image(systemName: "book.fill")
+                                        .font(.footnote)
+                                        .accessibilityHidden(true)
+                                }
+                                Text(title)
+                                    .font(hasChildren || entry.id == currentID ? .headline : .body)
+                                    .multilineTextAlignment(.leading)
+                            }
+                            .foregroundStyle(ReadingTheme.ink)
                             .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
                             .contentShape(Rectangle())
-                    }
-                    if hasChildren {
-                        Button {
-                            toggleTOCEntry(entry.id)
-                        } label: {
-                            Image(systemName: collapsed ? "chevron.right" : "chevron.down")
-                                .font(.caption.weight(.semibold))
-                                .frame(width: 44, height: 44)
-                                .contentShape(Rectangle())
                         }
-                        .accessibilityLabel("\(collapsed ? "展开" : "折叠")\(title)")
+                        .accessibilityAddTraits(entry.id == currentID ? .isSelected : [])
+                        if hasChildren {
+                            Button {
+                                toggleTOCEntry(entry.id)
+                            } label: {
+                                Image(systemName: collapsed ? "chevron.right" : "chevron.down")
+                                    .font(.caption.weight(.semibold))
+                                    .frame(width: 44, height: 44)
+                                    .contentShape(Rectangle())
+                            }
+                            .accessibilityLabel("\(collapsed ? "展开" : "折叠")\(title)")
+                        }
                     }
+                    .buttonStyle(.borderless)
+                    .padding(.leading, CGFloat(min(entry.depth, 5)) * 12)
+                    .listRowBackground(entry.id == currentID ? ReadingTheme.accentSoft : ReadingTheme.canvas)
+                    .id(entry.id)
                 }
-                .buttonStyle(.borderless)
-                .padding(.leading, CGFloat(min(entry.depth, 8)) * 16)
+                .listStyle(.plain)
+                .readingScrollContentBackgroundHidden()
+                .background(ReadingTheme.canvas)
+                .onAppear { if let currentID { proxy.scrollTo(currentID, anchor: .center) } }
             }
-            .navigationTitle("目录").navigationBarTitleDisplayMode(.inline)
-            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("完成") { showsTOC = false } } }
+            .readingSheetTitle("目录")
+            .toolbar {
+                ReadingSheetActions {
+                    ReadingSheetCloseButton { showsTOC = false }
+                }
+            }
         }
     }
 
@@ -458,49 +554,122 @@ struct EPUBReaderView: View {
 
     private var settingsSheet: some View {
         ReadingNavigationStack {
-            Form {
-                Section("阅读方式") {
-                    EPUBDefaultModePicker(selection: $defaultMode)
-                    Toggle("滚动阅读", isOn: $scroll)
-                    Toggle("使用原书排版", isOn: $publisherStyles)
-                }
-                Section("字号") {
-                    Slider(value: $fontScale, in: 0.7...2.0, step: 0.1)
-                    Text("\(Int(fontScale * 100))%")
-                }
-                Section("背景") {
-                    Picker("主题", selection: $theme) {
-                        Text("跟随系统").tag("system")
-                        Text("白色").tag("light")
-                        Text("纸色").tag("sepia")
-                        Text("夜间").tag("dark")
+            ScrollView {
+                VStack(alignment: .leading, spacing: 12) {
+                    VStack(alignment: .leading, spacing: 10) {
+                        ReadingLabeledContent("字号") {
+                            Text(fontScale, format: .percent.precision(.fractionLength(0)))
+                                .monospacedDigit().foregroundStyle(.secondary)
+                        }
+                        Slider(value: $fontScale, in: 0.7...2.0, step: 0.1)
+                            .tint(ReadingTheme.accent)
+                            .accessibilityLabel("字号")
+                            .accessibilityValue(fontScale.formatted(.percent.precision(.fractionLength(0))))
                     }
+                    .padding(14)
+                    .readingSheetGroup()
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("背景").font(.headline)
+                        LazyVGrid(columns: [GridItem(.adaptive(minimum: 66), spacing: 8)], spacing: 8) {
+                            themeButton("跟随系统", key: "system", appearance: nil)
+                            themeButton("白色", key: "light", appearance: .light)
+                            themeButton("纸色", key: "sepia", appearance: .sepia)
+                            themeButton("夜间", key: "dark", appearance: .dark)
+                        }
+                    }
+                    .padding(14)
+                    .readingSheetGroup()
+                    VStack(alignment: .leading, spacing: 10) {
+                        Toggle("滚动阅读", isOn: $scroll)
+                        Toggle("使用原书排版", isOn: $publisherStyles)
+                        HStack {
+                            Text("默认 EPUB 阅读模式").accessibilityHidden(true)
+                            Spacer()
+                            EPUBDefaultModePicker(selection: $defaultMode)
+                        }
+                    }
+                    .padding(14)
+                    .readingSheetGroup()
+                }
+                .frame(maxWidth: 540)
+                .padding(16)
+                .frame(maxWidth: .infinity)
+            }
+            .readingSheetSurface()
+            .readingSheetTitle("EPUB 排版")
+            .toolbar {
+                ReadingSheetActions {
+                    ReadingSheetCloseButton { showsSettings = false }
                 }
             }
-            .navigationTitle("EPUB 排版").navigationBarTitleDisplayMode(.inline)
-            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("完成") { showsSettings = false } } }
         }
     }
 
+    private func themeButton(_ title: String, key: String, appearance: ReadiumNavigator.Theme?) -> some View {
+        Button {
+            theme = key
+        } label: {
+            VStack(spacing: 5) {
+                ZStack {
+                    Circle()
+                        .fill(appearance.map { SwiftUI.Color(uiColor: $0.backgroundColor.uiColor) } ?? ReadingTheme.surface)
+                    Circle().strokeBorder(ReadingTheme.ink.opacity(0.26))
+                    if let appearance {
+                        if theme == key {
+                            Image(systemName: "checkmark")
+                                .foregroundStyle(SwiftUI.Color(uiColor: appearance.contentColor.uiColor))
+                        }
+                    } else {
+                        Image(systemName: "circle.lefthalf.filled")
+                    }
+                }
+                .frame(width: 30, height: 30)
+                Text(title).font(.caption)
+            }
+            .padding(.vertical, 6)
+            .frame(maxWidth: .infinity)
+            .background(theme == key ? ReadingTheme.accentSoft : .clear, in: RoundedRectangle(cornerRadius: 12))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(title)
+        .accessibilityAddTraits(theme == key ? .isSelected : [])
+    }
+
     private var bookmarksSheet: some View {
-        ReadingNavigationStack {
+        let bookmarks = activity.bookmarks(for: model.book)
+        return ReadingNavigationStack {
             List {
-                if activity.bookmarks(for: model.book).isEmpty { Text("还没有书签").foregroundStyle(.secondary) }
-                ForEach(activity.bookmarks(for: model.book)) { bookmark in
+                if bookmarks.isEmpty {
+                    ReadingUnavailableView("还没有书签", systemImage: "bookmark", description: Text("在阅读页的更多菜单中添加书签。"))
+                        .listRowSeparator(.hidden)
+                        .listRowBackground(ReadingTheme.canvas)
+                }
+                ForEach(bookmarks) { bookmark in
                     Button {
                         showsBookmarks = false
                         Task { await model.go(to: bookmark) }
                     } label: {
                         VStack(alignment: .leading, spacing: 4) {
-                            Text(bookmark.chapterName)
-                            Text(bookmark.bookText).font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                            Text(bookmark.chapterName).font(.headline)
+                            if !bookmark.bookText.isEmpty {
+                                Text(bookmark.bookText).font(.subheadline).foregroundStyle(.secondary).lineLimit(2)
+                            }
                         }
                     }
+                    .listRowBackground(ReadingTheme.canvas)
                     .swipeActions { Button("删除", role: .destructive) { Task { await activity.removeBookmark(bookmark) } } }
                 }
             }
-            .navigationTitle("书签").navigationBarTitleDisplayMode(.inline)
-            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("完成") { showsBookmarks = false } } }
+            .listStyle(.plain)
+            .readingScrollContentBackgroundHidden()
+            .background(ReadingTheme.canvas)
+            .readingSheetTitle("书签")
+            .toolbar {
+                ReadingSheetActions {
+                    ReadingSheetCloseButton { showsBookmarks = false }
+                }
+            }
         }
     }
 

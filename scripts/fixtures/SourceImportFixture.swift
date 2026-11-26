@@ -26,6 +26,20 @@ final class FixtureAppDelegate: UIResponder, UIApplicationDelegate {
                 try? writeFixture(data, to: documents.appendingPathComponent(name))
             }
         }
+        var backup: [String: Any] = [
+            "type": "com.epiboly.legado.backup", "version": 1, "createdAt": "2026-01-01T00:00:00Z",
+            "shelf": ["books": [], "groups": [], "chapters": [:], "localFiles": [:]] as [String: Any],
+            "websiteVariables": [:], "preferences": [:], "fonts": [:],
+            "settings": ["userAgent": "", "proxy": "", "hosts": "", "timeoutSeconds": 0, "concurrentSources": 8,
+                         "chapterCacheMB": 128, "prefetchChapters": 2, "recordLog": false,
+                         "ignoreCertificateErrors": false] as [String: Any]
+        ]
+        for key in ["bookSources", "websiteSources", "bookmarks", "readingHistory", "websiteFavorites",
+                    "websiteHistory", "searchHistory", "sourceVariables", "speechEngines", "keyboardAssists",
+                    "subscriptions", "replaceRules"] { backup[key] = [Any]() }
+        if let data = try? JSONSerialization.data(withJSONObject: backup) {
+            try? writeFixture(data, to: documents.appendingPathComponent("Reader-Backup.JSON"))
+        }
         for name in ["TXT-Book.txt", "TXT-Uppercase.TXT"] {
             try? writeFixture(Data("第一章 开始\n这是用于验证本地 TXT 导入的小说正文。\n第二章 后续\n正文继续。".utf8),
                               to: documents.appendingPathComponent(name))

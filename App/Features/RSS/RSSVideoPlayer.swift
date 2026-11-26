@@ -146,6 +146,38 @@ struct RSSVideoPlayer: UIViewControllerRepresentable {
         private let miniPlay = UIButton()
         private let seekSlider = SeekSlider()
 
+        override func setupUIComponents() {
+            loadingIndector = RagdollImageView(width: 56)
+            super.setupUIComponents()
+        }
+
+        override func customizeUIComponents() {
+            super.customizeUIComponents()
+            // KSPlayer installs a fixed width of 25 pt on its back button.
+            backButton.constraints.first { $0.firstAttribute == .width && $0.secondItem == nil }?.constant = 44
+            backButton.setImage(nil, for: .normal)
+            backButton.titleLabel?.font = .systemFont(ofSize: 16, weight: .semibold)
+            backButton.setTitleColor(.white, for: .normal)
+            backButton.setTitleColor(.white.withAlphaComponent(0.6), for: .highlighted)
+            navigationBar.setCustomSpacing(16, after: backButton)
+            let divider = UIView()
+            divider.backgroundColor = .white.withAlphaComponent(0.4)
+            divider.isUserInteractionEnabled = false
+            divider.translatesAutoresizingMaskIntoConstraints = false
+            navigationBar.addSubview(divider)
+            NSLayoutConstraint.activate([
+                divider.leadingAnchor.constraint(equalTo: backButton.trailingAnchor, constant: 4),
+                divider.centerYAnchor.constraint(equalTo: backButton.centerYAnchor),
+                divider.widthAnchor.constraint(equalToConstant: 1),
+                divider.heightAnchor.constraint(equalToConstant: 14),
+            ])
+
+            for button in [toolBar.definitionButton, toolBar.audioSwitchButton, toolBar.videoSwitchButton,
+                           toolBar.srtButton, toolBar.pipButton] {
+                button.removeFromSuperview()
+            }
+        }
+
         func installSeekSlider() {
             let original = toolBar.timeSlider
             original.isHidden = true
@@ -274,6 +306,10 @@ struct RSSVideoPlayer: UIViewControllerRepresentable {
 
             addSubview(miniControls)
             miniControls.addGestureRecognizer(UIPanGestureRecognizer(target: self, action: #selector(moveMini(_:))))
+            let restoreTap = UITapGestureRecognizer(target: self, action: #selector(restoreFromMini))
+            restoreTap.numberOfTapsRequired = 2
+            restoreTap.delegate = self
+            miniControls.addGestureRecognizer(restoreTap)
             miniControls.frame = bounds
             miniControls.autoresizingMask = [.flexibleWidth, .flexibleHeight]
             addMiniButton(UIButton(), symbol: "xmark", label: "关闭视频", top: true, left: true) { [weak self] in
@@ -283,7 +319,7 @@ struct RSSVideoPlayer: UIViewControllerRepresentable {
                 self?.toolBar.playButton.sendActions(for: .primaryActionTriggered)
             }
             addMiniButton(UIButton(), symbol: "arrow.up.left.and.arrow.down.right", label: "还原为顶部半屏", top: false, left: false) { [weak self] in
-                self?.setMini?(false)
+                self?.restoreFromMini()
             }
             refreshControls()
         }
@@ -367,6 +403,10 @@ struct RSSVideoPlayer: UIViewControllerRepresentable {
             }
         }
 
+        @objc private func restoreFromMini() {
+            setMini?(false)
+        }
+
         @objc private func moveMini(_ pan: UIPanGestureRecognizer) {
             guard let window, [.began, .changed, .ended].contains(pan.state) else { return }
             let delta = pan.translation(in: window)
@@ -401,10 +441,9 @@ struct RSSVideoPlayer: UIViewControllerRepresentable {
             controllerView.isHidden = compact
             miniControls.isHidden = !compact
             shrink.isHidden = full
-            toolBar.pipButton.isHidden = true
             landscapeButton.isHidden = false
             landscapeButton.accessibilityLabel = full ? "退出全屏" : "全屏"
-            backButton.setImage(UIImage(systemName: full ? "chevron.left" : "xmark"), for: .normal)
+            backButton.setTitle(full ? "返回" : "关闭", for: .normal)
             backButton.accessibilityLabel = full ? "退出全屏播放" : "关闭视频"
             toolBar.playbackRateButton.isHidden = false
         }
@@ -437,3 +476,5 @@ struct RSSVideoPlayer: UIViewControllerRepresentable {
         }
     }
 }
+
+extension RagdollImageView: @preconcurrency LoadingIndector {}

@@ -18,58 +18,97 @@ struct AboutView: View {
     var body: some View {
         List {
             Section {
-                VStack(spacing: 12) {
-                    Image("BrandIcon").resizable().scaledToFit()
-                        .frame(width: 80, height: 80)
-                        .clipShape(RoundedRectangle(cornerRadius: 18))
-                    Text(AppIdentity.name).font(.title2.weight(.semibold))
-                    Text("读小说、听书、整理网页").font(.subheadline).foregroundStyle(.secondary)
-                    Text("兼容阅读书源的 iOS 阅读应用")
-                        .font(.footnote).foregroundStyle(.secondary)
-                }.frame(maxWidth: .infinity).padding(.vertical, 16)
-                ReadingLabeledContent("版本", value: version)
-                ReadingLabeledContent("构建", value: build)
+                HStack(spacing: 16) {
+                    Image("BrandIcon")
+                        .resizable().scaledToFit().frame(width: 68, height: 68)
+                        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                        .accessibilityHidden(true)
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text(AppIdentity.name).font(.title.bold())
+                        Text("读小说、听书、整理网页").font(.subheadline)
+                    }
+                }
+                .foregroundStyle(ReadingTheme.onAccent)
+                .padding(20)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .listRowInsets(EdgeInsets())
+                .listRowBackground(ReadingTheme.emphasisSurface)
+            } footer: {
+                Text("兼容阅读书源的 iOS 阅读应用")
+            }
+            Section("版本信息") {
+                ReadingLabeledContent("版本", value: "\(version)（构建 \(build)）")
                 ReadingLabeledContent("系统", value: "iOS \(UIDevice.current.systemVersion)")
                 ReadingShareLink(item: diagnosticSummary) { Label("分享版本信息", systemImage: "square.and.arrow.up") }
             }
+            .listRowBackground(ReadingTheme.surface)
             Section {
-                Link(destination: AppIdentity.authorURL) {
-                    Label("个人主页 · \(AppIdentity.author)", systemImage: "person.crop.circle")
-                }
-                Link(destination: AppIdentity.projectURL) {
-                    Label("项目源码 · \(AppIdentity.author)/legado-ios", systemImage: "chevron.left.forwardslash.chevron.right")
-                }
+                projectLink("个人主页", detail: AppIdentity.author, url: AppIdentity.authorURL)
+                projectLink("项目源码", detail: "legado-ios", url: AppIdentity.projectURL)
                 ReadingShareLink(item: AppIdentity.projectURL) {
                     Label("分享项目地址", systemImage: "square.and.arrow.up")
                 }
-                ReadingLabeledContent("许可证", value: "GPL-3.0")
-                ReadingLabeledContent("安装方式", value: "IPA 自行签名")
+                NavigationLink { OpenSourceLicensesView() } label: {
+                    ReadingLabeledContent("开源许可", value: "GPL-3.0")
+                }
+                .accessibilityLabel("开源许可")
             } header: {
                 Text("项目与开发者")
             } footer: {
                 Text("IPA 可从项目仓库的 release 目录获取，并自行签名安装。")
             }
-            Section("开源许可") {
-                NavigationLink("开源许可") { OpenSourceLicensesView() }
+            .listRowBackground(ReadingTheme.surface)
+            Section {
+                NavigationLink("免责协议") { policyPage("免责协议") { disclaimer } }
+                NavigationLink("数据与隐私") { policyPage("数据与隐私") { privacy } }
             }
-            Section("免责协议") {
-                Text("\(AppIdentity.name)不提供、内置或分发网络书源，也不提供在线书库。书源由用户自行从网络公开分享获取，或自行编写后导入；在线书籍及订阅内容由对应的第三方网站提供。")
-                Text("书籍正文、封面、简介等内容的版权归原作者或合法权利人所有。书源可被导入、内容可被访问，不代表已获得版权授权；请仅在获得授权或法律允许的范围内使用，并支持正版阅读。")
-                Text("第三方书源及其内容不受本应用控制，可能因网站调整、网络环境等原因失效。本应用不保证第三方内容的准确性、完整性、安全性或书源的持续可用性，请自行核实来源。")
-                Text("用户应对自行导入的书源及使用行为负责，遵守适用法律法规和来源网站的使用规则，不得利用本应用侵犯他人权益、传播违法内容或未经授权复制、分发作品。")
-                Text("如发现涉嫌侵权内容，请停止访问、删除相关书源及本地缓存，并向内容来源网站反馈。本协议不免除任何一方依法应承担的责任。")
-            }
-            .font(.footnote)
-            .lineSpacing(4)
-            .textSelection(.enabled)
-            Section("数据与隐私") {
-                Text("书架、阅读进度、书源和诊断日志保存在本机。导入书源、阅读在线内容和刷新订阅时，会连接相应来源的网站。")
-                Text("应用不会自动上传诊断日志；可在日志页面手动导出。")
-                Text("应用不提供内置网络书源或在线书库。请使用你有权访问的内容与书源。")
-            }.font(.footnote)
+            .listRowBackground(ReadingTheme.surface)
         }
+        .listStyle(.insetGrouped)
+        .readingListTopMargin(12)
+        .readingScrollContentBackgroundHidden()
+        .background(ReadingTheme.canvas)
         .navigationTitle("关于")
         .navigationBarTitleDisplayMode(.inline)
+    }
+
+    private func projectLink(_ title: String, detail: String, url: URL) -> some View {
+        Link(destination: url) {
+            ReadingLabeledContent(title) {
+                HStack(spacing: 5) {
+                    Text(detail)
+                    Image(systemName: "arrow.up.right").font(.caption).accessibilityHidden(true)
+                }
+            }
+        }
+    }
+
+    private func policyPage(_ title: String, @ViewBuilder content: () -> some View) -> some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16, content: content)
+                .frame(maxWidth: 640, alignment: .leading)
+                .padding(20)
+        }
+        .frame(maxWidth: .infinity)
+        .lineSpacing(5)
+        .textSelection(.enabled)
+        .background(ReadingTheme.canvas)
+        .navigationTitle(title)
+        .navigationBarTitleDisplayMode(.inline)
+    }
+
+    @ViewBuilder private var disclaimer: some View {
+        Text("\(AppIdentity.name)不提供、内置或分发网络书源，也不提供在线书库。书源由用户自行从网络公开分享获取，或自行编写后导入；在线书籍及订阅内容由对应的第三方网站提供。")
+        Text("书籍正文、封面、简介等内容的版权归原作者或合法权利人所有。书源可被导入、内容可被访问，不代表已获得版权授权；请仅在获得授权或法律允许的范围内使用，并支持正版阅读。")
+        Text("第三方书源及其内容不受本应用控制，可能因网站调整、网络环境等原因失效。本应用不保证第三方内容的准确性、完整性、安全性或书源的持续可用性，请自行核实来源。")
+        Text("用户应对自行导入的书源及使用行为负责，遵守适用法律法规和来源网站的使用规则，不得利用本应用侵犯他人权益、传播违法内容或未经授权复制、分发作品。")
+        Text("如发现涉嫌侵权内容，请停止访问、删除相关书源及本地缓存，并向内容来源网站反馈。本协议不免除任何一方依法应承担的责任。")
+    }
+
+    @ViewBuilder private var privacy: some View {
+        Text("书架、阅读进度、书源和诊断日志保存在本机。导入书源、阅读在线内容和刷新订阅时，会连接相应来源的网站。")
+        Text("应用不会自动上传诊断日志；可在日志页面手动导出。")
+        Text("应用不提供内置网络书源或在线书库。请使用你有权访问的内容与书源。")
     }
 }
 

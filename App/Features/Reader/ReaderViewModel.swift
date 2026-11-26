@@ -386,9 +386,7 @@ final class ReaderViewModel: ObservableObject {
     var canGoNext: Bool { navigationIndex(direction: 1) != nil }
     var hasPreviousWindow: Bool { previousLoadedIndex != nil }
     var hasContinuationWindow: Bool { continuationLoadedIndex != nil }
-    var canEditContent: Bool { source != nil }
     var usesReplaceRules: Bool { book.readConfig?.useReplaceRule ?? true }
-    var usesParagraphResegmentation: Bool { book.readConfig?.reSegment ?? false }
     var currentChapterError: String? {
         guard hasLoadedCurrentChapter, !isLoading,
               currentChapter?.isVolume != true else { return nil }
@@ -705,49 +703,10 @@ final class ReaderViewModel: ObservableObject {
         schedulePreload()
     }
 
-    func saveEditedContent(_ value: String) async throws {
-        guard let chapter = currentChapter, source != nil else { return }
-        preparedChapters.removeValue(forKey: chapter)
-        try await contentCoordinator.saveEditedContent(book: book, chapter: chapter, title: title, content: value)
-        content = value
-        loadedFromCache = true
-        if let slot = scrollChapters.firstIndex(where: { $0.id == currentIndex }) {
-            scrollChapters[slot] = scrollChapterForCurrentContent()
-        }
-    }
-
-    func nextSpeechContent(rules: [ReplaceRule]) async -> String? {
-        guard let chapter = nextReadableChapter(after: currentIndex) else { return nil }
-        let report: ChapterContentReport
-        if let source {
-            let job = ChapterCacheJob(chapter: chapter, nextChapterURL: nextReadableChapter(after: chapter.index)?.url)
-            report = await upcomingContent(for: job, source: source, priority: .userInitiated).report
-        } else {
-            do {
-                report = try await Task.detached { [localService, book, chapter] in
-                    try localService.loadContent(book: book, chapter: chapter)
-                }.value
-            } catch {
-                return nil
-            }
-        }
-        let value = await Self.process(report, book: book, chapter: chapter, rules: usesReplaceRules ? rules : []).content
-        return value.isEmpty ? nil : value
-    }
-
     @discardableResult
     func toggleReplaceRules(position: Int? = nil) -> Book {
         var config = book.readConfig ?? BookReadConfig()
         config.useReplaceRule = !usesReplaceRules
-        book.readConfig = config
-        invalidateProcessedContent(position: position)
-        return book
-    }
-
-    @discardableResult
-    func toggleParagraphResegmentation(position: Int? = nil) -> Book {
-        var config = book.readConfig ?? BookReadConfig()
-        config.reSegment = !usesParagraphResegmentation
         book.readConfig = config
         invalidateProcessedContent(position: position)
         return book
@@ -773,14 +732,6 @@ final class ReaderViewModel: ObservableObject {
     func useGlobalPageAnimation() -> Book {
         var config = book.readConfig ?? BookReadConfig()
         config.pageAnim = -1
-        book.readConfig = config
-        return book
-    }
-
-    @discardableResult
-    func setTTSEngine(_ value: String?) -> Book {
-        var config = book.readConfig ?? BookReadConfig()
-        config.ttsEngine = value
         book.readConfig = config
         return book
     }
@@ -886,10 +837,6 @@ final class ReaderViewModel: ObservableObject {
         continuationTitle = ""
         continuationContent = ""
         isContinuationWindowReady = false
-    }
-
-    func paragraphID(at position: Int) -> Int? {
-        paragraphs.last(where: { $0.id <= position })?.id ?? paragraphs.first?.id
     }
 
     private func navigationIndex(direction: Int) -> Int? {

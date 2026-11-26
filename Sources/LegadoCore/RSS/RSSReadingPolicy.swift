@@ -1,4 +1,5 @@
 import Foundation
+import SwiftSoup
 
 public enum RSSReadingMode: Equatable, Sendable {
     case html(content: String, baseURL: String?)
@@ -44,6 +45,36 @@ public struct RSSHTMLProcessor: Sendable {
 
     public func contentHTML(_ content: String, style: String?) -> String {
         injectStyle(into: content, style: style?.trimmed.nilIfEmpty ?? Self.defaultStyle)
+    }
+
+    /// Extracted articles often contain only a few paragraphs without a mobile viewport.
+    public func articleHTML(_ content: String, style: String?) -> String {
+        let html = contentHTML(content, style: style)
+        do {
+            let document = try SwiftSoup.parse(html)
+            guard let head = document.head() else { return html }
+            if try document.select("meta[name=viewport]").isEmpty() {
+                try head.prependElement("meta").attr("name", "viewport").attr("content", "width=device-width, initial-scale=1")
+            }
+            if style?.trimmed.nilIfEmpty == nil {
+                // Put reading defaults first so the article's own CSS can override them.
+                try head.prepend("""
+                <style>
+                :where(html){max-width:44rem;margin-inline:auto;}
+                :where(body){box-sizing:border-box;margin:0;padding:1.25rem clamp(1rem,5vw,2rem) 2rem;
+                    font:-apple-system-body;line-height:1.75;overflow-wrap:break-word;}
+                :where(p){margin:0 0 1em;}
+                :where(h1,h2,h3){line-height:1.35;margin:1.3em 0 .55em;}
+                :where(blockquote){margin:1em 0;padding-inline-start:1em;border-inline-start:.18em solid #919198;}
+                :where(pre){max-width:100%;overflow-x:auto;}
+                </style>
+                """)
+            }
+            document.outputSettings().prettyPrint(pretty: false)
+            return try document.outerHtml()
+        } catch {
+            return html
+        }
     }
 
     public func startHTML(_ content: String, source: RssSource) -> String {

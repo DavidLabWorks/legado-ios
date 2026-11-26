@@ -3,10 +3,8 @@ import Testing
 @testable import LegadoCore
 
 struct ContentSanitizerTests {
-    @Test(arguments: [false, true]) func paragraphResegmentationPreservesImageMarkupAndSignedURL(enabled: Bool) {
-        var book = Book(bookUrl: "book", name: "书")
-        book.readConfig = BookReadConfig()
-        book.readConfig?.reSegment = enabled
+    @Test func paragraphCleanupPreservesImageMarkupAndSignedURL() {
+        let book = Book(bookUrl: "book", name: "书")
         let chapter = BookChapter(url: "chapter", title: "第一章", bookUrl: book.bookUrl, index: 0)
         let image = #"<img src="https://images.example.test/formula~large.png?token=one&amp;size=2">"#
         let input = "图片前正文。\n" + image + "\n图片后正文。"
@@ -21,9 +19,7 @@ struct ContentSanitizerTests {
     }
 
     @Test func imageBoundariesKeepMarkupOrderAndFollowingTitleLikeText() {
-        var book = Book(bookUrl: "book", name: "书")
-        book.readConfig = BookReadConfig()
-        book.readConfig?.reSegment = true
+        let book = Book(bookUrl: "book", name: "书")
         let chapter = BookChapter(url: "chapter", title: "第一章", bookUrl: book.bookUrl, index: 0)
         let first = #"<img src="https://images.test/a~small.png">"#
         let second = "<IMG\n src='https://images.test/b?x=1&amp;y=2' alt='x > y'/>"
@@ -39,9 +35,7 @@ struct ContentSanitizerTests {
     }
 
     @Test func explicitContentReplacementStillAppliesAfterImageProtection() {
-        var book = Book(bookUrl: "book", name: "书")
-        book.readConfig = BookReadConfig()
-        book.readConfig?.reSegment = true
+        let book = Book(bookUrl: "book", name: "书")
         let chapter = BookChapter(url: "chapter", title: "第一章", bookUrl: book.bookUrl, index: 0)
         var replace = ReplaceRule(id: 999, name: "用户地址修正", pattern: "~", replacement: "-")
         replace.isRegex = false
@@ -123,7 +117,7 @@ struct ContentSanitizerTests {
         )
 
         #expect(report.title == "第一章 启程")
-        #expect(report.content == "正文第一段\n\n正文第二段")
+        #expect(report.content == "正文第一段\n正文第二段")
         #expect(report.removedDuplicateTitle)
         #expect(report.effectiveRuleIDs == [1, 2])
         #expect(report.diagnostics.isEmpty)

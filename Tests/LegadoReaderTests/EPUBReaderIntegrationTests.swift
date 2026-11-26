@@ -36,6 +36,7 @@ final class EPUBReaderIntegrationTests: XCTestCase {
         let note = try XCTUnwrap(model.tableOfContents.last?.link)
         await model.go(to: note)
         XCTAssertEqual(model.currentChapter?.startFragmentId, "note")
+        XCTAssertEqual(model.currentTOCEntryID, model.tableOfContents.last?.id)
         let locator = try XCTUnwrap(model.location)
         XCTAssertEqual(EPUBReaderModel.path(locator.href.string), "Text/chapter.xhtml")
         var saved = report.book
@@ -52,6 +53,7 @@ final class EPUBReaderIntegrationTests: XCTestCase {
         try await waitForLocation("Text/chapter.xhtml", in: restored)
         XCTAssertEqual(EPUBReaderModel.path(try XCTUnwrap(restored.location).href.string), "Text/chapter.xhtml")
         XCTAssertEqual(restored.currentChapter?.startFragmentId, "note")
+        XCTAssertEqual(restored.currentTOCEntryID, restored.tableOfContents.last?.id)
     }
 
     func testPagingBackFromNestedTOCAnchorUpdatesTextChapter() async throws {
@@ -93,7 +95,7 @@ final class EPUBReaderIntegrationTests: XCTestCase {
             try await Task.sleep(nanoseconds: 100_000_000)
         }
         XCTAssertEqual(model.currentChapter?.startFragmentId, "body")
-
+        XCTAssertEqual(model.currentTOCEntryID, model.tableOfContents[1].id)
     }
 
     private func waitForLocation(_ path: String, in model: EPUBReaderModel) async throws {

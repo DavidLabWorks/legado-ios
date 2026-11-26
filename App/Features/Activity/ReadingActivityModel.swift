@@ -14,7 +14,7 @@ final class ReadingActivityModel: ObservableObject {
     private let service = ReadingActivityService()
     private let deviceID: String
     private var sessions: [String: Date] = [:]
-    private var bookmarkSaveTask: Task<Void, Never>?
+    private var bookmarkSaveTask: Task<Bool, Never>?
     private var bookmarkSaveGeneration = 0
     private var persistedBookmarks: [Bookmark] = []
     private var recordSaveTask: Task<Void, Never>?
@@ -63,7 +63,7 @@ final class ReadingActivityModel: ObservableObject {
     }
 
     func waitForPendingSaves() async {
-        await bookmarkSaveTask?.value
+        _ = await bookmarkSaveTask?.value
         await recordSaveTask?.value
     }
 
@@ -115,14 +115,15 @@ final class ReadingActivityModel: ObservableObject {
         await persistBookmarks(updated)
     }
 
-    func updateBookmark(_ bookmark: Bookmark) async {
+    @discardableResult
+    func updateBookmark(_ bookmark: Bookmark) async -> Bool {
         var updated = bookmarks
         if let index = updated.firstIndex(where: { $0.id == bookmark.id }) {
             updated[index] = bookmark
         } else {
             updated.append(bookmark)
         }
-        await persistBookmarks(updated)
+        return await persistBookmarks(updated)
     }
 
     func beginReading(_ book: Book, now: Date = Date()) {
@@ -175,25 +176,29 @@ final class ReadingActivityModel: ObservableObject {
 
     // Publish each change before suspension, and serialize full-snapshot writes
     // so rapid edits cannot overwrite one another or resurrect deleted history.
-    private func persistBookmarks(_ updated: [Bookmark]) async {
+    @discardableResult
+    private func persistBookmarks(_ updated: [Bookmark]) async -> Bool {
         bookmarks = service.sortedBookmarks(updated)
         bookmarkSaveGeneration &+= 1
         let generation = bookmarkSaveGeneration
         let previous = bookmarkSaveTask
         let save = Task { @MainActor [weak self, repository] in
-            await previous?.value
+            _ = await previous?.value
             do {
                 try await repository.saveBookmarks(updated)
                 self?.persistedBookmarks = updated
+                return true
             } catch {
-                guard let self else { return }
+                guard let self else { return false }
                 if bookmarkSaveGeneration == generation { bookmarks = service.sortedBookmarks(persistedBookmarks) }
                 errorMessage = error.localizedDescription
+                return false
             }
         }
         bookmarkSaveTask = save
-        await save.value
+        let succeeded = await save.value
         if bookmarkSaveGeneration == generation { bookmarkSaveTask = nil }
+        return succeeded
     }
 
     private func persistRecords(_ updated: [ReadRecord], preserveOnFailure: Bool = false) async {

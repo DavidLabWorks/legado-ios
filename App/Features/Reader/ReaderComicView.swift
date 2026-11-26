@@ -15,7 +15,8 @@ struct ReaderComicView: UIViewRepresentable {
     let requestedPosition: Int
     let jumpPosition: Int?
     let onPosition: (Int, Int, Int) -> Void
-    let onTap: () -> Void
+    let onMenuTap: () -> Void
+    let onChapterBoundary: (Int) -> Void
     var onSelectText: ((ReaderTextSelection) -> Void)?
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
@@ -112,7 +113,13 @@ struct ReaderComicView: UIViewRepresentable {
             }
         }
 
-        @objc func tapped() { owner.onTap() }
+        @objc func tapped(_ gesture: UITapGestureRecognizer) {
+            guard let table else { return }
+            table.handleReaderTap(at: gesture.location(in: table), menu: owner.onMenuTap) { direction in
+                restorePosition = nil
+                if !table.turnReaderScreen(direction) { owner.onChapterBoundary(direction) }
+            }
+        }
         func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
             var view = touch.view
             while let current = view {
@@ -139,6 +146,7 @@ struct ReaderComicView: UIViewRepresentable {
             let cell = tableView.dequeueReusableCell(withIdentifier: "comic", for: indexPath) as! ComicCell
             cell.reset()
             cell.backgroundColor = owner.background
+            cell.tintColor = owner.foreground
             cell.caption.textColor = owner.foreground
             cell.caption.font = .systemFont(ofSize: owner.fontSize)
             switch owner.blocks[indexPath.row].content {
@@ -168,7 +176,7 @@ struct ReaderComicView: UIViewRepresentable {
                 updateSize(image, row: row)
                 return
             }
-            cell.spinner.startAnimating()
+            cell.spinner.isHidden = false
             cell.task = Task { [weak self, weak cell] in
                 do {
                     let data = try await ChapterImageLoader().load(address, source: source, book: book, chapter: chapter)
@@ -191,7 +199,8 @@ struct ReaderComicView: UIViewRepresentable {
                     self.updateSize(image, row: row)
                 } catch {
                     guard !Task.isCancelled, let cell else { return }
-                    cell.spinner.stopAnimating()
+                    cell.spinner.isHidden = true
+                    cell.caption.font = .preferredFont(forTextStyle: .subheadline)
                     cell.caption.text = "图片加载失败\n\(error.localizedDescription)"
                     cell.setRetryVisible(true)
                 }
@@ -277,7 +286,7 @@ struct ReaderComicView: UIViewRepresentable {
 private final class ComicCell: UITableViewCell {
     let picture = UIImageView()
     let caption = UILabel()
-    let spinner = UIActivityIndicatorView(style: .medium)
+    let spinner = RagdollImageView(width: 56)
     let retry = UIButton(type: .system)
     var task: Task<Void, Never>?
     var onRetry: (() -> Void)?
@@ -285,11 +294,19 @@ private final class ComicCell: UITableViewCell {
     override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
         super.init(style: style, reuseIdentifier: reuseIdentifier)
         selectionStyle = .none
+        spinner.isHidden = true
+        spinner.accessibilityLabel = "正在加载图片"
+        spinner.isAccessibilityElement = true
         picture.contentMode = .scaleAspectFit
         picture.isAccessibilityElement = true
         caption.numberOfLines = 0
         caption.textAlignment = .center
-        retry.setTitle("重试图片", for: .normal)
+        var config = UIButton.Configuration.tinted()
+        config.title = "重试图片"
+        config.image = UIImage(systemName: "arrow.clockwise")
+        config.imagePadding = 6
+        config.cornerStyle = .capsule
+        retry.configuration = config
         retry.addTarget(self, action: #selector(retryImage), for: .touchUpInside)
         for view in [picture, caption, spinner, retry] { contentView.addSubview(view) }
     }
@@ -299,23 +316,33 @@ private final class ComicCell: UITableViewCell {
         picture.frame = contentView.bounds
         caption.frame = contentView.bounds.insetBy(dx: 16, dy: 12)
         spinner.center = CGPoint(x: bounds.midX, y: bounds.midY)
-        retry.frame = CGRect(x: 20, y: max(0, bounds.height - 56), width: bounds.width - 40, height: 44)
+        if !retry.isHidden {
+            let area = contentView.bounds.insetBy(dx: 16, dy: 6)
+            let buttonSize = retry.sizeThatFits(area.size)
+            let buttonHeight = max(44, buttonSize.height)
+            let textHeight = min(caption.sizeThatFits(area.size).height, max(0, area.height - buttonHeight - 8))
+            let top = area.midY - (textHeight + 8 + buttonHeight) / 2
+            caption.frame = CGRect(x: area.minX, y: top, width: area.width, height: textHeight)
+            let width = min(area.width, buttonSize.width)
+            retry.frame = CGRect(x: area.midX - width / 2, y: caption.frame.maxY + 8, width: width, height: buttonHeight)
+        }
     }
     override func prepareForReuse() { super.prepareForReuse(); reset() }
     func reset() {
         task?.cancel(); task = nil; onRetry = nil
         picture.image = nil; picture.isHidden = true
-        caption.text = nil; setRetryVisible(false); spinner.stopAnimating()
+        caption.text = nil; setRetryVisible(false); spinner.isHidden = true
     }
     func show(_ image: UIImage) {
         picture.image = image; picture.isHidden = false
-        caption.text = nil; setRetryVisible(false); spinner.stopAnimating()
+        caption.text = nil; setRetryVisible(false); spinner.isHidden = true
     }
     func setRetryVisible(_ visible: Bool) {
         retry.isHidden = !visible
         retry.isAccessibilityElement = visible
         retry.accessibilityElementsHidden = !visible
         retry.accessibilityIdentifier = visible ? retryIdentifier : nil
+        setNeedsLayout()
     }
     var retryIdentifier: String?
     @objc private func retryImage() { onRetry?() }

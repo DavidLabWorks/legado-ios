@@ -67,7 +67,7 @@ struct EPUBReadingRegressionTests {
         await shelfReader.load(book: book, source: nil, library: library)
         #expect(shelfReader.errorMessage == nil && shelfReader.chapters.count == 2)
         let reader = ReaderViewModel(book: book, chapters: shelfReader.chapters, initialIndex: 0, cache: .init(directory: root.appendingPathComponent("cache")))
-        #expect(!reader.canEditContent && !reader.usesReplaceRules)
+        #expect(reader.source == nil && !reader.usesReplaceRules)
         await reader.load(rules: [])
         #expect(reader.content == "第一章测试正文")
         await reader.prepareContinuousReading(rules: [])

@@ -507,6 +507,21 @@ struct LegadoDatabaseTests {
         #expect(policy.mode(article: article, source: source, resolvedContent: "video.mp4") == .video(url: "https://rss.example/post/video.mp4"))
     }
 
+    @Test func extractedRSSArticleUsesMobileDefaultsAndKeepsSourceLayout() {
+        let processor = RSSHTMLProcessor()
+        let article = processor.articleHTML("<p>文章正文</p>", style: nil)
+        #expect(article.contains("width=device-width, initial-scale=1"))
+        #expect(article.contains("font:-apple-system-body"))
+        #expect(article.contains("<p>文章正文</p>"))
+
+        let custom = processor.articleHTML("<head><meta name='viewport' content='width=700'></head><body>正文</body>",
+                                           style: "body{font-size:20px}")
+        #expect(custom.contains("width=700"))
+        #expect(!custom.contains("width=device-width"))
+        #expect(!custom.contains("font:-apple-system-body"))
+        #expect(custom.contains("body{font-size:20px}"))
+    }
+
     @Test func rssHTMLAndResourcePoliciesApplyRulesInOrder() {
         let processor = RSSHTMLProcessor()
         #expect(processor.contentHTML("<head></head><body>x</body>", style: "body{color:red}").contains("<style>body{color:red}</style></head>"))

@@ -2,7 +2,7 @@ import SwiftUI
 import UIKit
 
 struct SyntaxCodeEditor: UIViewRepresentable {
-    enum Language { case json, rule, javascript, regex }
+    enum Language { case plain, json, rule, javascript, regex }
 
     // Syntax colors are text, so they need more contrast than system icon tints.
     private enum Palette {
@@ -25,24 +25,30 @@ struct SyntaxCodeEditor: UIViewRepresentable {
     }
     @Binding var text: String
     var language: Language = .rule
+    var inlineID: String?
+
+    private var editorFont: UIFont {
+        language == .plain ? .preferredFont(forTextStyle: .body) : .monospacedSystemFont(ofSize: 14, weight: .regular)
+    }
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
     func makeUIView(context: Context) -> UITextView {
         let view = UITextView()
         view.delegate = context.coordinator
-        view.font = .monospacedSystemFont(ofSize: 14, weight: .regular)
-        view.backgroundColor = .secondarySystemGroupedBackground
+        view.font = editorFont
+        view.backgroundColor = inlineID == nil ? .secondarySystemGroupedBackground : .clear
         view.tintColor = UIColor(ReadingTheme.accent)
-        view.textContainerInset = UIEdgeInsets(top: 14, left: 12, bottom: 20, right: 12)
+        view.textContainerInset = inlineID == nil ? UIEdgeInsets(top: 14, left: 12, bottom: 20, right: 12)
+            : UIEdgeInsets(top: 8, left: 5, bottom: 8, right: 5)
         view.autocorrectionType = .no
         view.autocapitalizationType = .none
         view.smartQuotesType = .no
         view.smartDashesType = .no
         view.smartInsertDeleteType = .no
         view.keyboardDismissMode = .interactive
-        view.alwaysBounceVertical = true
-        view.accessibilityIdentifier = "syntaxCodeEditor"
+        view.alwaysBounceVertical = inlineID == nil
+        view.accessibilityIdentifier = inlineID ?? "syntaxCodeEditor"
         if #available(iOS 16.0, *) { view.isFindInteractionEnabled = true }
         let bar = UIToolbar()
         bar.tintColor = UIColor(ReadingTheme.accent)
@@ -153,8 +159,8 @@ struct SyntaxCodeEditor: UIViewRepresentable {
             let selection = view.selectedRange
             let all = NSRange(location: 0, length: storage.length)
             storage.beginEditing()
-            storage.addAttributes([.font: UIFont.monospacedSystemFont(ofSize: 14, weight: .regular), .foregroundColor: UIColor.label], range: all)
-            if storage.length <= 500_000 {
+            storage.addAttributes([.font: parent.editorFont, .foregroundColor: UIColor.label], range: all)
+            if parent.language != .plain && storage.length <= 500_000 {
                 let tokens: [(String, UIColor)] = [
                     (#"\b(?:true|false|null|undefined|return|var|let|const|if|else|function|new|for|while|try|catch|throw|await|async)\b"#, Palette.keyword),
                     (#"\b\d+(?:\.\d+)?\b"#, Palette.number),
@@ -187,7 +193,7 @@ struct SyntaxCodeEditor: UIViewRepresentable {
             }
             storage.endEditing()
             view.selectedRange = selection
-            view.typingAttributes = [.font: UIFont.monospacedSystemFont(ofSize: 14, weight: .regular), .foregroundColor: UIColor.label]
+            view.typingAttributes = [.font: parent.editorFont, .foregroundColor: UIColor.label]
         }
     }
 }

@@ -202,8 +202,13 @@ struct BookDetailView: View {
         ReadingCard {
             VStack(alignment: .leading, spacing: 10) {
                 HStack {
-                    Label(progress.title, systemImage: progress.isActive ? "arrow.down.circle.fill" : (progress.failed == 0 ? "checkmark.circle.fill" : "exclamationmark.circle"))
-                        .font(.headline)
+                    if progress.isActive {
+                        RagdollLoading(LocalizedStringKey(progress.title), width: 32)
+                            .font(.headline)
+                    } else {
+                        Label(progress.title, systemImage: progress.failed == 0 ? "checkmark.circle.fill" : "exclamationmark.circle")
+                            .font(.headline)
+                    }
                     Spacer()
                     Text("\(progress.processed)/\(progress.total)")
                         .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
@@ -334,11 +339,11 @@ struct BookDetailView: View {
     @ViewBuilder
     private var chapterList: some View {
         if model.state == .loadingDetails {
-            HStack { Spacer(); ProgressView("正在加载作品详情…"); Spacer() }.padding(.vertical, 28)
+            HStack { Spacer(); RagdollLoading("正在加载作品详情…", width: 72, axis: .vertical); Spacer() }.padding(.vertical, 28)
         } else if model.state == .loading || model.state == .idle {
-            HStack { Spacer(); ProgressView("正在解析目录…"); Spacer() }.padding(.vertical, 28)
+            HStack { Spacer(); RagdollLoading("正在解析目录…", width: 72, axis: .vertical); Spacer() }.padding(.vertical, 28)
         } else if model.state == .findingSource {
-            HStack { Spacer(); ProgressView("当前源不可用，正在自动寻找可用源…"); Spacer() }
+            HStack { Spacer(); RagdollLoading("当前源不可用，正在自动寻找可用源…"); Spacer() }
                 .padding(.vertical, 28)
         } else if model.state == .failed {
             ReadingUnavailableView(
@@ -465,6 +470,7 @@ struct ChapterDirectoryLabel: View {
                 Image(systemName: "bookmark.fill")
                     .font(.footnote)
                     .foregroundStyle(ReadingTheme.accent)
+                    .frame(width: 24)
                     .accessibilityLabel("正在阅读")
             }
         }

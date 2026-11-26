@@ -489,18 +489,6 @@ public actor ChapterContentCoordinator {
         return nil
     }
 
-    public func saveEditedContent(book: Book, chapter: BookChapter, title: String?, content: String) async throws {
-        let value = content.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !value.isEmpty else { throw ChapterContentCacheError.invalidEntry }
-        try await cache.save(.init(
-            bookURL: book.bookUrl,
-            chapterURL: chapter.url,
-            title: title,
-            content: content,
-            sourceID: book.origin
-        ))
-    }
-
     @discardableResult
     public func prefetch(
         book: Book,

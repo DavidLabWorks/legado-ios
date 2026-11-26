@@ -129,8 +129,8 @@ public struct RegexEvaluator: Sendable {
         }
     }
 
-    private func replacingStrict(pattern: String, in input: String, timeoutMilliseconds: Int64,
-                                 replacement: (NSRegularExpression, NSTextCheckingResult) throws -> String) throws -> String {
+    func replacingStrict(pattern: String, in input: String, timeoutMilliseconds: Int64,
+                         replacement: (NSRegularExpression, NSTextCheckingResult) throws -> String) throws -> String {
         guard pattern.count <= limits.maximumPatternLength, input.utf16.count <= limits.maximumInputLength,
               !hasObviousNestedQuantifier(pattern) else {
             throw RuleEngineError.resourceLimit(rule: pattern, detail: "正则超过资源限制或包含高风险嵌套量词")

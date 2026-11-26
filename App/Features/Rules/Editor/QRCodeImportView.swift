@@ -3,9 +3,36 @@ import AVFoundation
 import Vision
 import VisionKit
 
-struct QRCodeImportView: View {
-    @Environment(\.dismiss) private var dismiss
+extension View {
+    func qrCodeImportSheet(isPresented: Binding<Bool>, onValue: @escaping (String) -> Void) -> some View {
+        modifier(QRCodeImportSheet(isPresented: isPresented, onValue: onValue))
+    }
+}
+
+private struct QRCodeImportSheet: ViewModifier {
+    @Binding var isPresented: Bool
     let onValue: (String) -> Void
+    @State private var scannedValue: String?
+
+    func body(content: Content) -> some View {
+        content.sheet(isPresented: $isPresented, onDismiss: {
+            if let scannedValue {
+                self.scannedValue = nil
+                onValue(scannedValue)
+            }
+        }) {
+            QRCodeImportView {
+                guard isPresented else { return }
+                scannedValue = $0
+                isPresented = false
+            } onCancel: { isPresented = false }
+        }
+    }
+}
+
+private struct QRCodeImportView: View {
+    let onValue: (String) -> Void
+    let onCancel: () -> Void
     @State private var cameraAuthorized = false
     @State private var cameraMessage = "正在检查相机…"
     @State private var values: [String] = []
@@ -31,7 +58,7 @@ struct QRCodeImportView: View {
                         Link("打开系统设置", destination: URL(string: UIApplication.openSettingsURLString)!)
                     }
                 }
-                if isReading { ProgressView("识别图片中的二维码…") }
+                if isReading { RagdollLoading("识别图片中的二维码…") }
                 ReadingPhotoPicker { data in
                     readPhoto(data)
                 } onError: { error in
@@ -49,9 +76,12 @@ struct QRCodeImportView: View {
                 }
             }
             .padding()
-            .navigationTitle("二维码导入")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("取消") { dismiss() } } }
+            .readingSheetTitle("二维码导入")
+            .toolbar {
+                ReadingSheetActions {
+                    Button("取消", action: onCancel)
+                }
+            }
             .task {
                 switch AVCaptureDevice.authorizationStatus(for: .video) {
                 case .authorized: cameraAuthorized = true
@@ -94,11 +124,7 @@ struct QRCodeImportView: View {
     private func accept(_ value: String) {
         guard !delivered else { return }
         delivered = true
-        dismiss()
-        Task { @MainActor in
-            try? await Task.sleep(nanoseconds: 400_000_000)
-            onValue(value)
-        }
+        onValue(value)
     }
 }
 

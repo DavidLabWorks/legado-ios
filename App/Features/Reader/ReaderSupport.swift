@@ -2,6 +2,21 @@ import SafariServices
 import SwiftUI
 import UIKit
 
+// RootTabView owns the window appearance, including the system status bar.
+struct ReaderColorSchemeKey: PreferenceKey {
+    static var defaultValue: ColorScheme? { nil }
+    static func reduce(value: inout ColorScheme?, nextValue: () -> ColorScheme?) {
+        value = nextValue() ?? value
+    }
+}
+
+extension View {
+    func readerPresentationColorScheme(_ scheme: ColorScheme?) -> some View {
+        // A reader can also open inside a sheet, which owns its own presentation.
+        preferredColorScheme(scheme).preference(key: ReaderColorSchemeKey.self, value: scheme)
+    }
+}
+
 struct ReaderChapterCommentsView: View {
     let target: ReaderChapterCommentsTarget
 
@@ -43,18 +58,18 @@ struct ReaderChapterCommentsView: View {
                         }
                     }
                 }
+                .listRowBackground(Color(uiColor: .secondarySystemBackground))
             }
-            .navigationTitle("本章评论")
-            .navigationBarTitleDisplayMode(.inline)
+            .readingScrollContentBackgroundHidden()
+            .readingSheetSurface()
+            .readingSheetTitle("本章评论")
             .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("关闭") { dismiss() }
+                ReadingSheetActions {
+                    ReadingSheetCloseButton { dismiss() }
                         .accessibilityIdentifier("reader.comments.close")
                 }
             }
         }
-        .readingPresentationDetents([.medium, .large])
-        .readingPresentationDragIndicator()
         .sheet(isPresented: $showsSourcePage) {
             if case .page(let url) = state {
                 InAppWebBrowser(url: url, close: { showsSourcePage = false })
@@ -104,7 +119,7 @@ struct ReaderChapterCommentsView: View {
         switch state {
         case .loading:
             HStack(spacing: 10) {
-                ProgressView()
+                RagdollLoading()
                 Text("正在加载评论")
             }
         case .page:
@@ -143,7 +158,7 @@ struct ReaderChapterCommentsView: View {
                 if let nextURL = pages.nextPageURL {
                     switch more {
                     case .loading:
-                        ProgressView("正在加载更多评论")
+                        RagdollLoading("正在加载更多评论")
                     case .idle:
                         Button("加载更多") { loadMore(nextURL) }
                             .accessibilityIdentifier("reader.comments.more")
@@ -347,8 +362,11 @@ struct ReaderBookInfoSheet: View {
                     LocalBookDetailView(book: book)
                 }
             }
+            .readingSheetTitle(source == nil ? book.name : "书籍详情")
             .toolbar {
-                ToolbarItem(placement: .cancellationAction) { Button("关闭") { dismiss() } }
+                ReadingSheetActions {
+                    ReadingSheetCloseButton { dismiss() }
+                }
             }
         }
     }
@@ -408,10 +426,7 @@ struct ReaderTableOfContents: View {
                     if query.isEmpty { proxy.scrollTo(currentIndex, anchor: .center) }
                 }
                 .toolbar {
-                    ToolbarItem(placement: .cancellationAction) {
-                        Button { dismiss() } label: { Label("关闭", systemImage: "xmark") }
-                    }
-                    ToolbarItemGroup(placement: .topBarTrailing) {
+                    ReadingSheetActions {
                         if !showsSearch {
                             Button { showsSearch = true } label: { Label("搜索章节", systemImage: "magnifyingglass") }
                         }
@@ -420,14 +435,14 @@ struct ReaderTableOfContents: View {
                             closeSearch()
                         } label: { Image(systemName: "scope") }
                         .accessibilityLabel("定位当前章节")
+                        ReadingSheetCloseButton { dismiss() }
                     }
                 }
                 .onAppear {
                     if !descending { DispatchQueue.main.async { proxy.scrollTo(currentIndex, anchor: .center) } }
                 }
             }
-            .navigationTitle("目录")
-            .navigationBarTitleDisplayMode(.inline)
+            .readingSheetTitle("目录")
         }
     }
 
@@ -501,7 +516,7 @@ struct ReaderTableOfContents: View {
         if let number = row.number {
             let current = row.id == currentIndex
             Button { onSelect(row.id) } label: {
-                HStack(alignment: .firstTextBaseline, spacing: 12) {
+                HStack(alignment: .firstTextBaseline, spacing: 0) {
                     ChapterDirectoryLabel(number: number, count: directory.readableIndices.count,
                                           title: row.title.readerText(simplified: simplifiedChinese), isCurrent: current)
                     if let sourceID {
@@ -538,10 +553,11 @@ struct ChapterAvailabilityIcon: View {
                 Image(systemName: "arrow.down.circle.fill")
                     .font(.body)
                     .foregroundStyle(.secondary)
+                    .frame(width: 24)
+                    .padding(.leading, 12)
                     .accessibilityLabel("未下载")
             }
         }
-        .frame(width: 24)
         .task(id: [bookURL, chapterURL, sourceID]) {
             isCached = nil
             let changes = await cache.availability(bookURL: bookURL, chapterURL: chapterURL, sourceID: sourceID)
@@ -562,8 +578,7 @@ struct ReaderLoadingOverlay: View {
         ZStack {
             if showsIndicator {
                 HStack(spacing: 14) {
-                    ProgressView()
-                        .tint(.white)
+                    RagdollLoading(width: 66)
                         .accessibilityHidden(true)
                     VStack(alignment: .leading, spacing: 5) {
                         Text(heading).font(.headline)

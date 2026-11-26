@@ -1,4 +1,5 @@
 import SwiftUI
+import Translation
 import UIKit
 import UniformTypeIdentifiers
 
@@ -19,15 +20,22 @@ struct ReaderView: View {
     @State private var sourceSwitchBook: Book?
     @StateObject private var speech = ReaderSpeechController()
     private enum ReaderSheet: Hashable, Identifiable {
-        case bookmarks, autoRead, appearance, search, settings, clickActions, editor, bookInfo, listening
+        case bookmarks, bookInfo, listening
+        case dictionary(String)
         case replaceRule(ReplaceRule)
         case originalWebPage(URL)
         var id: Self { self }
     }
 
+    @State private var translationText: String?
     @State private var textSelection: ReaderTextSelection?
-    @State private var selectedText: String?
     @State private var activeSheet: ReaderSheet?
+    private enum BottomPanel { case appearance, autoRead, settings }
+    @State private var changingPageAnimation = false
+    @State private var draftReplaceRules = false
+    @State private var draftDefaultMode = EPUBReadingMode.original
+    @State private var savingPanel = false
+    @State private var bottomPanel: BottomPanel?
     @State private var showsTableOfContents = false
     @State private var readerSessionActive = false
     @State private var chapterCommentsTarget: ReaderChapterCommentsTarget?
@@ -39,15 +47,17 @@ struct ReaderView: View {
     @State private var readerBrightness = Double(UIScreen.main.brightness)
     @State private var brightnessBeforeReading = Double(UIScreen.main.brightness)
     @State private var tocDescending = false
-    @State private var editedContent = ""
-    @State private var contentEditError: String?
     @State private var readerSettingSaveError: String?
     @State private var backgroundImage: UIImage?
     @State private var backgroundError: String?
     @State private var showsBackgroundPicker = false
+    @State private var showsTypographySettings = false
+    @State private var showsPageSettings = false
+    @State private var marginArea: MarginArea = .body
     @State private var showsFontImporter = false
     @State private var fontError: String?
     @State private var readerJumpPosition: Int?
+    @State private var showsContentSearch = false
     @State private var contentSearchQuery = ""
     @State private var readerPosition = 0
     @State private var readerPageRanges: [NSRange] = []
@@ -67,6 +77,7 @@ struct ReaderView: View {
     @State private var speechStartGeneration = 0
     @State private var speechTimerRemaining = 0
     @State private var isSavingBookmark = false
+    @ScaledMetric(relativeTo: .subheadline) private var pageSliderLabelWidth: CGFloat = 92
     @ScaledMetric(relativeTo: .body) private var toolbarIconSize = 21
     @AppStorage("textSize") private var fontSize = 20.0
     @AppStorage("letterSpacing") private var letterSpacing = 0.1
@@ -113,27 +124,17 @@ struct ReaderView: View {
     @AppStorage("pauseReadAloudWhilePhoneCalls") private var pauseReadAloudWhilePhoneCalls = false
     @AppStorage("mediaButtonPerNext") private var mediaButtonPerNext = false
     @AppStorage("ttsTimer") private var ttsTimer = 0
-    @AppStorage("readerSimplifiedChinese") private var simplifiedChinese = false
+    @ReaderPanelPreference("readerSimplifiedChinese") private var simplifiedChinese = false
     @AppStorage("readerFullJustify") private var fullJustify = true
-    @AppStorage("readerKeepScreenOn") private var keepScreenOn = false
-    @AppStorage("readerHideHomeIndicator") private var hideHomeIndicator = false
-    @AppStorage("readerHideStatusBar") private var hideStatusBar = false
-    @AppStorage("readerShowBrightness") private var showBrightness = true
+    @ReaderPanelPreference("readerKeepScreenOn") private var keepScreenOn = false
+    @ReaderPanelPreference("readerHideHomeIndicator") private var hideHomeIndicator = false
+    @ReaderPanelPreference("readerHideStatusBar") private var hideStatusBar = false
     @AppStorage("readerBrightness") private var storedReaderBrightness = 0.0
     @AppStorage("readerUseBackgroundImage") private var useBackgroundImage = false
     @AppStorage("themeMode") private var themeMode = "0"
     @AppStorage("enableReadRecord") private var enableReadRecord = true
     @State private var pageAnimation: Int
-    @AppStorage("screenOrientation") private var screenOrientation = "0"
-    @AppStorage("clickActionTopLeft") private var clickActionTL = 2
-    @AppStorage("clickActionTopCenter") private var clickActionTC = 2
-    @AppStorage("clickActionTopRight") private var clickActionTR = 1
-    @AppStorage("clickActionMiddleLeft") private var clickActionML = 2
-    @AppStorage("clickActionMiddleRight") private var clickActionMR = 1
-    @AppStorage("clickActionBottomLeft") private var clickActionBL = 2
-    @AppStorage("clickActionBottomCenter") private var clickActionBC = 1
-    @AppStorage("clickActionBottomRight") private var clickActionBR = 1
-
+    @ReaderPanelPreference("screenOrientation") private var screenOrientation = "0"
 
     init(prepared model: ReaderViewModel) {
         _pageAnimation = State(initialValue: model.book.readConfig?.pageAnim.flatMap { $0 >= 0 ? $0 : nil }
@@ -244,7 +245,7 @@ struct ReaderView: View {
 
     private var textReaderBody: some View {
         readerCanvas
-        .preferredColorScheme(resolvedStyle.id == "night" ? .dark : .light)
+        .readerPresentationColorScheme(resolvedStyle.id == "night" ? .dark : .light)
         .readingTabBarHidden()
         .navigationBarBackButtonHidden(true)
         .statusBarHidden(hideStatusBar)
@@ -253,7 +254,7 @@ struct ReaderView: View {
             Button("好", role: .cancel) { readerSettingSaveError = nil }
         } message: { Text(readerSettingSaveError ?? "") }
         .alert("朗读中断", isPresented: Binding(
-            get: { speech.errorMessage != nil && activeSheet == nil },
+            get: { speech.errorMessage != nil && activeSheet == nil && bottomPanel == nil },
             set: { if !$0 { speech.clearError() } }
         )) {
             Button("重试") { closePlayer(); startListening() }
@@ -268,7 +269,7 @@ struct ReaderView: View {
             speech.onRemoteStop = { closePlayer() }
             UIDevice.current.isBatteryMonitoringEnabled = true
             brightnessBeforeReading = Double(UIScreen.main.brightness)
-            if storedReaderBrightness > 0.05 {
+            if storedReaderBrightness >= 0.05 {
                 followsSystemBrightness = false
                 readerBrightness = storedReaderBrightness
                 UIScreen.main.brightness = CGFloat(storedReaderBrightness)
@@ -283,11 +284,12 @@ struct ReaderView: View {
                 showsReaderMenu = true
             }
             if ProcessInfo.processInfo.arguments.contains("-uiDemoReaderStyle") {
-                DispatchQueue.main.async { activeSheet = .appearance }
+                DispatchQueue.main.async { openPanel(.appearance) }
             }
         }
         .onDisappear {
-            guard !showsTableOfContents else { return }
+            guard !showsTableOfContents, !showsContentSearch, chapterCommentsTarget == nil else { return }
+            if bottomPanel != nil { cancelPanel() }
             readerSessionActive = false
             model.stopBackgroundReading()
             isAutoReading = false
@@ -328,26 +330,21 @@ struct ReaderView: View {
                             .transition(reduceMotion ? .opacity : .move(edge: .bottom).combined(with: .opacity))
                     }
                 }
-                .animation(readerMenuAnimation, value: showsReaderMenu)
+                .animation(bottomPanel == nil ? readerMenuAnimation : nil, value: showsReaderMenu)
             }
             .coordinateSpace(name: ReaderListeningPlayer.viewportSpace)
         }
+        .accessibilityHidden(bottomPanel != nil)
+        .allowsHitTesting(bottomPanel == nil)
+        .overlay { readerBottomPanel.allowsHitTesting(bottomPanel != nil) }
         .sheet(item: $activeSheet) { sheet in
             switch sheet {
             case .bookmarks: bookmarksSheet
-            case .autoRead: autoReadControls
-            case .appearance: styleControls
-            case .search: contentSearchSheet
             case .listening:
                 ReadingNavigationStack {
                     listeningPreferences
-                        .toolbar {
-                            ToolbarItem(placement: .cancellationAction) { Button("取消") { activeSheet = nil } }
-                        }
                 }
-            case .settings: readerSettings
-            case .clickActions: clickActionSettings
-            case .editor: contentEditor
+            case .dictionary(let term): ReaderDictionary(term: term)
             case .replaceRule(let rule):
                 ReplaceRuleEditorView(rule: rule, readingBook: book)
             case .originalWebPage(let url):
@@ -361,7 +358,8 @@ struct ReaderView: View {
             }
         }
         .fullScreenCover(isPresented: $showsTableOfContents) { tableOfContents }
-        .sheet(item: $chapterCommentsTarget) { target in
+        .fullScreenCover(isPresented: $showsContentSearch) { contentSearchSheet }
+        .fullScreenCover(item: $chapterCommentsTarget) { target in
             ReaderChapterCommentsView(target: target)
                 .id(target.id)
         }
@@ -438,7 +436,9 @@ struct ReaderView: View {
         }
         .task {
             let storedImage = await Task.detached(priority: .utility) { ReaderBackgroundStore.load() }.value
-            if !Task.isCancelled, backgroundImage == nil { backgroundImage = storedImage }
+            if !Task.isCancelled, backgroundImage == nil, FileManager.default.fileExists(atPath: ReaderBackgroundStore.url.path) {
+                backgroundImage = storedImage
+            }
         }
     }
 
@@ -515,9 +515,7 @@ struct ReaderView: View {
             readerJumpPosition = readerPosition
             currentPage = 1
             totalPages = 1
-            UserDefaults.standard.set(value, forKey: "pageAnim")
-            let updatedBook = model.useGlobalPageAnimation()
-            saveReaderSetting(updatedBook) { $0.pageAnim = -1 }
+
         }
     }
 
@@ -602,24 +600,14 @@ struct ReaderView: View {
 
     @ViewBuilder private var readerRecoveryActions: some View {
         HStack(spacing: 16) {
-            Button {
-                Task {
-                    if pageAnimation == 3, model.scrollChapters.contains(where: { $0.id == model.currentIndex }) {
-                        await model.retryContinuousChapter(index: model.currentIndex, rules: model.usesReplaceRules ? replaceRules.rules : [])
-                    } else {
-                        await model.load(rules: model.usesReplaceRules ? replaceRules.rules : [], forceRefresh: true)
-                    }
-                }
-            } label: {
+            Button(action: refreshCurrentChapter) {
                 Label(model.scrollRetries.contains(model.currentIndex) ? "重试中…" : "重试本章", systemImage: "arrow.clockwise")
             }
             .disabled(model.isLoading || model.scrollRetries.contains(model.currentIndex))
             .accessibilityIdentifier("reader.retryChapter")
-            if model.canEditContent {
-                Button(action: openSourceSwitch) {
-                    Label("换源", systemImage: "arrow.triangle.2.circlepath")
-                }
-                .accessibilityIdentifier("reader.failureChangeSource")
+            if model.source != nil {
+                Button("换源", action: openSourceSwitch)
+                    .accessibilityIdentifier("reader.failureChangeSource")
             }
         }
         .readingSecondaryButtonStyle()
@@ -708,16 +696,33 @@ struct ReaderView: View {
                         readerPageRanges = model.imageBlocks.compactMap { block in
                             if case .image = block.content { return block.range }; return nil
                         }
-                    }, onTap: { showsReaderMenu.toggle() }, onSelectText: beginTextSelection)
-                HStack {
-                    Button("上一章") { moveChapter(-1) }.disabled(!model.canGoPrevious)
-                    Spacer()
-                    Text("\(currentPage) / \(totalPages)").font(.caption.monospacedDigit())
-                    Spacer()
-                    Button("下一章") { moveChapter(1) }.disabled(!model.canGoNext)
+                    }, onMenuTap: { showsReaderMenu.toggle() }, onChapterBoundary: { direction in
+                        if direction < 0, model.canGoPrevious { moveChapter(-1, previousPosition: .max) }
+                        if direction > 0, model.canGoNext { moveChapter(1) }
+                    }, onSelectText: beginTextSelection)
+                HStack(spacing: 6) {
+                    Button { moveChapter(-1) } label: {
+                        Label("上一章", systemImage: "chevron.left")
+                            .frame(minHeight: 44)
+                    }
+                    .disabled(!model.canGoPrevious)
+                    Spacer(minLength: 0)
+                    Text("第 \(currentPage) / \(totalPages) 张")
+                        .font(.footnote.monospacedDigit())
+                        .accessibilityLabel("本章第 \(currentPage) 张，共 \(totalPages) 张")
+                    Spacer(minLength: 0)
+                    Button { moveChapter(1) } label: {
+                        HStack(spacing: 6) { Text("下一章"); Image(systemName: "chevron.right") }
+                            .frame(minHeight: 44)
+                    }
+                    .accessibilityLabel("下一章")
+                    .disabled(!model.canGoNext)
                 }
-                .padding(.horizontal, 20).padding(.vertical, 10)
+                .font(.subheadline.weight(.medium))
+                .padding(.horizontal, 18)
+                .tint(foregroundColor)
                 .foregroundStyle(foregroundColor)
+                .background(readerChromeBackground)
             }
         } else if pageAnimation == 3 {
             ReaderScrollView(
@@ -784,7 +789,6 @@ struct ReaderView: View {
             fullJustify: fullJustify,
             pageAnimation: pageAnimation,
             isEInkMode: themeMode == "3",
-            clickActions: clickActions,
             backgroundColor: activeBackgroundImage == nil ? resolvedStyle.background : .clear,
             foregroundColor: resolvedStyle.foreground,
             spokenRange: speechChapter == model.currentIndex ? speech.spokenRange : nil,
@@ -850,7 +854,7 @@ struct ReaderView: View {
             onDeferredRender: { readerRenderRevision &+= 1 },
             onCancelNextLoading: { isWaitingForNextChapter = false },
             onPageChanged: pageDidChange,
-            onTapAction: handleTapAction,
+            onMenuTap: { showsReaderMenu.toggle() },
             holdsDisplayedPage: waitingForChapter,
             chapterGeneration: model.displayedChapterGeneration
         )
@@ -918,38 +922,31 @@ struct ReaderView: View {
 
     private var footerVisible: Bool { footerMode == 0 }
 
-    private func selectionControls(_ selection: ReaderTextSelection) -> some View {
-        VStack(spacing: 0) {
-            ReaderSelectionView(selection: selection) { selectedText = $0 }
-            HStack {
-                Button("取消") { endTextSelection() }
-                Spacer()
-                Button("添加过滤规则") {
-                    guard let selectedText else { return }
-                    var rule = replaceRules.newRule()
-                    rule.name = String(selectedText.prefix(20))
-                    rule.pattern = selectedText
-                    rule.isRegex = false
-                    rule.scope = book.name
-                    endTextSelection()
-                    activeSheet = .replaceRule(rule)
-                }
-                .disabled(selectedText == nil)
-            }
-            .padding(.horizontal)
-            .frame(minHeight: 44)
-            .background(.regularMaterial)
+    @ViewBuilder private func selectionControls(_ selection: ReaderTextSelection) -> some View {
+        let controls = ReaderSelectionView(selection: selection, onDismiss: endTextSelection, onFilter: { text in
+            var rule = replaceRules.newRule()
+            rule.name = String(text.prefix(20))
+            rule.pattern = text
+            rule.isRegex = false
+            endTextSelection()
+            activeSheet = .replaceRule(rule)
+        }, onLookup: { activeSheet = .dictionary($0) }, onTranslate: { translationText = $0 })
+        if #available(iOS 17.4, *) {
+            controls.translationPresentation(isPresented: Binding(
+                get: { translationText != nil }, set: { if !$0 { translationText = nil } }
+            ), text: translationText ?? "")
+        } else {
+            controls
         }
     }
 
     private func beginTextSelection(_ selection: ReaderTextSelection) {
-        selectedText = nil
         textSelection = selection
     }
 
     private func endTextSelection() {
+        translationText = nil
         textSelection = nil
-        selectedText = nil
     }
 
     private var pausesAutoReading: Bool {
@@ -957,6 +954,7 @@ struct ReaderView: View {
             || isWaitingForPreviousChapter
             || showsReaderMenu
             || showsTableOfContents
+            || bottomPanel != nil
             || activeSheet != nil
             || textSelection != nil
             || chapterCommentsTarget != nil
@@ -1056,19 +1054,29 @@ struct ReaderView: View {
                 Text(book.name.readerText(simplified: simplifiedChinese))
                     .font(.subheadline.weight(.medium))
                     .lineLimit(1)
-                HStack(spacing: 4) {
-                    Text(model.title.readerText(simplified: simplifiedChinese)).lineLimit(1)
-                    if model.loadedFromCache {
-                        Image(systemName: "arrow.down.circle")
-                            .accessibilityLabel("已缓存")
-                    }
-                }
-                .font(.caption)
-                .foregroundStyle(.secondary)
+                Text(model.title.readerText(simplified: simplifiedChinese))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .accessibilityElement(children: .combine)
-            readerMoreMenu
+            HStack(spacing: 0) {
+                if model.source != nil {
+                    readerChromeIconButton("rectangle.2.swap", label: "换源", action: openSourceSwitch)
+                        .accessibilityIdentifier("reader.changeSource")
+                        .accessibilityValue(book.originName)
+                    Rectangle()
+                        .fill(readerChromeTint.opacity(0.2))
+                        .frame(width: 1, height: 16)
+                        .accessibilityHidden(true)
+                }
+                readerMoreMenu
+            }
+            .padding(.horizontal, 4)
+            .background {
+                Capsule().fill(readerChromeTint.opacity(0.07)).padding(.vertical, 5)
+            }
         }
         .foregroundStyle(readerChromeTint)
         .padding(.horizontal, 8)
@@ -1079,6 +1087,13 @@ struct ReaderView: View {
         .overlay(alignment: .bottom) {
             Rectangle().fill(Color(uiColor: .separator).opacity(0.35)).frame(height: 0.5)
         }
+    }
+
+    private func readerToolbarIcon(_ symbol: String) -> some View {
+        Image(systemName: symbol)
+            .font(.system(size: 19, weight: .regular))
+            .frame(width: 44, height: 44)
+            .contentShape(Rectangle())
     }
 
     private var readerMoreMenu: some View {
@@ -1099,9 +1114,16 @@ struct ReaderView: View {
                     activeSheet = .originalWebPage(url)
                 }
             }
+            if model.source != nil, book.origin != "local", model.currentChapter?.isVolume == false {
+                Button("重新获取本章", systemImage: "arrow.clockwise") {
+                    showsReaderMenu = false
+                    refreshCurrentChapter()
+                }
+                .disabled(model.isLoading || model.scrollRetries.contains(model.currentIndex))
+            }
             Button("搜索正文", systemImage: "magnifyingglass") {
                 showsReaderMenu = false
-                activeSheet = .search
+                showsContentSearch = true
             }
             if isLocalEPUB {
                 Button(EPUBReadingMode.original.title, systemImage: "book") {
@@ -1121,10 +1143,7 @@ struct ReaderView: View {
                 activeSheet = .bookmarks
             }
         } label: {
-            Image(systemName: "ellipsis")
-                .font(.system(size: 20, weight: .regular))
-                .frame(width: 44, height: 44)
-                .contentShape(Rectangle())
+            readerToolbarIcon("ellipsis")
         }
         .buttonStyle(.plain)
         .accessibilityLabel("更多")
@@ -1132,24 +1151,20 @@ struct ReaderView: View {
 
     private var readerBottomChrome: some View {
         VStack(spacing: 8) {
-            HStack(spacing: 8) {
-                if model.canEditContent {
-                    quickAction("换源", icon: "arrow.triangle.2.circlepath", action: openSourceSwitch)
-                        .accessibilityIdentifier("reader.changeSource").accessibilityValue(book.originName)
-                }
-                quickAction(isAutoReading ? "停止翻页" : "自动阅读", icon: isAutoReading ? "stop.fill" : "play") {
-                    if isAutoReading {
-                        isAutoReading = false
-                    } else {
-                        showsReaderMenu = false
-                        activeSheet = .autoRead
+            if !model.hasImageContent {
+                HStack(spacing: 8) {
+                    quickAction(isAutoReading ? "停止翻页" : "自动阅读", icon: isAutoReading ? "stop.fill" : "play") {
+                        if isAutoReading {
+                            isAutoReading = false
+                        } else {
+                            showsReaderMenu = false
+                            openPanel(.autoRead)
+                        }
                     }
+                    quickAction("听书", icon: "headphones", action: openListeningSettings)
+                        .disabled(!canStartListening)
+                        .opacity(canStartListening ? 1 : 0.38)
                 }
-                .disabled(model.hasImageContent)
-                .opacity(model.hasImageContent ? 0.38 : 1)
-                quickAction("听书", icon: "headphones", action: openListeningSettings)
-                    .disabled(!canStartListening)
-                    .opacity(canStartListening ? 1 : 0.38)
             }
             readerChapterControls
             HStack(spacing: 0) {
@@ -1159,14 +1174,14 @@ struct ReaderView: View {
                 }
                 readerChromeAction("textformat.size", "外观") {
                     showsReaderMenu = false
-                    activeSheet = .appearance
+                    openPanel(.appearance)
                 }
                 readerChromeAction(resolvedStyle.id == "night" ? "sun.max" : "moon", resolvedStyle.id == "night" ? "日间" : "夜间") {
                     toggleNightTheme()
                 }.disabled(themeMode == "3")
                 readerChromeAction("gearshape", "设置") {
                     showsReaderMenu = false
-                    activeSheet = .settings
+                    openPanel(.settings)
                 }
             }
         }
@@ -1207,10 +1222,7 @@ struct ReaderView: View {
 
     private func readerChromeIconButton(_ icon: String, label: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            Image(systemName: icon)
-                .font(.system(size: 19, weight: .regular))
-                .frame(width: 44, height: 44)
-                .contentShape(Rectangle())
+            readerToolbarIcon(icon)
         }
         .buttonStyle(.plain)
         .accessibilityLabel(label)
@@ -1245,6 +1257,13 @@ struct ReaderView: View {
         )
     }
 
+    private func followSystemBrightness() {
+        followsSystemBrightness = true
+        storedReaderBrightness = 0
+        UIScreen.main.brightness = CGFloat(brightnessBeforeReading)
+        readerBrightness = brightnessBeforeReading
+    }
+
     private func toggleNightTheme() {
         if resolvedStyle.id == "night" {
             theme = previousDayTheme == "night" ? "wechat" : previousDayTheme
@@ -1254,13 +1273,13 @@ struct ReaderView: View {
         }
     }
 
-    private func moveChapter(_ direction: Int) {
+    private func moveChapter(_ direction: Int, previousPosition: Int? = nil) {
         stopSpeechIfNeeded()
         showsReaderMenu = false
         saveProgress(immediate: true)
         readerJumpPosition = nil
         if direction < 0 {
-            model.goPrevious(position: pageAnimation == 3 || model.hasImageContent ? 0 : .max)
+            model.goPrevious(position: previousPosition ?? (pageAnimation == 3 || model.hasImageContent ? 0 : .max))
         } else {
             model.goNext()
         }
@@ -1322,313 +1341,218 @@ struct ReaderView: View {
     }
 
 
-    private var autoReadControls: some View {
-        ReadingNavigationStack {
-            Form {
-                Section {
-                    HStack {
-                        Text("自动翻页速度")
-                        Spacer()
-                        Text("\(autoReadSpeed)s").monospacedDigit().foregroundStyle(.secondary)
+    private var readerBottomPanel: some View {
+        GeometryReader { viewport in
+            ZStack(alignment: .bottom) {
+                if let bottomPanel {
+                    Color.black.opacity(0.28)
+                        .ignoresSafeArea()
+                        .onTapGesture { dismissTopPanel() }
+                        .accessibilityHidden(true)
+                        .transition(.opacity)
+                    let height = dynamicTypeSize.isAccessibilitySize ? viewport.size.height : panelHeight(bottomPanel)
+                    ReaderBottomPanel(height: min(height, viewport.size.height),
+                                      bottomInset: viewport.safeAreaInsets.bottom,
+                                      dismiss: { cancelPanel() }) {
+                        switch bottomPanel {
+                        case .appearance: styleControls
+                        case .autoRead: autoReadControls
+                        case .settings: readerSettings
+                        }
                     }
-                    Slider(
-                        value: Binding(
-                            get: { Double(autoReadSpeed) },
-                            set: { autoReadSpeed = max(1, min(Int($0.rounded()), 120)) }
-                        ),
-                        in: 1...120,
-                        step: 1
-                    )
-                } footer: {
-                    Text("数值表示自动阅读一屏所用的秒数，范围 1–120 秒。")
-                }
-                Section {
-                    Button("目录", systemImage: "list.bullet") {
-                        activeSheet = nil
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { showsTableOfContents = true }
+                    .disabled(savingPanel)
+                    .accessibilityHidden(showsPageSettings)
+                    .allowsHitTesting(!showsPageSettings)
+                    .transition(panelTransition)
+                    .zIndex(1)
+                    if showsPageSettings {
+                        detailPanel(.page, isPresented: $showsPageSettings, viewport: viewport)
+                            .accessibilityHidden(showsTypographySettings)
+                            .allowsHitTesting(!showsTypographySettings)
+                            .zIndex(2)
                     }
-                    Button("开始自动阅读", systemImage: "play.fill") {
-                        activeSheet = nil
-                        startAutoReading()
-                    }
-                    Button("主菜单", systemImage: "menubar.rectangle") {
-                        activeSheet = nil
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { showsReaderMenu = true }
-                    }
-                    Button("停止自动阅读", systemImage: "stop.fill", role: .destructive) {
-                        isAutoReading = false
-                        activeSheet = nil
-                    }
-                    Button("设置", systemImage: "gearshape") {
-                        activeSheet = nil
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { activeSheet = .appearance }
+                    if showsTypographySettings {
+                        detailPanel(.typography, isPresented: $showsTypographySettings, viewport: viewport)
+                            .sheet(isPresented: $showsFontImporter) { fontImporter }
+                            .zIndex(3)
                     }
                 }
             }
-            .navigationTitle("自动阅读")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("继续阅读") { activeSheet = nil }
-                }
-            }
+            .environment(\.colorScheme, resolvedStyle.id == "night" ? .dark : .light)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+            .ignoresSafeArea(.container, edges: .bottom)
+            .animation(readerMenuAnimation, value: bottomPanel)
+            .animation(readerMenuAnimation, value: showsPageSettings)
+            .animation(readerMenuAnimation, value: showsTypographySettings)
         }
-        .readingPresentationDetents([.medium])
     }
 
+    private var panelTransition: AnyTransition {
+        // Earlier systems leave accessibility frames at the slide-in starting position.
+        if #available(iOS 18, *), !reduceMotion { return .move(edge: .bottom) }
+        return .opacity
+    }
+
+    private var readerSettingsFields: [any ReaderPanelField] {
+        [_simplifiedChinese, _keepScreenOn, _hideHomeIndicator, _hideStatusBar, _screenOrientation]
+    }
+
+    private func openPanel(_ panel: BottomPanel) {
+        if panel == .settings {
+            readerSettingsFields.forEach { $0.beginPreview() }
+            draftReplaceRules = model.usesReplaceRules
+            draftDefaultMode = defaultEPUBMode
+        }
+        bottomPanel = panel
+    }
+
+    @ToolbarContentBuilder private var readerSettingsActions: some ToolbarContent {
+        ReadingSheetActions {
+            Button("取消", action: cancelPanel).disabled(savingPanel)
+            ReadingSheetActionButton(isWorking: savingPanel) {
+                savingPanel = true
+                Task { await savePanel(); savingPanel = false }
+            }
+        }
+    }
+
+    private func cancelPanel() {
+        guard !savingPanel, let panel = bottomPanel else { return }
+        if panel == .settings { readerSettingsFields.forEach { $0.endPreview(save: false) } }
+        backgroundError = nil
+        fontError = nil
+        bottomPanel = nil
+    }
+
+    @MainActor private func savePanel() async {
+        let enabled = draftReplaceRules
+        if enabled != model.usesReplaceRules {
+            if library.contains(book), !(await library.updateReadConfig(for: book, { $0.useReplaceRule = enabled })) {
+                readerSettingSaveError = library.errorMessage ?? "正文替换设置未保存"
+                return
+            }
+            stopSpeechForContentChange()
+            _ = model.toggleReplaceRules(position: readerPosition)
+        }
+        if draftDefaultMode != defaultEPUBMode { defaultEPUBSelection.wrappedValue = draftDefaultMode }
+        readerSettingsFields.forEach { $0.endPreview(save: true) }
+        bottomPanel = nil
+    }
+
+    @MainActor private func selectPageAnimation(_ value: Int) async {
+        guard pageAnimation != value, !changingPageAnimation else { return }
+        changingPageAnimation = true
+        defer { changingPageAnimation = false }
+        if library.contains(book), !(await library.updateReadConfig(for: book, { $0.pageAnim = -1 })) {
+            readerSettingSaveError = library.errorMessage ?? "翻页设置未保存"
+            return
+        }
+        _ = model.useGlobalPageAnimation()
+        UserDefaults.standard.set(value, forKey: "pageAnim")
+        pageAnimation = value
+    }
+
+    private func dismissTopPanel() {
+        if showsTypographySettings { showsTypographySettings = false }
+        else if showsPageSettings { showsPageSettings = false }
+        else { cancelPanel() }
+    }
+
+    private func detailPanel(_ detail: StyleDetail, isPresented: Binding<Bool>, viewport: GeometryProxy) -> some View {
+        ReaderBottomPanel(height: viewport.size.height, bottomInset: viewport.safeAreaInsets.bottom,
+                          dismiss: { isPresented.wrappedValue = false }) {
+            styleDetail(detail, isPresented: isPresented)
+        }
+        .transition(panelTransition)
+    }
+
+    private func panelHeight(_ panel: BottomPanel) -> CGFloat {
+        switch panel {
+        case .appearance: 260 + (backgroundImage == nil ? 0 : 49) + (backgroundError == nil ? 0 : 44)
+        case .autoRead: 248
+        case .settings: isLocalEPUB ? 426 : 382
+        }
+    }
+
+    private var autoReadControls: some View {
+        NavigationView {
+            ScrollView {
+                VStack(spacing: 16) {
+                    VStack(spacing: 8) {
+                        HStack(alignment: .firstTextBaseline) {
+                            Text("自动翻页速度")
+                                .font(.headline)
+                            Spacer()
+                            Text("每屏 \(autoReadSpeed) 秒")
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                                .monospacedDigit()
+                        }
+                        .accessibilityHidden(true)
+
+                        Slider(
+                            value: Binding(get: { Double(autoReadSpeed) }, set: { autoReadSpeed = Int($0.rounded()) }),
+                            in: 1...120
+                        ) { Text("自动翻页速度") }
+                        .accessibilityValue("每屏 \(autoReadSpeed) 秒")
+                        .accessibilityAdjustableAction { direction in
+                            switch direction {
+                            case .increment: autoReadSpeed = min(120, autoReadSpeed + 1)
+                            case .decrement: autoReadSpeed = max(1, autoReadSpeed - 1)
+                            @unknown default: break
+                            }
+                        }
+                        .tint(ReadingTheme.accent)
+                    }
+                    .padding(16)
+                    .readingSheetGroup()
+
+                    Button {
+                        cancelPanel()
+                        startAutoReading()
+                    } label: {
+                        Label("开始自动阅读", systemImage: "play.fill")
+                            .font(.headline)
+                            .frame(maxWidth: .infinity, minHeight: 48)
+                            .foregroundStyle(ReadingTheme.onAccent)
+                            .background(ReadingTheme.accentFill, in: Capsule())
+                    }
+                    .buttonStyle(.plain)
+                }
+                .foregroundStyle(.primary)
+                .frame(maxWidth: 540)
+                .padding(16)
+                .frame(maxWidth: .infinity)
+            }
+            .readingSheetSurface()
+            .readingSheetTitle("自动阅读")
+            .toolbar {
+                ReadingSheetActions { ReadingSheetCloseButton(action: cancelPanel) }
+            }
+        }
+        .navigationViewStyle(.stack)
+    }
 
     private var styleControls: some View {
-        ReadingNavigationStack {
-            Form {
-                Section("快速排版") {
-                    HStack(spacing: 12) {
-                        Button {
-                            fontSize = max(5, fontSize - 1)
-                        } label: {
-                            Image(systemName: "textformat.size.smaller")
-                                .frame(width: 38, height: 32)
-                        }
-                        .readingSecondaryButtonStyle()
-
-                        VStack(spacing: 2) {
-                            Text("字号")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                            Text("\(Int(fontSize))")
-                                .font(.headline.monospacedDigit())
-                        }
-                        .frame(maxWidth: .infinity)
-
-                        Button {
-                            fontSize = min(50, fontSize + 1)
-                        } label: {
-                            Image(systemName: "textformat.size.larger")
-                                .frame(width: 38, height: 32)
-                        }
-                        .readingSecondaryButtonStyle()
-                    }
-
-                    HStack(spacing: 8) {
-                        Text("行距")
-                            .font(.subheadline)
-                        Spacer(minLength: 8)
-                        readerChoiceChip("紧凑", selected: lineSpacing <= 7) { lineSpacing = 6 }
-                        readerChoiceChip("标准", selected: lineSpacing > 7 && lineSpacing < 18) { lineSpacing = 12 }
-                        readerChoiceChip("宽松", selected: lineSpacing >= 18) { lineSpacing = 22 }
-                    }
-                    Toggle("繁体转简体", isOn: $simplifiedChinese)
-                        .accessibilityIdentifier("reader.simplifiedChinese")
-                    Toggle("两端对齐", isOn: $fullJustify)
-                }
-
-                Section("阅读背景") {
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(spacing: 12) {
-                            ForEach(ReaderStylePreset.legadoDefaults) { preset in
-                                let isSelected = resolvedStyle.id == preset.id && activeBackgroundImage == nil
-                                Button {
-                                    useBackgroundImage = false
-                                    theme = preset.id
-                                } label: {
-                                    VStack(spacing: 6) {
-                                        RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                            .fill(Color(uiColor: preset.background))
-                                            .frame(width: 54, height: 72)
-                                            .overlay {
-                                                Text("文字")
-                                                    .font(.caption)
-                                                    .foregroundStyle(Color(uiColor: preset.foreground))
-                                            }
-                                            .overlay {
-                                                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                                    .strokeBorder(
-                                                        Color(uiColor: preset.foreground).opacity(isSelected ? 0.4 : 0.12),
-                                                        lineWidth: isSelected ? 1.25 : 0.75
-                                                    )
-                                            }
-                                            .overlay(alignment: .topTrailing) {
-                                                if isSelected {
-                                                    Image(systemName: "checkmark")
-                                                        .font(.system(size: 10, weight: .semibold))
-                                                        .foregroundStyle(Color(uiColor: preset.foreground))
-                                                        .padding(6)
-                                                }
-                                            }
-                                        Text(preset.name)
-                                            .font(.caption2)
-                                            .foregroundStyle(isSelected ? .primary : .secondary)
-                                    }
-                                }
-                                .buttonStyle(.plain)
-                                .accessibilityLabel(preset.name)
-                                .accessibilityAddTraits(isSelected ? .isSelected : [])
-                            }
-                        }
-                    }
-                    Button("选择背景图片", systemImage: "photo") {
-                        backgroundError = nil
-                        showsBackgroundPicker = true
-                    }
-                    if backgroundImage != nil {
-                        HStack(spacing: 0) {
-                            Text("使用背景图片")
-                                .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
-                                .contentShape(Rectangle())
-                                .onTapGesture { useBackgroundImage.toggle() }
-                                .accessibilityHidden(true)
-                            Toggle("使用背景图片", isOn: $useBackgroundImage)
-                                .labelsHidden()
-                                .fixedSize()
-                        }
-                        Button("删除背景图片", systemImage: "trash", role: .destructive) {
-                            ReaderBackgroundStore.remove()
-                            backgroundImage = nil
-                            useBackgroundImage = false
-                        }
-                    }
-                    if let backgroundError {
-                        Text(backgroundError).font(.footnote).foregroundStyle(.red)
-                    }
-                }
-
-                Section("文字") {
-                    valueSlider("字号", value: $fontSize, range: 5...50, format: { "\(Int($0))" })
-                    valueSlider("字间距", value: $letterSpacing, range: -0.5...0.5, step: 0.01, format: { String(format: "%.2f", $0) })
-                    valueSlider("行间距", value: $lineSpacing, range: 0...50, format: { "\(Int($0))" })
-                    valueSlider("段距", value: $paragraphSpacing, range: 0...50, format: { String(format: "%.1f", $0) })
-                    Picker("字重", selection: $fontWeight) {
-                        Text("正常").tag(0)
-                        Text("粗体").tag(1)
-                        Text("细体").tag(2)
-                    }
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("段落缩进")
-                        TextField("请输入缩进字符", text: $paragraphIndent)
-                            .textInputAutocapitalization(.never)
-                            .accessibilityLabel("段落缩进字符")
-                        Text("控制每段开头的缩进，默认两个全角空格；清空后不缩进。")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                    Button(fontPath.isEmpty ? "选择字体文件" : "更换字体文件", systemImage: "textformat") {
-                        showsFontImporter = true
-                    }
-                    HStack {
-                        Text("当前字体")
-                        Spacer()
-                        Text(fontPath.isEmpty ? "系统字体" : URL(fileURLWithPath: fontPath).lastPathComponent)
-                            .foregroundStyle(.secondary)
-                    }
-                    if !fontPath.isEmpty {
-                        Button("使用系统字体") { fontPath = "" }
-                    }
-                    if let fontError {
-                        Text(fontError).font(.footnote).foregroundStyle(.red)
-                    }
-                    Picker("下划线", selection: $underlineMode) {
-                        Text("关闭").tag(0)
-                        Text("实线").tag(1)
-                        Text("虚线").tag(2)
-                    }
-                }
-
-                Section("章节标题") {
-                    Picker("标题模式", selection: $titleMode) {
-                        Text("左对齐").tag(0)
-                        Text("居中").tag(1)
-                        Text("隐藏").tag(2)
-                    }
-                    .pickerStyle(.segmented)
-                    valueSlider("标题字号增量", value: $titleSize, range: -10...30, format: { String(format: "%+.0f", $0) })
-                    valueSlider("标题上间距", value: $titleTopSpacing, range: 0...100, format: { "\(Int($0))" })
-                    valueSlider("标题下间距", value: $titleBottomSpacing, range: 0...100, format: { "\(Int($0))" })
-                }
-
-                Section("翻页动画") {
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(spacing: 10) {
-                            ForEach(Self.pageAnimationChoices, id: \.0) { choice in
-                                Button {
-                                    pageAnimation = choice.value
-                                } label: {
-                                    VStack(spacing: 6) {
-                                        Image(systemName: choice.icon)
-                                            .font(.headline)
-                                        Text(choice.title)
-                                            .font(.caption2)
-                                    }
-                                    .foregroundStyle(pageAnimation == choice.value ? ReadingTheme.onAccent : Color.primary)
-                                    .frame(width: 58, height: 54)
-                                    .background(
-                                        pageAnimation == choice.value ? ReadingTheme.accentFill : Color.secondary.opacity(0.1),
-                                        in: RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                    )
-                                    .overlay {
-                                        RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                            .strokeBorder(pageAnimation == choice.value ? ReadingTheme.selectionBorder : .clear, lineWidth: 1)
-                                    }
-                                }
-                                .buttonStyle(.plain)
-                                .accessibilityAddTraits(pageAnimation == choice.value ? .isSelected : [])
-                            }
-                        }
-                    }
-                    Text(pageAnimation == 3
-                         ? "滚动模式连续滚动；其余模式按整屏翻页。左右滑动或点击左右三分之一区域翻页，点击中间区域打开菜单。"
-                         : "当前模式按整屏翻页；左右滑动或点击左右三分之一区域翻页，点击中间区域打开菜单。")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-
-                Section("正文边距") {
-                    valueSlider("左边距", value: $paddingLeft, range: 0...100, format: { "\(Int($0))" })
-                    valueSlider("右边距", value: $paddingRight, range: 0...100, format: { "\(Int($0))" })
-                    valueSlider("上边距", value: $paddingTop, range: 0...100, format: { "\(Int($0))" })
-                    valueSlider("下边距", value: $paddingBottom, range: 0...100, format: { "\(Int($0))" })
-                }
-
-                Section("页眉页脚") {
-                    Picker("页眉显示", selection: $headerMode) {
-                        Text("状态栏显示时隐藏").tag(0)
-                        Text("显示").tag(1)
-                        Text("隐藏").tag(2)
-                    }
-                    Picker("页脚显示", selection: $footerMode) {
-                        Text("显示").tag(0)
-                        Text("隐藏").tag(1)
-                    }
-                    tipPicker("页眉左", selection: $tipHeaderLeft)
-                    tipPicker("页眉中", selection: $tipHeaderMiddle)
-                    tipPicker("页眉右", selection: $tipHeaderRight)
-                    tipPicker("页脚左", selection: $tipFooterLeft)
-                    tipPicker("页脚中", selection: $tipFooterMiddle)
-                    tipPicker("页脚右", selection: $tipFooterRight)
-                    Toggle("页眉分隔线", isOn: $showHeaderLine)
-                    Toggle("页脚分隔线", isOn: $showFooterLine)
-                }
-
-                Section("页眉边距") {
-                    valueSlider("左边距", value: $headerPaddingLeft, range: 0...100, format: { "\(Int($0))" })
-                    valueSlider("右边距", value: $headerPaddingRight, range: 0...100, format: { "\(Int($0))" })
-                    valueSlider("上边距", value: $headerPaddingTop, range: 0...100, format: { "\(Int($0))" })
-                    valueSlider("下边距", value: $headerPaddingBottom, range: 0...100, format: { "\(Int($0))" })
-                }
-
-                Section("页脚边距") {
-                    valueSlider("左边距", value: $footerPaddingLeft, range: 0...100, format: { "\(Int($0))" })
-                    valueSlider("右边距", value: $footerPaddingRight, range: 0...100, format: { "\(Int($0))" })
-                    valueSlider("上边距", value: $footerPaddingTop, range: 0...100, format: { "\(Int($0))" })
-                    valueSlider("下边距", value: $footerPaddingBottom, range: 0...100, format: { "\(Int($0))" })
-                }
+        NavigationView {
+            ScrollView {
+                compactStyleControls
+                    .frame(maxWidth: 540)
+                    .padding(.horizontal, 16)
+                    .padding(.top, 8)
+                    .padding(.bottom, 26)
+                    .frame(maxWidth: .infinity)
             }
-            .navigationTitle("阅读样式")
-            .navigationBarTitleDisplayMode(.inline)
+            .readingSheetSurface()
+            .readingSheetTitle("阅读样式")
             .toolbar {
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("完成") { activeSheet = nil }
+                ReadingSheetActions {
+                    Button("更多") { showsPageSettings = true }
+                    Button("取消", action: cancelPanel)
                 }
             }
         }
+        .navigationViewStyle(.stack)
         .readingPhotoPicker(isPresented: $showsBackgroundPicker) { data in
             backgroundError = nil
             do {
@@ -1640,22 +1564,420 @@ struct ReaderView: View {
         } onError: { error in
             backgroundError = error.localizedDescription
         }
-        .sheet(isPresented: $showsFontImporter) {
-            // Some Files providers report fonts as generic data. The installer validates the font itself.
-            ReadingImportPicker(contentTypes: [.font, .data], allowsMultipleSelection: false) { urls in
-                showsFontImporter = false
-                guard let source = urls.first else { return }
-                do {
-                    fontPath = try ReaderFontStore.install(from: source)
-                    fontRevision &+= 1
-                    fontError = nil
-                } catch {
-                    fontError = error.localizedDescription
+    }
+
+    private enum StyleDetail: String {
+        case typography = "字体与间距"
+        case page = "页面设置"
+    }
+
+    private func styleDetail(_ detail: StyleDetail, isPresented: Binding<Bool>) -> some View {
+        NavigationView {
+            Form {
+                switch detail {
+                case .typography: typographySections
+                case .page: pageStyleSections
                 }
-            } onCancel: { showsFontImporter = false }
+            }
+            .readingScrollContentBackgroundHidden()
+            .readingSheetSurface()
+            .readingSheetTitle(detail.rawValue)
+            .toolbar {
+                ReadingSheetActions {
+                    Button("返回") { isPresented.wrappedValue = false }
+                }
+            }
+            .modifier(ReaderMenuBackGesture(menuVisible: true) { isPresented.wrappedValue = false })
         }
-        .readingPresentationDetents([.medium])
-        .readingPresentationDragIndicator()
+        .navigationViewStyle(.stack)
+    }
+
+    private var fontImporter: some View {
+        // Some Files providers report fonts as generic data. The installer validates the font itself.
+        ReadingImportPicker(contentTypes: [.font, .data], allowsMultipleSelection: false) { urls in
+            showsFontImporter = false
+            guard let source = urls.first else { return }
+            do {
+                fontPath = try ReaderFontStore.install(from: source)
+                fontRevision &+= 1
+                fontError = nil
+            } catch {
+                fontError = error.localizedDescription
+            }
+        } onCancel: { showsFontImporter = false }
+    }
+
+    @ViewBuilder private var typographySections: some View {
+        pageSection("字体", icon: "textformat") {
+            Button(fontPath.isEmpty ? "选择字体文件" : "更换字体文件", systemImage: "textformat") {
+                showsFontImporter = true
+            }
+            HStack {
+                Text("当前字体")
+                Spacer()
+                Text(fontPath.isEmpty ? "系统字体" : URL(fileURLWithPath: fontPath).lastPathComponent)
+                    .foregroundStyle(.secondary)
+            }
+            if !fontPath.isEmpty {
+                Button("使用系统字体") { fontPath = "" }
+            }
+            if let fontError {
+                Text(fontError).font(.footnote).foregroundStyle(.red)
+            }
+            valueSlider("字号", value: $fontSize, range: 5...50, format: { "\(Int($0))" })
+            Picker("字重", selection: $fontWeight) {
+                Text("正常").tag(0)
+                Text("粗体").tag(1)
+                Text("细体").tag(2)
+            }
+            Picker("下划线", selection: $underlineMode) {
+                Text("关闭").tag(0)
+                Text("实线").tag(1)
+                Text("虚线").tag(2)
+            }
+        }
+        pageSection("间距与段落", icon: "text.alignleft") {
+            valueSlider("字间距", value: $letterSpacing, range: -0.5...0.5, step: 0.01, format: { String(format: "%.2f", $0) })
+            valueSlider("行间距", value: $lineSpacing, range: 0...50, format: { "\(Int($0))" })
+            valueSlider("段距", value: $paragraphSpacing, range: 0...50, format: { String(format: "%.1f", $0) })
+            Toggle("两端对齐", isOn: $fullJustify)
+            VStack(alignment: .leading, spacing: 6) {
+                Text("段落缩进")
+                TextField("请输入缩进字符", text: $paragraphIndent)
+                    .textInputAutocapitalization(.never)
+                    .accessibilityLabel("段落缩进字符")
+                Text("控制每段开头的缩进，默认两个全角空格；清空后不缩进。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    @ViewBuilder private var pageStyleSections: some View {
+        Section {
+            Button {
+                showsTypographySettings = true
+            } label: {
+                HStack {
+                    Label(StyleDetail.typography.rawValue, systemImage: "textformat")
+                    Spacer()
+                    Image(systemName: "chevron.right").font(.footnote.weight(.semibold))
+                        .foregroundStyle(.tertiary)
+                        .accessibilityHidden(true)
+                }
+                .foregroundStyle(.primary)
+                .contentShape(Rectangle())
+            }
+            .listRowBackground(Color(uiColor: .secondarySystemBackground))
+        }
+
+        pageSection("章节标题", icon: "textformat.size") {
+            VStack(spacing: 12) {
+                chapterLayoutPreview
+                Picker("标题模式", selection: $titleMode) {
+                    Text("左对齐").tag(0)
+                    Text("居中").tag(1)
+                    Text("隐藏").tag(2)
+                }
+                .pickerStyle(.segmented)
+            }
+            .padding(.vertical, 4)
+            pageSlider("标题字号增量", value: $titleSize, range: -10...30, signed: true)
+            pageSlider("标题上间距", value: $titleTopSpacing)
+            pageSlider("标题下间距", value: $titleBottomSpacing)
+        }
+
+        pageSection("翻页动画", icon: "rectangle.on.rectangle") {
+            VStack(alignment: .leading, spacing: 12) {
+                let columns = Array(repeating: GridItem(.flexible(), spacing: 6),
+                                    count: dynamicTypeSize.isAccessibilitySize ? 2 : 5)
+                LazyVGrid(columns: columns, spacing: 6) {
+                    ForEach(Self.pageAnimationChoices, id: \.0) { choice in
+                        let selected = pageAnimation == choice.value
+                        Button {
+                            Task { await selectPageAnimation(choice.value) }
+                        } label: {
+                            VStack(spacing: 7) {
+                                Image(systemName: choice.icon).font(.body.weight(.medium))
+                                Text(choice.title).font(.caption.weight(.medium))
+                            }
+                            .frame(maxWidth: .infinity, minHeight: 56)
+                            .padding(.vertical, 3)
+                            .foregroundStyle(selected ? ReadingTheme.onAccent : ReadingTheme.accent)
+                            .background(selected ? ReadingTheme.accentFill : ReadingTheme.accent.opacity(0.06),
+                                        in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(changingPageAnimation)
+                        .accessibilityLabel(choice.title)
+                        .accessibilityAddTraits(selected ? .isSelected : [])
+                    }
+                }
+                Divider()
+                Label(pageAnimation == 3 ? "上下滑动连续阅读，轻点中间打开菜单。"
+                      : "左右滑动或轻点两侧翻页，轻点中间打开菜单。", systemImage: "hand.draw")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.vertical, 4)
+        }
+
+        pageSection("边距", icon: "arrow.up.left.and.arrow.down.right") {
+            Picker("边距区域", selection: $marginArea) {
+                ForEach(MarginArea.allCases, id: \.self) { area in
+                    Text(area.rawValue).tag(area)
+                }
+            }
+            .pickerStyle(.segmented)
+            let margins = marginBindings
+            pageSlider("左边距", value: margins.left)
+            pageSlider("右边距", value: margins.right)
+            pageSlider("上边距", value: margins.top)
+            pageSlider("下边距", value: margins.bottom)
+        }
+
+        pageSection("页眉页脚", icon: "rectangle.split.3x1") {
+            Picker("页眉显示", selection: $headerMode) {
+                Text("状态栏显示时隐藏").tag(0)
+                Text("显示").tag(1)
+                Text("隐藏").tag(2)
+            }
+            Picker("页脚显示", selection: $footerMode) {
+                Text("显示").tag(0)
+                Text("隐藏").tag(1)
+            }
+            tipPicker("页眉左", selection: $tipHeaderLeft)
+            tipPicker("页眉中", selection: $tipHeaderMiddle)
+            tipPicker("页眉右", selection: $tipHeaderRight)
+            tipPicker("页脚左", selection: $tipFooterLeft)
+            tipPicker("页脚中", selection: $tipFooterMiddle)
+            tipPicker("页脚右", selection: $tipFooterRight)
+            Toggle("页眉分隔线", isOn: $showHeaderLine)
+            Toggle("页脚分隔线", isOn: $showFooterLine)
+        }
+    }
+
+    private func pageSection<Content: View>(_ title: String, icon: String,
+                                            @ViewBuilder content: () -> Content) -> some View {
+        Section {
+            content()
+                .listRowBackground(Color(uiColor: .secondarySystemBackground))
+        } header: {
+            Label(title, systemImage: icon)
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(ReadingTheme.accent)
+                .textCase(nil)
+        }
+    }
+
+    private var chapterLayoutPreview: some View {
+        let excerpt = model.hasImageContent ? "" : String(model.content.prefix(160)).trimmingCharacters(in: .whitespacesAndNewlines)
+        return VStack(alignment: .leading, spacing: 5) {
+            if titleMode != 2 {
+                Text(model.title.isEmpty ? "章节标题" : model.title.readerText(simplified: simplifiedChinese))
+                    .font(.system(size: max(10, (fontSize + titleSize) * 0.8), weight: .semibold, design: .serif))
+                    .lineLimit(1)
+                    .frame(maxWidth: .infinity, alignment: titleMode == 1 ? .center : .leading)
+                    .padding(.top, titleTopSpacing * 0.25)
+                    .padding(.bottom, titleBottomSpacing * 0.25)
+            }
+            if excerpt.isEmpty {
+                Capsule().fill(readerChromeTint.opacity(0.22)).frame(height: 3)
+                Capsule().fill(readerChromeTint.opacity(0.16)).frame(height: 3)
+                    .padding(.trailing, 42)
+            } else {
+                Text(excerpt.readerText(simplified: simplifiedChinese))
+                    .font(.system(size: max(10, fontSize * 0.7), design: .serif))
+                    .lineLimit(2)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+        .foregroundStyle(readerChromeTint)
+        .padding(.leading, 14 + paddingLeft * 0.35)
+        .padding(.trailing, 14 + paddingRight * 0.35)
+        .padding(.top, 12 + paddingTop * 0.35)
+        .fixedSize(horizontal: false, vertical: true)
+        .frame(height: 96, alignment: .topLeading)
+        .clipped()
+        .background(backgroundColor, in: RoundedRectangle(cornerRadius: 10))
+        .overlay {
+            RoundedRectangle(cornerRadius: 10).strokeBorder(readerChromeTint.opacity(0.12))
+        }
+        .accessibilityHidden(true)
+    }
+
+    private enum MarginArea: String, CaseIterable {
+        case body = "正文"
+        case header = "页眉"
+        case footer = "页脚"
+    }
+
+    private var marginBindings: (left: Binding<Double>, right: Binding<Double>, top: Binding<Double>, bottom: Binding<Double>) {
+        switch marginArea {
+        case .body: ($paddingLeft, $paddingRight, $paddingTop, $paddingBottom)
+        case .header: ($headerPaddingLeft, $headerPaddingRight, $headerPaddingTop, $headerPaddingBottom)
+        case .footer: ($footerPaddingLeft, $footerPaddingRight, $footerPaddingTop, $footerPaddingBottom)
+        }
+    }
+
+    private func pageSlider(_ title: String, value: Binding<Double>, range: ClosedRange<Double> = 0...100,
+                            signed: Bool = false) -> some View {
+        let number = String(format: signed ? "%+.0f" : "%.0f", value.wrappedValue)
+        let slider = Slider(value: value, in: range, step: 1)
+            .tint(ReadingTheme.accent)
+            .accessibilityLabel(title)
+            .accessibilityValue(number)
+        return VStack(spacing: 4) {
+            HStack(spacing: 12) {
+                Text(title).font(.subheadline).fixedSize(horizontal: false, vertical: true)
+                    .frame(width: dynamicTypeSize.isAccessibilitySize ? nil : pageSliderLabelWidth, alignment: .leading)
+                    .accessibilityHidden(true)
+                if dynamicTypeSize.isAccessibilitySize {
+                    Spacer(minLength: 0)
+                } else {
+                    slider
+                }
+                Text(number)
+                    .font(.caption.weight(.semibold).monospacedDigit())
+                    .frame(minWidth: 30)
+                    .padding(.horizontal, 4)
+                    .padding(.vertical, 4)
+                    .foregroundStyle(ReadingTheme.accent)
+                    .background(ReadingTheme.accent.opacity(0.07), in: Capsule())
+                    .accessibilityHidden(true)
+            }
+            if dynamicTypeSize.isAccessibilitySize { slider }
+        }
+        .frame(minHeight: 44)
+        .listRowInsets(EdgeInsets(top: 2, leading: 16, bottom: 2, trailing: 16))
+    }
+
+    private var compactStyleControls: some View {
+        VStack(spacing: 8) {
+            VStack(spacing: 0) {
+                HStack(spacing: 12) {
+                    Text("亮度")
+                    Slider(value: readerBrightnessBinding, in: 0.05...1)
+                        .tint(ReadingTheme.accent)
+                        .accessibilityLabel("阅读亮度")
+                    Button {
+                        if followsSystemBrightness {
+                            readerBrightnessBinding.wrappedValue = max(0.05, Double(UIScreen.main.brightness))
+                        } else {
+                            followSystemBrightness()
+                        }
+                    } label: {
+                        HStack(spacing: 5) {
+                            Image(systemName: followsSystemBrightness ? "checkmark.circle.fill" : "circle")
+                            Text("随系统")
+                        }
+                        .font(.subheadline)
+                        .frame(minHeight: 44)
+                    }
+                    .accessibilityAddTraits(followsSystemBrightness ? .isSelected : [])
+                }
+
+                Divider()
+                HStack(spacing: 12) {
+                    Text("字号")
+                    Spacer(minLength: 0)
+                    HStack(spacing: 0) {
+                        styleSizeButton("minus", label: "减小字号", disabled: fontSize <= 5) { fontSize = max(5, fontSize - 1) }
+                        Text("\(Int(fontSize))")
+                            .font(.headline.monospacedDigit())
+                            .frame(maxWidth: .infinity)
+                        styleSizeButton("plus", label: "增大字号", disabled: fontSize >= 50) { fontSize = min(50, fontSize + 1) }
+                    }
+                    .frame(maxWidth: 166)
+                }
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 3)
+            .readingSheetGroup()
+
+            HStack(spacing: 0) {
+                ForEach(ReaderStylePreset.legadoDefaults) { preset in
+                    let selected = resolvedStyle.id == preset.id && activeBackgroundImage == nil
+                    Button {
+                        useBackgroundImage = false
+                        theme = preset.id
+                    } label: {
+                        Circle()
+                            .fill(Color(uiColor: preset.background))
+                            .overlay {
+                                Circle().strokeBorder(Color.primary.opacity(selected ? 0.85 : 0.16),
+                                                      lineWidth: selected ? 2 : 0.6)
+                                if selected {
+                                    Image(systemName: "checkmark").font(.subheadline.bold())
+                                        .foregroundStyle(Color(uiColor: preset.foreground))
+                                }
+                            }
+                            .frame(width: 32, height: 32)
+                            .frame(maxWidth: .infinity, minHeight: 44)
+                            .contentShape(Rectangle())
+                    }
+                    .accessibilityLabel(preset.name)
+                    .accessibilityAddTraits(selected ? .isSelected : [])
+                }
+                Button {
+                    backgroundError = nil
+                    showsBackgroundPicker = true
+                } label: {
+                    Image(systemName: "photo")
+                        .frame(width: 32, height: 32)
+                        .background(Color(uiColor: .secondarySystemBackground), in: Circle())
+                        .frame(maxWidth: .infinity, minHeight: 44)
+                        .contentShape(Rectangle())
+                }
+                .accessibilityLabel("选择背景图片")
+            }
+
+            if backgroundImage != nil {
+                HStack {
+                    Text("使用背景图片")
+                        .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                        .contentShape(Rectangle())
+                        .onTapGesture { useBackgroundImage.toggle() }
+                        .accessibilityHidden(true)
+                    Toggle("使用背景图片", isOn: $useBackgroundImage)
+                        .labelsHidden()
+                        .fixedSize()
+                    Button(role: .destructive) {
+                        do {
+                            try FileManager.default.removeItem(at: ReaderBackgroundStore.url)
+                            backgroundImage = nil
+                            useBackgroundImage = false
+                            backgroundError = nil
+                        } catch { backgroundError = error.localizedDescription }
+                    } label: {
+                        Image(systemName: "trash")
+                            .frame(width: 44, height: 44)
+                    }
+                    .accessibilityLabel("删除背景图片")
+                }
+            }
+
+            if let backgroundError {
+                Text(backgroundError).font(.footnote).foregroundStyle(.red)
+            }
+        }
+        .buttonStyle(.plain)
+        .font(.subheadline.weight(.medium))
+        .foregroundStyle(.primary)
+        .padding(.vertical, 2)
+    }
+
+    private func styleSizeButton(_ icon: String, label: String, disabled: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: icon)
+                .font(.body.weight(.medium))
+                .frame(maxWidth: .infinity, minHeight: 32)
+                .background(Color(uiColor: .systemBackground), in: Capsule())
+                .frame(minHeight: 44)
+                .contentShape(Rectangle())
+        }
+        .disabled(disabled)
+        .accessibilityLabel(label)
     }
 
     private static let pageAnimationChoices: [(value: Int, title: String, icon: String)] = [
@@ -1665,22 +1987,6 @@ struct ReaderView: View {
         (3, "滚动", "arrow.up.and.down"),
         (4, "无动画", "rectangle")
     ]
-
-    private func readerChoiceChip(_ title: String, selected: Bool, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Text(title)
-                .font(.caption.weight(.medium))
-                .foregroundStyle(selected ? ReadingTheme.onAccent : Color.primary)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 7)
-                .background(selected ? ReadingTheme.accentFill : Color.secondary.opacity(0.1), in: Capsule())
-                .overlay {
-                    Capsule().strokeBorder(selected ? ReadingTheme.selectionBorder : .clear, lineWidth: 1)
-                }
-        }
-        .buttonStyle(.plain)
-        .accessibilityAddTraits(selected ? .isSelected : [])
-    }
 
     private func valueSlider(
         _ title: String,
@@ -1714,283 +2020,95 @@ struct ReaderView: View {
     }
 
 
-    private var clickActions: [Int] {
-        // Keep persisted action IDs stable; the removed sync action becomes a no-op.
-        [clickActionTL, clickActionTC, clickActionTR, clickActionML, 0, clickActionMR, clickActionBL, clickActionBC, clickActionBR]
-            .map { $0 == 12 ? -1 : $0 }
-    }
-
-    private static let tapActionChoices: [(Int, String)] = [
-        (-1, "无动作"), (0, "菜单"), (1, "下一页"), (2, "上一页"),
-        (3, "下一章"), (4, "上一章"), (5, "朗读上一段"), (6, "朗读下一段"),
-        (7, "添加书签"), (8, "编辑正文"), (9, "替换(启用/禁用)"), (10, "目录"),
-        (11, "搜索正文"), (13, "暂停/继续朗读")
-    ]
-
-    private var clickActionSettings: some View {
-        ReadingNavigationStack {
-            VStack(spacing: 8) {
-                ForEach(0..<3, id: \.self) { row in
-                    HStack(spacing: 8) {
-                        ForEach(0..<3, id: \.self) { column in
-                            let index = row * 3 + column
-                            VStack(spacing: 8) {
-                                Text(["左上", "上中", "右上", "左中", "中央", "右中", "左下", "下中", "右下"][index])
-                                    .font(.caption).foregroundStyle(.secondary)
-                                if index == 4 {
-                                    Text("固定：菜单")
-                                        .font(.caption.weight(.medium))
-                                        .foregroundStyle(ReadingTheme.accent)
-                                        .frame(maxWidth: .infinity, minHeight: 32)
-                                } else {
-                                    Picker("动作", selection: clickActionBinding(at: index)) {
-                                        ForEach(Self.tapActionChoices, id: \.0) { action in
-                                            Text(action.1).tag(action.0)
-                                        }
-                                    }
-                                    .labelsHidden()
-                                    .frame(maxWidth: .infinity)
-                                }
-                            }
-                            .frame(maxWidth: .infinity, maxHeight: .infinity)
-                            .padding(6)
-                            .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 10))
-                        }
-                    }
-                }
-            }
-            .padding(10)
-            .navigationTitle("点击区域设置")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("完成") { activeSheet = nil }
-                }
-            }
-        }
-    }
-
-    private func clickActionBinding(at index: Int) -> Binding<Int> {
-        let binding: Binding<Int> = switch index {
-        case 0: $clickActionTL
-        case 1: $clickActionTC
-        case 2: $clickActionTR
-        case 3: $clickActionML
-        case 5: $clickActionMR
-        case 6: $clickActionBL
-        case 7: $clickActionBC
-        default: $clickActionBR
-        }
-        return Binding(
-            get: { binding.wrappedValue == 12 ? -1 : binding.wrappedValue },
-            set: { binding.wrappedValue = $0 }
-        )
-    }
-
-    private func handleTapAction(_ action: Int) {
-        switch action {
-        case 0: showsReaderMenu.toggle()
-        case 3: if model.canGoNext { moveChapter(1) }
-        case 4: if model.canGoPrevious { moveChapter(-1) }
-        case 5: speech.previousSegment()
-        case 6: speech.nextSegment()
-        case 7: addBookmark()
-        case 8:
-            guard model.canEditContent else { return }
-            showsReaderMenu = false
-            editedContent = model.content
-            contentEditError = nil
-            activeSheet = .editor
-        case 9:
-            showsReaderMenu = false
-            stopSpeechForContentChange()
-            let updatedBook = model.toggleReplaceRules(position: readerPosition)
-            saveReaderSetting(updatedBook) { $0.useReplaceRule = updatedBook.readConfig?.useReplaceRule }
-        case 10:
-            showsReaderMenu = false
-            showsTableOfContents = true
-        case 11:
-            showsReaderMenu = false
-            activeSheet = .search
-        case 13:
-            isAutoReading = false
-            configureSpeech()
-            if speech.isSpeaking || speech.isPaused {
-                speech.pauseOrResume()
-            } else { openListeningSettings() }
-        default: break
-        }
-    }
-
-
     private var readerSettings: some View {
-        ReadingNavigationStack {
-            Form {
-                if isLocalEPUB {
-                    Section("EPUB") { EPUBDefaultModePicker(selection: defaultEPUBSelection) }
-                }
-                Section {
-                    Toggle("繁体转简体", isOn: $simplifiedChinese)
-                        .accessibilityIdentifier("reader.simplifiedChinese")
-                    Toggle("两端对齐", isOn: $fullJustify)
-                    Toggle("重新分段", isOn: Binding(
-                        get: { model.usesParagraphResegmentation },
-                        set: { value in
-                            guard value != model.usesParagraphResegmentation else { return }
-                            stopSpeechForContentChange()
-                            let updatedBook = model.toggleParagraphResegmentation(position: readerPosition)
-                            saveReaderSetting(updatedBook) { $0.reSegment = value }
+        NavigationView {
+            ScrollView {
+                VStack(spacing: 12) {
+                    VStack(spacing: 0) {
+                        Toggle("繁体转简体", isOn: $simplifiedChinese)
+                            .accessibilityIdentifier("reader.simplifiedChinese")
+                            .frame(minHeight: 44)
+                        Divider()
+                        Toggle("正文替换规则", isOn: $draftReplaceRules)
+                        .frame(minHeight: 44)
+                        if isLocalEPUB {
+                            Divider()
+                            EPUBDefaultModePicker(selection: $draftDefaultMode)
+                                .frame(minHeight: 44)
                         }
-                    ))
-                    .accessibilityIdentifier("readerResegmentToggle")
-                    Button("编辑本章正文") {
-                        editedContent = model.content
-                        contentEditError = nil
-                        activeSheet = nil
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { activeSheet = .editor }
                     }
-                    .disabled(!model.canEditContent || model.content.isEmpty)
-                    Button("重新获取本章") {
-                        activeSheet = nil
-                        refreshCurrentChapter()
-                    }
-                    .disabled(model.isLoading || !model.canEditContent)
-                } header: {
-                    Text("正文")
-                } footer: {
-                    if !model.canEditContent {
-                        Text("本地 TXT / EPUB 直接读取原文件。本章编辑与网络刷新仅对网络书籍开放。")
-                    }
-                }
+                    .font(.subheadline.weight(.medium))
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 3)
+                    .readingSheetGroup()
 
-                Section {
-                    NavigationLink { screenPreferences.navigationTitle("屏幕显示") } label: {
-                        Label("屏幕显示", systemImage: "sun.max")
+                    VStack(spacing: 0) {
+                        HStack {
+                            Text("屏幕方向")
+                            Spacer()
+                            Picker("屏幕方向", selection: $screenOrientation) {
+                                Text("跟随系统").tag("0")
+                                Text("竖向").tag("1")
+                                Text("横向").tag("2")
+                                Text("跟随传感器").tag("3")
+                                Text("反向竖屏").tag("4")
+                                Text("反向横屏").tag("5")
+                            }
+                            .pickerStyle(.menu)
+                            .labelsHidden()
+                        }
+                        .frame(minHeight: 44)
+                        Divider()
+                        Toggle("阅读时不自动锁屏", isOn: $keepScreenOn)
+                            .frame(minHeight: 44)
+                        if #available(iOS 16.0, *) {
+                            Divider()
+                            Toggle("阅读时隐藏小横条", isOn: $hideHomeIndicator)
+                                .frame(minHeight: 44)
+                        }
+                        Divider()
+                        Toggle("隐藏状态栏", isOn: $hideStatusBar)
+                            .frame(minHeight: 44)
                     }
-                    NavigationLink { listeningPreferences } label: {
-                        Label("听书设置", systemImage: "headphones")
-                    }
+                    .font(.subheadline.weight(.medium))
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 3)
+                    .readingSheetGroup()
                 }
-
-                Section("操作") {
-                    Button("自动阅读设置") {
-                        activeSheet = nil
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { activeSheet = .autoRead }
-                    }
-                    Button("点击区域设置") {
-                        activeSheet = nil
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { activeSheet = .clickActions }
-                    }
-                }
+                .foregroundStyle(.primary)
+                .frame(maxWidth: 540)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 8)
+                .frame(maxWidth: .infinity)
             }
-            .navigationTitle("阅读设置")
-            .navigationBarTitleDisplayMode(.inline)
+            .readingSheetSurface()
+            .readingSheetTitle("阅读设置")
             .alert("阅读设置未保存", isPresented: readerSettingErrorPresented(inSettings: true)) {
                 Button("好", role: .cancel) { readerSettingSaveError = nil }
             } message: { Text(readerSettingSaveError ?? "") }
             .toolbar {
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("完成") { activeSheet = nil }
-                }
+                readerSettingsActions
             }
         }
-        .readingPresentationDetents([.medium, .large])
-    }
-
-
-    private var screenPreferences: some View {
-        Form {
-            Section("屏幕") {
-                Picker("屏幕方向", selection: $screenOrientation) {
-                    Text("跟随系统").tag("0")
-                    Text("竖向").tag("1")
-                    Text("横向").tag("2")
-                    Text("跟随传感器").tag("3")
-                    Text("反向竖屏").tag("4")
-                    Text("反向横屏").tag("5")
-                }
-                Toggle("阅读时不自动锁屏", isOn: $keepScreenOn)
-                if #available(iOS 16.0, *) {
-                    Toggle("阅读时隐藏小横条", isOn: $hideHomeIndicator)
-                }
-                Toggle("隐藏状态栏", isOn: $hideStatusBar)
-                Toggle("显示亮度调节", isOn: $showBrightness)
-                Button("跟随系统亮度") {
-                    followsSystemBrightness = true
-                    storedReaderBrightness = 0
-                    UIScreen.main.brightness = CGFloat(brightnessBeforeReading)
-                    readerBrightness = brightnessBeforeReading
-                }
-            }
-        }
+        .navigationViewStyle(.stack)
     }
 
     private var listeningPreferences: some View {
-        ListeningSettingsView(isListening: listeningPack != nil, canStart: canStartListening,
+        ListeningSettingsView(presented: true, isListening: listeningPack != nil, canStart: canStartListening,
                               speechTimerRemaining: speechTimerRemaining, onStart: startListening)
-    }
-
-    private var contentEditor: some View {
-        ReadingNavigationStack {
-            VStack(spacing: 0) {
-                TextEditor(text: $editedContent)
-                    .font(.body.monospaced())
-                    .padding(8)
-                if let contentEditError {
-                    Text(contentEditError)
-                        .font(.footnote)
-                        .foregroundStyle(.red)
-                        .padding(.horizontal)
-                        .padding(.bottom, 8)
-                }
-            }
-            .navigationTitle(model.title)
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("取消") { activeSheet = nil }
-                }
-                ToolbarItemGroup(placement: .topBarTrailing) {
-                    Button("重置") { refreshEditorFromSource() }
-                    Button("保存") { saveEditedContent() }
-                        .disabled(editedContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                }
-            }
-        }
     }
 
     private func refreshCurrentChapter() {
         stopSpeechIfNeeded()
         Task {
-            await model.load(rules: replaceRules.rules, forceRefresh: true)
+            if pageAnimation == 3, model.scrollChapters.contains(where: { $0.id == model.currentIndex }) {
+                await model.retryContinuousChapter(index: model.currentIndex, rules: model.usesReplaceRules ? replaceRules.rules : [])
+            } else {
+                await model.load(rules: model.usesReplaceRules ? replaceRules.rules : [], forceRefresh: true)
+            }
             readerPosition = min(readerPosition, model.content.utf16.count)
         }
     }
-
-    private func refreshEditorFromSource() {
-        contentEditError = nil
-        Task {
-            await model.load(rules: replaceRules.rules, forceRefresh: true)
-            editedContent = model.content
-            if let error = model.diagnostics.first(where: { $0.severity == .error }) {
-                contentEditError = error.message
-            }
-        }
-    }
-
-    private func saveEditedContent() {
-        contentEditError = nil
-        Task {
-            do {
-                try await model.saveEditedContent(editedContent)
-                readerPosition = min(readerPosition, editedContent.utf16.count)
-                if activeSheet == .editor { activeSheet = nil }
-            } catch {
-                contentEditError = error.localizedDescription
-            }
-        }
-    }
-
 
     private var tableOfContents: some View {
         ReaderTableOfContents(
@@ -2004,43 +2122,61 @@ struct ReaderView: View {
     }
 
     private var contentSearchSheet: some View {
-        ReadingNavigationStack {
+        let results = contentSearchResults
+        return ReadingNavigationStack {
             Group {
                 if contentSearchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     ReadingUnavailableView("搜索正文", systemImage: "magnifyingglass", description: Text("输入本章正文关键字"))
-                } else if contentSearchResults.isEmpty {
+                } else if results.isEmpty {
                     ReadingUnavailableView.search(text: contentSearchQuery)
                 } else {
-                    List(contentSearchResults) { paragraph in
-                        Button {
-                            navigate(to: model.currentIndex, position: paragraph.id)
-                            activeSheet = nil
-                        } label: {
-                            Text(paragraph.text)
-                                .foregroundStyle(.primary)
-                                .lineLimit(3)
-                                .frame(maxWidth: .infinity, alignment: .leading)
+                    List {
+                        Section("本章 · \(results.count) 个匹配段落") {
+                            ForEach(results) { paragraph in
+                                Button {
+                                    navigate(to: model.currentIndex, position: paragraph.id)
+                                    showsContentSearch = false
+                                } label: {
+                                    Text(paragraph.text)
+                                        .foregroundStyle(.primary)
+                                        .lineLimit(3)
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                }
+                            }
                         }
                     }
                 }
             }
-            .navigationTitle("正文搜索")
-            .navigationBarTitleDisplayMode(.inline)
-            .searchable(text: $contentSearchQuery, prompt: "搜索本章")
+            .readingSheetTitle("正文搜索")
+            .searchable(text: $contentSearchQuery, placement: .navigationBarDrawer(displayMode: .always), prompt: "搜索本章")
             .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("关闭") { activeSheet = nil }
+                ReadingSheetActions {
+                    ReadingSheetCloseButton { showsContentSearch = false }
                 }
             }
         }
     }
 
-    private var contentSearchResults: [ReaderParagraph] {
+    private struct SearchHit: Identifiable {
+        let id: Int
+        let text: AttributedString
+    }
+
+    private var contentSearchResults: [SearchHit] {
         let query = contentSearchQuery.trimmingCharacters(in: .whitespacesAndNewlines).readerText(simplified: simplifiedChinese)
         guard !query.isEmpty else { return [] }
         return model.paragraphs.compactMap { paragraph in
             let text = paragraph.text.readerText(simplified: simplifiedChinese)
-            return text.localizedCaseInsensitiveContains(query) ? ReaderParagraph(id: paragraph.id, text: text) : nil
+            guard let hit = text.range(of: query, options: .caseInsensitive, locale: .current) else { return nil }
+            let start = text.index(hit.lowerBound, offsetBy: -16, limitedBy: text.startIndex) ?? text.startIndex
+            let end = text.index(hit.upperBound, offsetBy: 44, limitedBy: text.endIndex) ?? text.endIndex
+            var snippet = AttributedString((start == text.startIndex ? "" : "…") + text[start..<hit.lowerBound])
+            var matched = AttributedString(text[hit])
+            matched.inlinePresentationIntent = .stronglyEmphasized
+            matched.backgroundColor = .yellow.opacity(0.55)
+            snippet += matched
+            snippet += AttributedString(text[hit.upperBound..<end] + (end == text.endIndex ? "" : "…"))
+            return SearchHit(id: paragraph.id, text: snippet)
         }
     }
 
@@ -2074,9 +2210,12 @@ struct ReaderView: View {
                     }
                 }
             }
-            .navigationTitle("书签")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("关闭") { activeSheet = nil } } }
+            .readingSheetTitle("书签")
+            .toolbar {
+                ReadingSheetActions {
+                    ReadingSheetCloseButton { activeSheet = nil }
+                }
+            }
         }
     }
 
@@ -2189,7 +2328,7 @@ struct ReaderView: View {
         activeSheet = nil
         isAutoReading = false
         listeningPack = pack
-        listeningVoice = pack.resolve(.preferred)
+        listeningVoice = .preferred
         scheduleSpeechTimer()
         startConfiguredSpeech()
     }
@@ -2323,18 +2462,11 @@ struct ReaderView: View {
     }
 
     private func readerSettingErrorPresented(inSettings: Bool) -> Binding<Bool> {
-        Binding(get: { readerSettingSaveError != nil && (activeSheet == .settings) == inSettings },
+        Binding(get: { readerSettingSaveError != nil && (bottomPanel == .settings) == inSettings },
                 set: { if !$0 { readerSettingSaveError = nil } })
     }
 
-    private func saveReaderSetting(_ updated: Book, change: @escaping (inout BookReadConfig) -> Void) {
-        guard library.contains(updated) else { return }
-        Task {
-            if !(await library.updateReadConfig(for: updated, change)) {
-                readerSettingSaveError = "本次设置仅在当前阅读中生效。" + (library.errorMessage ?? "书架记录已变化，请重新打开书籍后再试。")
-            }
-        }
-    }
+
 
 }
 
@@ -2430,7 +2562,7 @@ private struct ReaderListeningPlayer: View {
                             }
                             .overlay {
                                 if speech.isPreparingAudio {
-                                    ProgressView().controlSize(.small).tint(.white)
+                                    RagdollLoading(width: 28)
                                         .allowsHitTesting(false)
                                         .accessibilityHidden(true)
                                 }
@@ -2463,5 +2595,51 @@ private struct ReaderListeningPlayer: View {
                 .frame(height: 40)
         }
         .shadow(color: .black.opacity(0.12), radius: 4, y: 2)
+    }
+}
+
+private struct ReaderBottomPanel<Content: View>: View {
+    let height: CGFloat
+    let bottomInset: CGFloat
+    let dismiss: () -> Void
+    @ViewBuilder var content: Content
+    @GestureState private var dragOffset: CGFloat = 0
+    @State private var releaseOffset: CGFloat = 0
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Capsule().fill(Color.secondary.opacity(0.45))
+                .frame(width: 36, height: 5)
+                .frame(height: 16)
+                .accessibilityHidden(true)
+            content
+        }
+        .frame(height: height)
+        .padding(.bottom, bottomInset)
+        .background(Color(uiColor: .systemBackground))
+        .clipShape(TopCorners())
+        .simultaneousGesture(DragGesture(coordinateSpace: .named("reader.bottomPanel"))
+            .updating($dragOffset) { drag, offset, _ in
+                if drag.startLocation.y < 65 { offset = max(0, drag.translation.height) }
+            }
+            .onEnded { drag in
+                if drag.startLocation.y < 65, drag.translation.height > 24,
+                   drag.predictedEndTranslation.height > 80 {
+                    // Continue the exit from the finger's last position when the gesture resets.
+                    releaseOffset = drag.translation.height
+                    dismiss()
+                }
+            })
+        .offset(y: max(dragOffset, releaseOffset))
+        .coordinateSpace(name: "reader.bottomPanel")
+        .accessibilityElement(children: .contain)
+        .accessibilityAction(.escape, dismiss)
+    }
+
+    private struct TopCorners: Shape {
+        func path(in rect: CGRect) -> Path {
+            Path(UIBezierPath(roundedRect: rect, byRoundingCorners: [.topLeft, .topRight],
+                              cornerRadii: CGSize(width: 18, height: 18)).cgPath)
+        }
     }
 }

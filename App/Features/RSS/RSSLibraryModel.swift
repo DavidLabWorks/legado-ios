@@ -6,6 +6,7 @@ import LegadoCore
 
 @MainActor
 final class RSSLibraryModel: ObservableObject {
+    @Published private(set) var hasLoadedSources = false
     @Published private(set) var sources: [RssSource] = []
     @Published private(set) var articles: [RssArticle] = []
     @Published private(set) var stars: [RssStar] = []
@@ -58,19 +59,28 @@ final class RSSLibraryModel: ObservableObject {
     }
 
     func reloadAfterBackup() async {
-        articleRequestID = UUID()
+        resetActiveFeed()
+        await load()
+    }
+
+    private func resetActiveFeed() {
+        invalidatePageRequests()
         activeFeed = nil
-        loadingMoreRequestID = nil
-        refreshingFeed = false
         paginationError = nil
         visitedPageURLs.removeAll()
         articles = []
         nextURL = nil
         hasLoadedFeed = false
-        await load()
+    }
+
+    private func invalidatePageRequests() {
+        articleRequestID = UUID()
+        loadingMoreRequestID = nil
+        refreshingFeed = false
     }
 
     func load() async {
+        defer { hasLoadedSources = true }
         do {
             async let loadedSources = sourceRepository.all()
             async let loadedStars = starRepository.all()
@@ -98,7 +108,9 @@ final class RSSLibraryModel: ObservableObject {
         }
     }
 
-    func importText(_ text: String) async {
+    @discardableResult
+    func importText(_ text: String) async -> Bool {
+        var succeeded = false
         await perform {
             let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
             var merged: [RssSource]
@@ -111,7 +123,9 @@ final class RSSLibraryModel: ObservableObject {
             }
             try await self.sourceRepository.save(merged)
             self.sources = try await self.sourceRepository.all()
+            succeeded = true
         }
+        return succeeded
     }
 
     func applySilentSubscription(_ data: Data) async throws {
@@ -136,16 +150,26 @@ final class RSSLibraryModel: ObservableObject {
         do {
             try await sourceRepository.remove(sourceURL: source.sourceUrl)
             if activeFeed?.origin == source.sourceUrl {
-                articleRequestID = UUID()
-                loadingMoreRequestID = nil
-                refreshingFeed = false
-                paginationError = nil
-                activeFeed = nil
-                nextURL = nil
-                articles = []
+                resetActiveFeed()
             }
             sources = try await sourceRepository.all()
         } catch { errorMessage = error.localizedDescription }
+    }
+
+    func clearArticleCache(for source: RssSource) async {
+        if activeFeed?.origin == source.sourceUrl {
+            // Invalidate pending page requests before they can write the cache back.
+            invalidatePageRequests()
+        }
+        let requestID = articleRequestID
+        do {
+            try await database.removeRssArticles(origin: source.sourceUrl)
+            if activeFeed?.origin == source.sourceUrl, articleRequestID == requestID {
+                resetActiveFeed()
+            }
+        } catch {
+            errorMessage = error.localizedDescription
+        }
     }
 
     func moveSources(from offsets: IndexSet, to destination: Int) async {
@@ -350,9 +374,9 @@ final class RSSLibraryModel: ObservableObject {
         catch { errorMessage = error.localizedDescription }
     }
 
-    func saveStar(_ value: RssStar) async {
-        do { try await starRepository.save(value); stars = try await starRepository.all() }
-        catch { errorMessage = error.localizedDescription }
+    func saveStar(_ value: RssStar) async throws {
+        try await starRepository.save(value)
+        stars = try await starRepository.all()
     }
 
     func clearStars() async {

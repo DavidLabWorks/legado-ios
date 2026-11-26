@@ -18,42 +18,78 @@ struct DiagnosticLogView: View {
     }
 
     var body: some View {
-        List {
-            Section {
-                Picker("级别", selection: $level) {
-                    Text("全部").tag("all")
-                    Text("信息").tag("info")
-                    Text("警告").tag("warning")
-                    Text("错误").tag("error")
-                }.pickerStyle(.segmented)
-                Text("\(entries.count) 条日志 · 下拉刷新")
-                    .font(.footnote).foregroundStyle(.secondary)
-            } footer: {
-                Text("在“其他设置”开启记录后，会保存网络请求、JS 输出和运行错误。崩溃诊断由 iOS 延迟提供，可搜索“系统诊断”查看。")
-            }
-            if filtered.isEmpty {
-                ReadingUnavailableView(query.isEmpty ? "暂无日志" : "没有匹配的日志", systemImage: "doc.text.magnifyingglass")
-            } else {
-                ForEach(filtered) { entry in
-                    VStack(alignment: .leading, spacing: 6) {
-                        HStack {
-                            Text(entry.category).font(.caption.weight(.semibold))
-                            Text(levelTitle(entry.level)).font(.caption)
-                                .foregroundStyle(entry.level == .error ? .red : .secondary)
-                            Spacer()
-                            Text(entry.date, format: .dateTime.month().day().hour().minute().second())
-                                .font(.caption2).foregroundStyle(.secondary)
-                        }
-                        Text(entry.message).font(.system(.footnote, design: .monospaced)).textSelection(.enabled)
-                    }.padding(.vertical, 3)
+        let matches = filtered
+        VStack(spacing: 0) {
+            ReadingPillSearchField(placeholder: "搜索内容或分类", text: $query)
+            Picker("级别", selection: $level) {
+                Text("全部").tag("all")
+                ForEach(DiagnosticLogEntry.Level.allCases, id: \.self) { level in
+                    Text(levelTitle(level)).tag(level.rawValue)
                 }
             }
+            .pickerStyle(.segmented)
+            .padding(.horizontal, 20)
+            .padding(.vertical, 8)
+
+            List {
+                if matches.isEmpty {
+                    ReadingUnavailableView {
+                        Label(entries.isEmpty ? "暂无日志" : "没有匹配的日志",
+                              systemImage: entries.isEmpty ? "doc.text" : "magnifyingglass")
+                    } description: {
+                        if entries.isEmpty {
+                            Text(ApplicationSettingsStore.shared.settings.recordLog
+                                 ? "网络请求、JS 输出和运行错误将显示在这里。"
+                                 : "在“其他设置”开启“记录运行日志”，即可查看网络请求、JS 输出和运行错误。")
+                        } else {
+                            Text("试试其他关键词或日志级别。")
+                        }
+                    } actions: {
+                        if !entries.isEmpty {
+                            Button("清除筛选") {
+                                query = ""
+                                level = "all"
+                            }
+                        }
+                    }
+                    .padding(.vertical, 32)
+                    .listRowBackground(ReadingTheme.canvas)
+                    .listRowSeparator(.hidden)
+                } else {
+                    Section {
+                        ForEach(matches) { entry in
+                            VStack(alignment: .leading, spacing: 8) {
+                                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                                    levelLabel(entry.level)
+                                        .font(.caption.weight(.semibold))
+                                    Text(entry.category).font(.subheadline.weight(.semibold))
+                                }
+                                Text(entry.message)
+                                    .font(.system(.footnote, design: .monospaced))
+                                    .textSelection(.enabled)
+                                Text(entry.date, format: .dateTime.month().day().hour().minute().second())
+                                    .font(.caption).foregroundStyle(.secondary)
+                            }
+                            .padding(.vertical, 5)
+                        }
+                        .listRowBackground(ReadingTheme.surface)
+                    } header: {
+                        Text(matches.count == entries.count ? "共 \(entries.count) 条日志" : "显示 \(matches.count) 条 · 共 \(entries.count) 条")
+                            .textCase(nil)
+                    } footer: {
+                        Text("崩溃诊断由 iOS 延迟提供，可搜索“系统诊断”查看。")
+                    }
+                }
+            }
+            .listStyle(.plain)
+            .readingScrollContentBackgroundHidden()
+            .readingScrollDismissesKeyboard()
+            .refreshable { reload() }
         }
+        .background(ReadingTheme.canvas)
         .navigationTitle("日志与诊断")
         .navigationBarTitleDisplayMode(.inline)
-        .searchable(text: $query, prompt: "搜索内容或分类")
         .task { reload() }
-        .refreshable { reload() }
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 Menu("日志操作", systemImage: "ellipsis") {
@@ -83,6 +119,14 @@ struct DiagnosticLogView: View {
     }
 
     private func reload() { entries = DiagnosticLog.shared.snapshot() }
+    @ViewBuilder private func levelLabel(_ level: DiagnosticLogEntry.Level) -> some View {
+        switch level {
+        case .info: Label(levelTitle(level), systemImage: "info.circle").foregroundStyle(.secondary)
+        case .warning: Label(levelTitle(level), systemImage: "exclamationmark.triangle").foregroundStyle(ReadingTheme.ink)
+        case .error: Label(levelTitle(level), systemImage: "exclamationmark.octagon.fill").foregroundStyle(.red)
+        }
+    }
+
     private func levelTitle(_ level: DiagnosticLogEntry.Level) -> String {
         switch level { case .info: "信息"; case .warning: "警告"; case .error: "错误" }
     }

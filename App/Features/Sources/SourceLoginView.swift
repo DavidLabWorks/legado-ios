@@ -4,6 +4,7 @@ import UIKit
 
 struct SourceLoginView: View {
     let source: BookSource
+    var sheetClose: (() -> Void)? = nil
     @State private var reloadID = UUID()
     @State private var status = "打开登录页后，Cookie 会自动同步给搜索与阅读请求。"
     @State private var isChecking = false
@@ -14,7 +15,7 @@ struct SourceLoginView: View {
                 Image(systemName: "lock.shield.fill").foregroundStyle(ReadingTheme.accent)
                 Text(status).font(.caption).foregroundStyle(.secondary).lineLimit(2)
                 Spacer()
-                if isChecking { ProgressView().controlSize(.small) }
+                if isChecking { RagdollLoading(width: 28) }
             }
             .padding(.horizontal, 14).padding(.vertical, 10)
             .background(Color(uiColor: .secondarySystemBackground))
@@ -33,12 +34,8 @@ struct SourceLoginView: View {
                 ReadingUnavailableView("登录地址无效", systemImage: "link.badge.plus", description: Text(source.loginUrl ?? "书源没有配置登录地址"))
             }
         }
-        .navigationTitle("登录 · \(source.bookSourceName)")
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbar {
-            ToolbarItem(placement: .topBarTrailing) {
-                Button("重新载入", systemImage: "arrow.clockwise") { reloadID = UUID() }
-            }
+        .readingRouteHeader("登录 · \(source.bookSourceName)", close: sheetClose) {
+            Button("重新载入", systemImage: "arrow.clockwise") { reloadID = UUID() }
         }
     }
 
@@ -74,7 +71,7 @@ private struct SourceLoginWebView: UIViewRepresentable {
     func makeUIView(context: Context) -> WKWebView {
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = .default()
-        let webView = WKWebView(frame: .zero, configuration: configuration)
+        let webView = ReadingWebView(frame: .zero, configuration: configuration)
         webView.isOpaque = false
         webView.backgroundColor = UIColor(ReadingTheme.canvas)
         webView.scrollView.backgroundColor = UIColor(ReadingTheme.canvas)
@@ -563,12 +560,11 @@ struct BrowserBookPageView: View {
                     .padding(10)
                 }
             }
-            .navigationTitle(searchPage.map { "\($0.source.bookSourceName) · 网页搜索" } ?? "101 看书")
-            .navigationBarTitleDisplayMode(.inline)
+            .readingSheetTitle(searchPage.map { "\($0.source.bookSourceName) · 网页搜索" } ?? "101 看书")
             .toolbar {
-                ToolbarItem(placement: .cancellationAction) { Button("关闭") { dismiss() }.disabled(importing) }
-                ToolbarItem(placement: .primaryAction) {
+                ReadingSheetActions {
                     Button("重新打开") { browser.webView.load(URLRequest(url: url)) }.disabled(importing)
+                    ReadingSheetCloseButton { dismiss() }.disabled(importing)
                 }
             }
         }
@@ -606,7 +602,7 @@ private final class BrowserBookDocument: NSObject, ObservableObject, WKNavigatio
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = manualVerification ? .nonPersistent() : Self.websiteDataStore
         if manualVerification { configuration.defaultWebpagePreferences.preferredContentMode = .mobile }
-        webView = WKWebView(frame: .zero, configuration: configuration)
+        webView = ReadingWebView(frame: .zero, configuration: configuration)
         super.init()
         webView.navigationDelegate = self
     }
@@ -888,11 +884,11 @@ struct BrowserChapterView: View {
                     .buttonStyle(.borderedProminent).padding().disabled(!browser.ready || submission == nil)
                 }
             }
-            .navigationTitle(chapter.title).navigationBarTitleDisplayMode(.inline)
+            .readingSheetTitle(chapter.title)
             .toolbar {
-                ToolbarItem(placement: .cancellationAction) { Button("关闭") { dismiss() } }
-                ToolbarItem(placement: .primaryAction) {
+                ReadingSheetActions {
                     if let pageURL { Button("重新载入") { browser.webView.load(URLRequest(url: pageURL)) } }
+                    ReadingSheetCloseButton { dismiss() }
                 }
             }
         }

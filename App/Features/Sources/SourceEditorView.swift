@@ -9,6 +9,9 @@ struct SourceEditorView: View {
     @State private var document: BookSourceEditorDocument
     @State private var jsonText: String
     @State private var mode = 0
+    @State private var expandedField: String?
+    @State private var fullScreenField: BookSourceEditorField?
+    @FocusState private var focusedField: String?
     @State private var sectionID = "basic"
     @State private var errorMessage: String?
     @State private var validation: [BookSourceIssue] = []
@@ -53,22 +56,20 @@ struct SourceEditorView: View {
                     Form {
                         if sectionID == "options" { options }
                         else {
-                            Section(currentSection.title) {
-                                ForEach(currentSection.fields) { field in
-                                    NavigationLink {
-                                        RuleCodeFieldView(title: field.title, path: field.path, text: string(field.path),
-                                                          language: field.isJavaScript ? .javascript : .rule, help: field.help)
-                                    } label: {
-                                        VStack(alignment: .leading, spacing: 5) {
-                                            Text(field.title)
-                                            Text(document.value(at: field.path)?.stringValue.isEmpty == false ? document.value(at: field.path)!.stringValue : field.path)
-                                                .font(.caption.monospaced()).foregroundStyle(.secondary).lineLimit(2)
-                                        }
-                                    }
+                            if currentSection.id == "basic" {
+                                Section("基础资料") {
+                                    ForEach(currentSection.fields.prefix(4)) { fieldEditor($0) }
+                                }
+                                Section("规则与请求") {
+                                    ForEach(currentSection.fields.dropFirst(4)) { fieldEditor($0) }
+                                }
+                            } else {
+                                Section(currentSection.title) {
+                                    ForEach(currentSection.fields) { fieldEditor($0) }
                                 }
                             }
                             Section {
-                                Text("点击字段可全屏编辑规则。支持 @css:、XPath、$. JSONPath、@js:、{{key}}、{{page}} 和 ## 替换语法。未识别的扩展字段保留在 JSON 中。")
+                                Text("点规则可展开编辑，也可选择全屏编辑。支持 @css:、XPath、$. JSONPath、@js:、{{key}}、{{page}} 和 ## 替换语法。未识别的扩展字段保留在 JSON 中。")
                                     .font(.footnote).foregroundStyle(.secondary)
                             }
                         }
@@ -83,12 +84,9 @@ struct SourceEditorView: View {
                     }
                 }
             }
-            .navigationTitle(original == nil ? "新建书源" : "编辑书源")
-            .navigationBarTitleDisplayMode(.inline)
+            .readingSheetTitle(original == nil ? "新建书源" : "编辑书源")
             .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("取消") { if isDirty { showsDiscard = true } else { dismiss() } }
-                }
+                // Keep the native menu separate so UIKit exposes the adjacent edit buttons.
                 ToolbarItem(placement: .topBarTrailing) {
                     Menu("更多", systemImage: "ellipsis.circle") {
                         Button("格式化 JSON", systemImage: "text.alignleft") { perform { try synchronize(); jsonText = try document.json() } }
@@ -106,8 +104,18 @@ struct SourceEditorView: View {
                         }
                     }
                 }
-                ToolbarItem(placement: .confirmationAction) {
-                    Button(isSaving ? "保存中" : "保存", action: save).disabled(isSaving)
+                ReadingSheetActions {
+                    Button("取消") { if isDirty { showsDiscard = true } else { dismiss() } }
+                    ReadingSheetActionButton(isWorking: isSaving, action: save)
+                }
+            }
+            .readingNavigationDestination(isPresented: Binding(
+                get: { fullScreenField != nil },
+                set: { if !$0 { fullScreenField = nil } }
+            )) {
+                if let field = fullScreenField {
+                    RuleCodeFieldView(title: field.title, path: field.path, text: string(field.path),
+                                      language: field.isJavaScript ? .javascript : .rule, help: field.help)
                 }
             }
             .readingNavigationDestination(isPresented: Binding(
@@ -124,7 +132,51 @@ struct SourceEditorView: View {
                 Button("放弃修改", role: .destructive) { dismiss() }
             }
         }
+        .disabled(isSaving)
         .interactiveDismissDisabled(isDirty || isSaving)
+    }
+
+    @ViewBuilder
+    private func fieldEditor(_ field: BookSourceEditorField) -> some View {
+        switch field.path {
+        case "bookSourceName", "bookSourceUrl", "bookSourceGroup", "bookSourceComment", "bookUrlPattern", "concurrentRate":
+            VStack(alignment: .leading, spacing: 5) {
+                Text(field.title).font(.subheadline.weight(.medium))
+                ReadingTextField(field.path, text: string(field.path), axis: field.path == "bookSourceComment" ? .vertical : .horizontal)
+                    .focused($focusedField, equals: field.path)
+                    .textInputAutocapitalization(.never).disableAutocorrection(true)
+                    .accessibilityLabel(field.title)
+                    .accessibilityIdentifier(field.path)
+                if focusedField == field.path {
+                    Text(field.help).font(.footnote).foregroundStyle(.secondary)
+                }
+            }
+        default:
+            let expanded = expandedField == field.path
+            VStack(alignment: .leading, spacing: 8) {
+                Button {
+                    expandedField = expanded ? nil : field.path
+                } label: {
+                    HStack {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(field.title)
+                            let value = document.value(at: field.path)?.stringValue ?? ""
+                            Text(expanded || value.isEmpty ? field.path : value)
+                                .font(.caption.monospaced()).foregroundStyle(.secondary).lineLimit(2)
+                        }
+                        Spacer()
+                        Image(systemName: expanded ? "chevron.up" : "chevron.down").font(.caption)
+                    }.contentShape(Rectangle())
+                }.buttonStyle(.plain).accessibilityIdentifier("sourceField." + field.path)
+                if expanded {
+                    let language: SyntaxCodeEditor.Language = field.isJavaScript ? .javascript : .rule
+                    SyntaxCodeEditor(text: string(field.path), language: language, inlineID: field.path)
+                        .frame(minHeight: 120)
+                    Text(field.help).font(.footnote).foregroundStyle(.secondary)
+                    Button("全屏编辑") { fullScreenField = field }.buttonStyle(.borderless)
+                }
+            }
+        }
     }
 
     private var options: some View {

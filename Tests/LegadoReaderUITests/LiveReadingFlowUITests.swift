@@ -58,14 +58,14 @@ final class LiveReadingFlowUITests: XCTestCase {
         XCTAssertTrue(app.navigationBars["搜索"].waitForExistence(timeout: 30))
         app.buttons["搜索选项"].tap()
         app.buttons["书源管理"].tap()
-        XCTAssertTrue(app.navigationBars["书源"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.navigationBars["书源管理"].waitForExistence(timeout: 10))
         app.buttons["更多"].firstMatch.tap()
         app.buttons["URL 或粘贴 JSON"].tap()
         let url = app.textFields["https://example.com/sources.json"]
         XCTAssertTrue(url.waitForExistence(timeout: 10))
         url.tap()
         url.typeText("https://legado.aoaostar.com/sources/b778fe6b.json")
-        app.navigationBars["导入书源"].buttons["导入"].tap()
+        app.navigationBars["导入书源"].buttons["预检"].tap()
         XCTAssertTrue(app.navigationBars["书源导入预检"].waitForExistence(timeout: 120))
         app.navigationBars["书源导入预检"].buttons["选择"].tap()
         app.buttons["全选"].tap()
@@ -75,7 +75,7 @@ final class LiveReadingFlowUITests: XCTestCase {
         XCTAssertTrue(app.alerts["书源导入完成"].waitForExistence(timeout: 90))
         attach("02-import-completed")
         app.alerts.buttons["好"].tap()
-        app.navigationBars["书源"].buttons.element(boundBy: 0).tap()
+        app.navigationBars["书源管理"].buttons.element(boundBy: 0).tap()
         selectSearchSource("DragonQuestQBall")
         let search = app.searchFields["书名或作者"]
         search.tap()
@@ -145,13 +145,13 @@ final class LiveReadingFlowUITests: XCTestCase {
         }
         app.buttons["分组或书源"].tap()
         app.segmentedControls.buttons["书源"].tap()
-        let filter = app.searchFields["筛选书源"]
+        let filter = app.textFields["筛选书源"]
         filter.tap()
         filter.typeText(sourceID)
         let source = app.staticTexts[sourceID].firstMatch
         XCTAssertTrue(source.waitForExistence(timeout: 10))
         source.tap()
-        app.buttons["确定"].tap()
+        app.buttons["保存"].tap()
     }
 
     private func waitForBody(containing chapter: String) {

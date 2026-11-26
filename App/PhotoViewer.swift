@@ -21,7 +21,7 @@ struct PhotoViewer: View {
     @Environment(\.dismiss) private var dismiss
     private let pageCount: Int
     private let imageLabel: String
-    private let loadPhoto: (Int) async throws -> PreviewPhoto
+    private let loadPhoto: (Int, _ retry: Bool) async throws -> PreviewPhoto
     @State private var index: Int
     @State private var photos: [Int: PreviewPhoto] = [:]
     @State private var failed: Set<Int> = []
@@ -40,7 +40,7 @@ struct PhotoViewer: View {
     private let onLocate: ((Int) -> Void)?
 
     init(pageCount: Int = 1, index: Int = 0, imageLabel: String = "图片",
-         onLocate: ((Int) -> Void)? = nil, loadPhoto: @escaping (Int) async throws -> PreviewPhoto) {
+         onLocate: ((Int) -> Void)? = nil, loadPhoto: @escaping (Int, _ retry: Bool) async throws -> PreviewPhoto) {
         self.pageCount = pageCount
         self.imageLabel = imageLabel
         self.onLocate = onLocate
@@ -82,11 +82,11 @@ struct PhotoViewer: View {
                         VStack(spacing: 12) {
                             ReadingUnavailableView("图片加载失败", systemImage: "photo.badge.exclamationmark")
                                 .allowsHitTesting(false)
-                            Button("重新加载") { Task { await load(page) } }
+                            Button("重新加载") { Task { await load(page, retry: true) } }
                                 .buttonStyle(.bordered)
                         }
                     } else if photos[page] == nil {
-                        ProgressView().allowsHitTesting(false)
+                        RagdollLoading(width: 80).allowsHitTesting(false)
                     }
                 }
                 .ignoresSafeArea()
@@ -98,9 +98,8 @@ struct PhotoViewer: View {
         .task(id: index) {
             let current = index
             photos = photos.filter { abs($0.key - current) <= 1 }
-            for page in [current, current + 1, current - 1] where (0..<pageCount).contains(page) {
-                guard !Task.isCancelled else { return }
-                if photos[page] == nil && !failed.contains(page) { await load(page) }
+            if (0..<pageCount).contains(current), photos[current] == nil, !failed.contains(current) {
+                await load(current)
             }
         }
     }
@@ -143,7 +142,7 @@ struct PhotoViewer: View {
             Spacer()
             Button(action: save) {
                 HStack(spacing: 6) {
-                    if saving { ProgressView() }
+                    if saving { RagdollLoading(width: 28) }
                     else { Image(systemName: "arrow.down.to.line") }
                     Text("保存")
                 }
@@ -208,7 +207,7 @@ struct PhotoViewer: View {
         if let loaded = photos[page] {
             photo = loaded
         } else {
-            photo = try await loadPhoto(page)
+            photo = try await loadPhoto(page, false)
         }
         try Task.checkCancellation()
         guard let thumbnail = await photo.image.byPreparingThumbnail(ofSize: CGSize(width: 320, height: 320)) else {
@@ -231,10 +230,10 @@ struct PhotoViewer: View {
         showsControls || photos[index] == nil
     }
 
-    private func load(_ page: Int) async {
+    private func load(_ page: Int, retry: Bool = false) async {
         failed.remove(page)
         do {
-            let photo = try await loadPhoto(page)
+            let photo = try await loadPhoto(page, retry)
             try Task.checkCancellation()
             if abs(index - page) <= 1 { photos[page] = photo }
         } catch {
@@ -290,7 +289,7 @@ private struct PhotoThumbnail: View {
                 } else if failed {
                     Image(systemName: "photo").foregroundStyle(.secondary)
                 } else {
-                    ProgressView()
+                    RagdollLoading()
                 }
             }
             .clipShape(tile)

@@ -7,7 +7,48 @@ struct ReplaceRuleExecutionTests {
         let book = Book(bookUrl: "book", name: "测试书", origin: "https://source.test")
         let chapter = BookChapter(url: "chapter", title: title, bookUrl: book.bookUrl, index: 11)
         return ContentSanitizer().process(book: book, chapter: chapter, content: content, rules: rules,
-            removeDuplicateTitle: false, resegment: false)
+            removeDuplicateTitle: false, trimParagraphs: false)
+    }
+
+    @Test func savedFilterCanApplyToOneBookOrAllBooks() throws {
+        var rule = ReplaceRule(id: 10, name: "过滤", pattern: "广告")
+        rule.isRegex = false
+        rule.scopeBookURL = "book/1"
+        rule.scope = "雨夜"
+        func results(for draft: ReplaceRule) throws -> [String] {
+            let saved = try JSONDecoder().decode(ReplaceRule.self, from: JSONEncoder().encode(draft))
+            return try [("book/1", "雨夜"), ("book/2", "雨夜"), ("book/3", "雨")].map { url, name in
+                try ReplaceRuleTester().test(rule: saved, title: "第一章", content: "正文广告",
+                    bookName: name, sourceURL: "同一书源", bookURL: url).report.content
+            }
+        }
+        #expect(try results(for: rule) == ["正文", "正文广告", "正文广告"])
+        rule.scopeBookURL = nil
+        rule.scope = nil
+        #expect(try results(for: rule) == ["正文", "正文", "正文"])
+    }
+
+    @Test(arguments: [
+        ("前文\n广告\n后文", "前文\n后文"),
+        ("广告\n前文\n　广告 \n广告\n后文\n广告\n广告", "前文\n后文"),
+        ("前文\n\n广告\n句中广告保留正文\n", "前文\n\n句中保留正文\n"),
+        ("前文\r\n广告广告\r\n后文", "前文\r\n后文"),
+        ("广告\n广告", "")
+    ])
+    func deletingBodyTextRemovesOnlyEmptiedParagraphs(_ sample: (String, String)) {
+        var rule = ReplaceRule(id: 1, name: "过滤", pattern: "广告")
+        rule.isRegex = false
+        #expect(process(sample.0, rules: [rule]).content == sample.1)
+    }
+
+    @Test(arguments: [false, true])
+    func multilineFiltersPreserveSurroundingParagraphs(isRegex: Bool) {
+        var rule = ReplaceRule(id: 1, name: "跨段过滤", pattern: "广告\n推广")
+        rule.isRegex = isRegex
+        #expect(process("📖前文\n广告\n推广\n后文", rules: [rule]).content == "📖前文\n后文")
+        #expect(process("📖前文广告\n推广后文", rules: [rule]).content == "📖前文后文")
+        rule.pattern = "广告\n"
+        #expect(process("前文\n广告\n\n后文", rules: [rule]).content == "前文\n\n后文")
     }
 
     @Test func evaluatesJavaScriptForEveryMatchIncludingZeroWidthMatches() {

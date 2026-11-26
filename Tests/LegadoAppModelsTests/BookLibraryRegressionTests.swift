@@ -7,6 +7,25 @@ import LegadoCore
 struct BookLibraryRegressionTests {
     private let source = BookSource(bookSourceUrl: "https://source.test", bookSourceName: "测试源")
 
+    @Test func savingGroupDraftRemovesOnlyDeletedMembershipsAndRejectsStaleDraft() async throws {
+        let db = try LegadoDatabase(url: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString))
+        let groups = SQLiteBookGroupRepository(database: db)
+        let books = SQLiteBookRepository(database: db)
+        let original = [BookGroup(groupId: 1, groupName: "删除"), BookGroup(groupId: 2, groupName: "保留")]
+        var book = Book(bookUrl: "book", name: "书", origin: source.bookSourceUrl)
+        book.group = 3
+        try await groups.save(original)
+        try await books.save([book])
+        let model = BookLibraryModel(repository: books, groupRepository: groups)
+        await model.load()
+        let draft = [original[1]]
+        #expect(await model.saveGroupDraft(draft, original: original))
+        #expect(try await books.load().first?.group == 2)
+        #expect(try await groups.load() == draft)
+        #expect(!(await model.saveGroupDraft([original[0]], original: original)))
+        #expect(try await groups.load() == draft)
+    }
+
     @Test(arguments: ["local", "https://source.test"])
     func selectedCoverSurvivesReopeningAndStaleBookSaves(origin: String) async throws {
         var book = Book(bookUrl: "book", name: "目标书", origin: origin)
@@ -81,13 +100,13 @@ struct BookLibraryRegressionTests {
         let model = BookLibraryModel(repository: repository, chapterRepository: InMemoryBookChapterRepository())
         await model.load()
         await model.updateProgress(for: current, chapter: chapters[1], position: 42)
-        let saved = await model.updateReadConfig(for: snapshot) { $0.reSegment = true }
+        let saved = await model.updateReadConfig(for: snapshot) { $0.useReplaceRule = false }
         #expect(saved)
         #expect(model.books.first?.name == current.name)
         #expect(model.books.first?.variable == current.variable)
         #expect(model.books.first?.durChapterPos == 42)
         #expect(model.books.first?.readConfig?.ttsEngine == "saved-engine")
-        #expect(model.books.first?.readConfig?.reSegment == true)
+        #expect(model.books.first?.readConfig?.useReplaceRule == false)
         #expect(await repository.load() == model.books)
     }
 
@@ -96,13 +115,13 @@ struct BookLibraryRegressionTests {
         let repository = InMemoryBookRepository()
         let model = BookLibraryModel(repository: repository, chapterRepository: InMemoryBookChapterRepository())
         await model.load()
-        let previewSave = await model.updateReadConfig(for: snapshot) { $0.reSegment = true }
+        let previewSave = await model.updateReadConfig(for: snapshot) { $0.useReplaceRule = false }
         #expect(!previewSave)
         #expect(model.books.isEmpty)
         var switched = snapshot
         switched.origin = "new-source"
         await model.addOrUpdate(switched)
-        let staleSave = await model.updateReadConfig(for: snapshot) { $0.reSegment = true }
+        let staleSave = await model.updateReadConfig(for: snapshot) { $0.useReplaceRule = false }
         #expect(!staleSave)
         #expect(model.books == [switched])
         #expect(await repository.load() == [switched])
@@ -112,7 +131,7 @@ struct BookLibraryRegressionTests {
         let (book, _) = fixture()
         let model = BookLibraryModel(repository: FailingBookRepository(books: [book]), chapterRepository: InMemoryBookChapterRepository())
         await model.load()
-        let saved = await model.updateReadConfig(for: book) { $0.reSegment = true }
+        let saved = await model.updateReadConfig(for: book) { $0.useReplaceRule = false }
         #expect(!saved)
         #expect(model.books == [book])
         #expect(model.errorMessage != nil)
@@ -290,7 +309,7 @@ struct BookLibraryRegressionTests {
         await books.waitForReload()
         await groups.waitForReload()
         await model.updateProgress(for: old, chapter: chapters[1], position: 84)
-        await model.setGroupSort(group, sort: BookshelfSort.author.rawValue)
+        await model.setGroupSort(group, sort: .author)
         await books.finishReload()
         await groups.finishReload()
         await reload.value
@@ -403,7 +422,7 @@ struct BookLibraryRegressionTests {
         #expect(model.updateMessage == nil)
     }
 
-    @Test func groupUpdateHonorsMembershipAndCaughtUpSetting() async {
+    @Test func pullRefreshChecksEligibleGroupBooksDespiteLegacySettings() async {
         var caughtUp = fixture().0
         caughtUp.bookUrl += "/group"
         caughtUp.group = 4
@@ -420,15 +439,15 @@ struct BookLibraryRegressionTests {
         var disabled = caughtUp
         disabled.bookUrl += "/disabled"
         disabled.canUpdate = false
-        let group = BookGroup(groupId: 4, groupName: "追更", onlyUpdateRead: true)
+        let group = BookGroup(groupId: 4, groupName: "追更", enableRefresh: false, onlyUpdateRead: true)
         let loader = RecordingShelfChapterLoader()
         let model = BookLibraryModel(repository: InMemoryBookRepository(books: [caughtUp, stillReading, other, local, disabled]),
                                      updateCoordinator: .init(repository: InMemoryBookChapterRepository(), loader: loader),
                                      chapterRepository: InMemoryBookChapterRepository(),
                                      groupRepository: InMemoryBookGroupRepository(groups: [group]))
         await model.load()
-        await model.checkForUpdates(sources: [source], group: group)
-        #expect(await loader.requestedURLs == [caughtUp.bookUrl])
+        await model.startGroupUpdate(sources: [source], group: group).value
+        #expect(Set(await loader.requestedURLs) == [caughtUp.bookUrl, stillReading.bookUrl])
     }
 
     @Test func failedShelfSaveIsNotReportedAsSuccessfulUpdate() async {
@@ -512,7 +531,7 @@ struct BookLibraryRegressionTests {
         }
     }
 
-    @Test func groupSortingSupportsEveryAndroidModeAndGlobalFallback() async {
+    @Test func groupSortingSupportsEveryModeAndDefaultsToRecentRead() async {
         var first = Book(bookUrl: "a", name: "乙", author: "张三")
         first.durChapterTime = 3; first.latestChapterTime = 1; first.order = 2
         var second = Book(bookUrl: "b", name: "丙", author: "李四")
@@ -522,6 +541,7 @@ struct BookLibraryRegressionTests {
         let model = BookLibraryModel(repository: InMemoryBookRepository(books: [first, second, third]))
         await model.load()
         var group = BookGroup(groupId: BookGroup.idAll, groupName: "全部")
+        #expect(group.bookSort == BookshelfSort.recentRead.rawValue)
         let expected: [(BookshelfSort, [String])] = [
             (.recentRead, ["a", "b", "c"]), (.recentUpdate, ["b", "c", "a"]),
             (.name, ["b", "c", "a"]), (.custom, ["b", "c", "a"]),
@@ -532,17 +552,16 @@ struct BookLibraryRegressionTests {
             #expect(model.books(in: group).map(\.id) == ids)
         }
         group.bookSort = -1
-        #expect(model.books(in: group, defaultSort: BookshelfSort.custom.rawValue).map(\.id) == ["b", "c", "a"])
+        #expect(model.books(in: group).map(\.id) == ["a", "b", "c"])
     }
 
-    @Test func groupOptionsPersistAndFailedWriteRollsBack() async {
-        let group = BookGroup(groupId: 4, groupName: "分组")
-        let repository = InMemoryBookGroupRepository(groups: [group])
+    @Test func groupSortPersistsAlongsideLegacyOptionsAndFailedWriteRollsBack() async {
+        let group = BookGroup(groupId: 4, groupName: "分组", enableRefresh: false, onlyUpdateRead: true)
+        let other = BookGroup(groupId: 8, groupName: "待读", bookSort: BookshelfSort.name.rawValue)
+        let repository = InMemoryBookGroupRepository(groups: [group, other])
         let model = BookLibraryModel(repository: InMemoryBookRepository(), groupRepository: repository)
         await model.load()
-        await model.setGroupSort(group, sort: BookshelfSort.author.rawValue)
-        await model.setGroupRefreshEnabled(group, enabled: false)
-        await model.setGroupOnlyUpdateRead(group, enabled: true)
+        await model.setGroupSort(group, sort: .author)
         let stored = await repository.load()
         #expect(stored.first?.bookSort == BookshelfSort.author.rawValue)
         #expect(stored.first?.enableRefresh == false)
@@ -550,12 +569,11 @@ struct BookLibraryRegressionTests {
         let reloaded = BookLibraryModel(repository: InMemoryBookRepository(), groupRepository: repository)
         await reloaded.load()
         #expect(reloaded.groups == stored)
+        #expect(reloaded.groups.first(where: { $0.id == other.id }) == other)
 
         let failed = BookLibraryModel(repository: InMemoryBookRepository(), groupRepository: FailingGroupRepository(groups: [group]))
         await failed.load()
-        await failed.setGroupSort(group, sort: 4)
-        await failed.setGroupRefreshEnabled(group, enabled: false)
-        await failed.setGroupOnlyUpdateRead(group, enabled: true)
+        await failed.setGroupSort(group, sort: .recentReadOrUpdate)
         #expect(failed.groups == [group])
         #expect(failed.errorMessage != nil)
     }
