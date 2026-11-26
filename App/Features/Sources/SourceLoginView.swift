@@ -197,18 +197,34 @@ private final class BackgroundWebViewRequest: NSObject, WKNavigationDelegate, WK
     private var evaluationTask: Task<Void, Never>?
     private var sourcePattern: NSRegularExpression?
     private var collectingResponse = false
-    private let readsDirectoryAtDocumentEnd: Bool
+    private let documentReadyCondition: String?
     private var emptyScriptResults = 0
 
     init(prepared: PreparedRequest, source: BookSource, timeout: TimeInterval) {
         self.prepared = prepared
         self.source = source
         self.timeout = timeout
-        readsDirectoryAtDocumentEnd = source.id.trimmingCharacters(in: CharacterSet(charactersIn: "/")) == "https://101kks.com"
+        let readsDirectoryAtDocumentEnd = source.id.trimmingCharacters(in: CharacterSet(charactersIn: "/")) == "https://101kks.com"
             && prepared.url.scheme == "https" && prepared.url.host == "101kks.com"
             && prepared.url.user == nil && prepared.url.password == nil && (prepared.url.port ?? 443) == 443
             && prepared.url.path.range(of: #"^/book/[0-9]+/index\.html$"#, options: .regularExpression) != nil
             && prepared.webJavaScript?.isEmpty == false && prepared.sourceRegex == nil
+        if readsDirectoryAtDocumentEnd {
+            documentReadyCondition = #"/展[開开]\s*全\s*部\s*[\d,]+\s*[章節节]/.test(document.body?.innerText || '')"#
+        } else if URL(string: source.id)?.host == "www.qidian.com",
+                  prepared.url.host == "www.qidian.com", prepared.url.scheme == "https",
+                  prepared.url.path.range(of: #"^/book/[0-9]+(?:/catalog)?/?$"#, options: .regularExpression) != nil,
+                  let script = prepared.webJavaScript, prepared.sourceRegex == nil {
+            if prepared.url.lastPathComponent == "catalog", script.contains("#j-catalogWrap") {
+                documentReadyCondition = "document.querySelector('#j-catalogWrap .volume li a')"
+            } else if script.contains("og:novel:book_name") {
+                documentReadyCondition = "document.querySelector('meta[property=\"og:novel:book_name\"]')"
+            } else {
+                documentReadyCondition = nil
+            }
+        } else {
+            documentReadyCondition = nil
+        }
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = .nonPersistent()
         webView = WKWebView(frame: readsDirectoryAtDocumentEnd ? UIScreen.main.bounds : .zero, configuration: configuration)
@@ -224,10 +240,10 @@ private final class BackgroundWebViewRequest: NSObject, WKNavigationDelegate, WK
     func run() async throws -> HTTPResponse {
         try Task.checkCancellation()
         if let pattern = prepared.sourceRegex { sourcePattern = try NSRegularExpression(pattern: pattern) }
-        if readsDirectoryAtDocumentEnd {
+        if let documentReadyCondition {
             let controller = webView.configuration.userContentController
             controller.add(self, contentWorld: .defaultClient, name: "legadoDirectoryReady")
-            let ready = #"if (/展[開开]\s*全\s*部\s*[\d,]+\s*[章節节]/.test(document.body?.innerText || '')) window.webkit.messageHandlers.legadoDirectoryReady.postMessage(null);"#
+            let ready = "if (\(documentReadyCondition)) window.webkit.messageHandlers.legadoDirectoryReady.postMessage(null);"
             controller.addUserScript(.init(source: ready,
                                            injectionTime: .atDocumentEnd, forMainFrameOnly: true, in: .defaultClient))
         }
@@ -316,7 +332,7 @@ private final class BackgroundWebViewRequest: NSObject, WKNavigationDelegate, WK
             guard let self else { return }
             do {
                 if let responseStatus, !(200..<300).contains(responseStatus) {
-                    if readsDirectoryAtDocumentEnd && responseStatus == 403 {
+                    if documentReadyCondition != nil && responseStatus == 403 {
                         var details = ["后台目录页 HTTP 403"]
                         let headers = HTTPURLResponse(url: prepared.url, statusCode: responseStatus, httpVersion: nil, headerFields: responseHeaders)
                         if headers?.value(forHTTPHeaderField: "cf-mitigated")?.lowercased() == "challenge" {
@@ -378,7 +394,7 @@ private final class BackgroundWebViewRequest: NSObject, WKNavigationDelegate, WK
 
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
         if message.name == "legadoDirectoryReady" {
-            guard readsDirectoryAtDocumentEnd, message.frameInfo.isMainFrame,
+            guard documentReadyCondition != nil, message.frameInfo.isMainFrame,
                   let url = webView.url, url.host == prepared.url.host, url.path == prepared.url.path,
                   url.scheme == prepared.url.scheme, url.port == prepared.url.port else { return }
             evaluatePage()
@@ -454,7 +470,7 @@ private final class BackgroundWebViewRequest: NSObject, WKNavigationDelegate, WK
     private func finish(_ result: Result<HTTPResponse, Error>) {
         guard !completed else { return }
         completed = true
-        if readsDirectoryAtDocumentEnd {
+        if documentReadyCondition != nil {
             if case .failure(let error) = result, (error as? URLError)?.code == .timedOut {
                 let stage = evaluationTask == nil ? "尚未开始解析目录" : "目录脚本已启动，返回空结果 \(emptyScriptResults) 次"
                 let status = responseStatus.map { "HTTP \($0)" } ?? "尚未收到主页面 HTTP 状态"

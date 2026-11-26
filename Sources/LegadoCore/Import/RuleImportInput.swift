@@ -15,7 +15,8 @@ public enum RuleImportInput: Sendable, Equatable {
         }
         value = value.trimmingCharacters(in: CharacterSet(charactersIn: "*`<> \n\r\t"))
         if let url = URL(string: value), ["legado", "yuedu"].contains(url.scheme?.lowercased() ?? "") {
-            guard isDeepLink(url, for: kind),
+            let allowedKinds = kind == "auto" ? ["bookSource", "rssSource", "replaceRule", "txtTocRule"] : [kind]
+            guard allowedKinds.contains(where: { isDeepLink(url, for: $0) }),
                   let src = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.first(where: { $0.name == "src" })?.value,
                   !["legado", "yuedu"].contains(URL(string: src.trimmingCharacters(in: .whitespacesAndNewlines))?.scheme?.lowercased() ?? "") else {
                 throw BookSourceImportError.invalidDocument("二维码或深链类型不匹配，需要 \(kind)")
@@ -47,6 +48,8 @@ public enum RuleImportInput: Sendable, Equatable {
         switch kind {
         case "booksource": return host == "booksource"
         case "replacerule": return host == "replace"
+        case "rsssource": return host == "rsssource" || host == "rss"
+        case "txttocrule": return host == "txttocrule"
         default: return false
         }
     }

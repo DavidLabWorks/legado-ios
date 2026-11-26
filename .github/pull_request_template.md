@@ -8,7 +8,7 @@
 
 ## AI 使用披露（必填）
 
-请选择一项；要求见 [贡献指南](https://github.com/Aminark/legado-ios/blob/main/CONTRIBUTING.md#ai-辅助贡献)。
+请选择一项；要求见 [贡献指南](https://github.com/DavidLabWorks/legado-ios/blob/main/CONTRIBUTING.md#ai-辅助贡献)。
 
 - [ ] 本次贡献未使用生成式 AI 辅助。
 - [ ] 本次贡献使用了生成式 AI 辅助，详情如下。

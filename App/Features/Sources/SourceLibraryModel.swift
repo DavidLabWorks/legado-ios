@@ -25,7 +25,7 @@ final class SourceImportFile: @unchecked Sendable {
                 guard try readableURL.resourceValues(forKeys: [.isDirectoryKey]).isDirectory != true else {
                     throw BookSourceImportError.invalidDocument("请选择书源 JSON 文件，而不是文件夹。")
                 }
-                return try Data(contentsOf: readableURL)
+                return try Data(contentsOf: readableURL, options: .mappedIfSafe)
             }
         }
         if let coordinationError { throw coordinationError }
@@ -63,9 +63,61 @@ final class SourceLibraryModel: ObservableObject {
         let items: [Item]
         let invalidItems: [InvalidItem]
 
-        var validCount: Int { items.count }
+        var backup: LibraryBackup?
+        var rules: DetectedRules?
+
+        var validCount: Int { rules?.names.count ?? items.count }
         var invalidCount: Int { invalidItems.count }
         var totalCount: Int { validCount + invalidCount }
+    }
+
+    enum DetectedRules: Sendable {
+        case websites([RssSource])
+        case replacements([ReplaceRule])
+        case contents([TxtTocRule])
+
+        var title: String {
+            switch self {
+            case .websites: "网站源"
+            case .replacements: "净化规则"
+            case .contents: "TXT 目录规则"
+            }
+        }
+
+        var names: [String] {
+            switch self {
+            case .websites(let values): values.map { $0.sourceName.isEmpty ? $0.sourceUrl : $0.sourceName }
+            case .replacements(let values): values.map(\.name)
+            case .contents(let values): values.map(\.name)
+            }
+        }
+    }
+
+    private struct ImportBatch: Sendable {
+        var sources: [BookSource] = []
+        var invalidItems: [PendingImport.InvalidItem] = []
+        var websites: [RssSource] = []
+        var replacements: [ReplaceRule] = []
+        var contents: [TxtTocRule] = []
+
+        mutating func append(_ other: Self) throws {
+            sources += other.sources
+            invalidItems += other.invalidItems
+            websites += other.websites
+            replacements += other.replacements
+            contents += other.contents
+            let populated = [!sources.isEmpty || !invalidItems.isEmpty, !websites.isEmpty, !replacements.isEmpty, !contents.isEmpty]
+            if populated.filter({ $0 }).count > 1 {
+                throw BookSourceImportError.invalidDocument("导入内容混合了多种规则，请分别导入。")
+            }
+        }
+
+        var rules: DetectedRules? {
+            if !websites.isEmpty { return .websites(websites) }
+            if !replacements.isEmpty { return .replacements(replacements) }
+            if !contents.isEmpty { return .contents(contents) }
+            return nil
+        }
     }
 
     struct Notice: Identifiable {
@@ -107,8 +159,12 @@ final class SourceLibraryModel: ObservableObject {
         SourceLibraryModel(repository: InMemoryBookSourceRepository(sources: sources))
     }
 
-    func load() async {
-        guard sources.isEmpty else { return }
+    func waitForPendingSave() async throws {
+        if let saveTask { try await saveTask.value.get() }
+    }
+
+    func load(force: Bool = false) async {
+        guard force || sources.isEmpty else { return }
         isWorking = true
         defer { isWorking = false }
         do {
@@ -145,7 +201,7 @@ final class SourceLibraryModel: ObservableObject {
                 detail: "新增 \(inserted) 个，覆盖 \(replaced) 个，警告 \(warnings) 条"
             )
         } catch {
-            notice = .init(kind: .error, title: "书源导入失败", detail: error.localizedDescription)
+            notice = .init(kind: .error, title: "规则导入失败", detail: error.localizedDescription)
         }
     }
 
@@ -157,12 +213,13 @@ final class SourceLibraryModel: ObservableObject {
         do {
             var budget = 100
             let batch = try await resolveImport(value, depth: 0, visited: [], budget: &budget)
+            if batch.rules != nil { stage(batch); return }
             guard batch.invalidItems.isEmpty else {
                 throw BookSourceImportError.invalidSources(batch.invalidItems.flatMap(\.issues))
             }
             try await applyImport(JSONEncoder().encode(batch.sources), successTitle: "书源导入完成")
         } catch {
-            notice = .init(kind: .error, title: "书源导入失败", detail: error.localizedDescription)
+            notice = .init(kind: .error, title: "规则导入失败", detail: error.localizedDescription)
         }
     }
 
@@ -207,22 +264,27 @@ final class SourceLibraryModel: ObservableObject {
         isWorking = true
         defer { isWorking = false }
         do {
-            var incoming: [String: BookSource] = [:]
-            var invalidItems: [PendingImport.InvalidItem] = []
+            var combined = ImportBatch()
             for file in files {
-                let data = try await Task.detached(priority: .userInitiated) { [importer] in
-                    try importer.normalizedData(file.read())
+                let input = try await Task.detached(priority: .userInitiated) { [importer] in
+                    let data = try file.read()
+                    if let backup = try LibraryBackup.recognize(data) {
+                        return (backup: Optional(backup), rules: Data())
+                    }
+                    return (backup: nil, rules: try importer.normalizedData(data))
                 }.value
-                var budget = 100
-                let batch = try await resolveImport(String(decoding: data, as: UTF8.self), depth: 0, visited: [], budget: &budget)
-                invalidItems.append(contentsOf: batch.invalidItems)
-                for source in batch.sources {
-                    incoming[source.id] = source
+                if let backup = input.backup {
+                    guard files.count == 1 else { throw BookSourceImportError.invalidDocument("请单独选择一个喵阅备份。") }
+                    pendingImport = .init(items: [], invalidItems: [], backup: backup)
+                    return
                 }
+                var budget = 100
+                let batch = try await resolveImport(String(decoding: input.rules, as: UTF8.self), depth: 0, visited: [], budget: &budget)
+                try combined.append(batch)
             }
-            stage(Array(incoming.values), invalidItems: invalidItems)
+            stage(combined)
         } catch {
-            notice = .init(kind: .error, title: "书源导入失败", detail: error.localizedDescription)
+            notice = .init(kind: .error, title: "文件导入失败", detail: error.localizedDescription)
         }
     }
 
@@ -236,17 +298,15 @@ final class SourceLibraryModel: ObservableObject {
         do {
             var budget = 100
             let batch = try await resolveImport(value, depth: 0, visited: [], budget: &budget)
-            stage(batch.sources, invalidItems: batch.invalidItems)
+            stage(batch)
         } catch {
-            notice = .init(kind: .error, title: "书源导入失败", detail: error.localizedDescription)
+            notice = .init(kind: .error, title: "规则导入失败", detail: error.localizedDescription)
         }
     }
 
-    private nonisolated func resolveImport(_ value: String, depth: Int, visited: Set<String>, budget: inout Int) async throws -> (
-        sources: [BookSource], invalidItems: [PendingImport.InvalidItem]
-    ) {
+    private nonisolated func resolveImport(_ value: String, depth: Int, visited: Set<String>, budget: inout Int) async throws -> ImportBatch {
         guard depth < 8 else { throw BookSourceImportError.invalidDocument("订阅清单嵌套过深") }
-        let input = try RuleImportInput.parse(value)
+        let input = try RuleImportInput.parse(value, kind: "auto")
         let data: Data
         var visited = visited
         switch input {
@@ -267,44 +327,57 @@ final class SourceLibraryModel: ObservableObject {
         let document = try JSONValue.decode(data: normalized)
         if case .array(let urls) = document["sourceUrls"] {
             guard !urls.isEmpty, urls.count <= 100 else { throw BookSourceImportError.invalidDocument("订阅清单需包含 1–100 个链接") }
-            var sources: [BookSource] = []
-            var invalid: [PendingImport.InvalidItem] = []
+            var combined = ImportBatch()
             for item in urls {
                 guard case .string(let url) = item else { throw BookSourceImportError.invalidDocument("sourceUrls 必须是链接数组") }
                 let batch = try await resolveImport(url, depth: depth + 1, visited: visited, budget: &budget)
-                sources += batch.sources
-                invalid += batch.invalidItems
+                try combined.append(batch)
             }
-            return (sources, invalid)
+            return combined
         }
-        try validateBookSourceDocumentKind(document)
-        return try validatedSources(from: normalized)
+        switch try documentKind(document) {
+        case "书源":
+            let inspected = try validatedSources(from: normalized)
+            return ImportBatch(sources: inspected.sources, invalidItems: inspected.invalidItems)
+        case "网站源":
+            let sources = try RSSSourceImporter().decode(normalized).sources
+            guard sources.allSatisfy({ !$0.sourceUrl.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) else {
+                throw RSSSourceImportError.invalidSource
+            }
+            return ImportBatch(websites: sources)
+        case "净化规则":
+            return ImportBatch(replacements: try ReplaceRuleImporter().decode(normalized))
+        case "TXT 目录规则":
+            let decoder = JSONDecoder()
+            let rules: [TxtTocRule]
+            if case .array = document { rules = try decoder.decode([TxtTocRule].self, from: normalized) }
+            else { rules = [try decoder.decode(TxtTocRule.self, from: normalized)] }
+            return ImportBatch(contents: rules)
+        case let unsupported:
+            throw BookSourceImportError.invalidDocument("暂不支持导入：" + unsupported)
+        }
     }
 
-    /// An automatic link may point to RSS, purification rules, or other Legado
-    /// exports. Inspect every entry so a mixed collection is not partially
-    /// misrepresented as broken book sources in the import review.
-    private nonisolated func validateBookSourceDocumentKind(_ document: JSONValue) throws {
+    private nonisolated func documentKind(_ document: JSONValue) throws -> String {
         let entries: [JSONValue]
         if case .array(let values) = document { entries = values }
         else { entries = [document] }
         var kinds: Set<String> = []
         for entry in entries {
-            guard case .object = entry else { continue }
+            guard case .object = entry else { throw BookSourceImportError.invalidDocument("规则条目必须是 JSON 对象") }
             if entry["bookSourceUrl"] != nil || entry["bookSourceName"] != nil { kinds.insert("书源") }
-            else if entry["sourceUrl"] != nil { kinds.insert("RSS 订阅") }
+            else if entry["sourceUrl"] != nil { kinds.insert("网站源") }
             else if entry["pattern"] != nil { kinds.insert("净化规则") }
             else if entry["themeName"] != nil { kinds.insert("阅读主题") }
             else if entry["showRule"] != nil { kinds.insert("字典规则") }
             else if entry["name"] != nil, entry["rule"] != nil { kinds.insert("TXT 目录规则") }
             else if entry["name"] != nil, entry["url"] != nil { kinds.insert("朗读引擎") }
+            else { kinds.insert("未知规则") }
         }
         if kinds.count > 1 {
             throw BookSourceImportError.invalidDocument("导入内容混合了 \(kinds.sorted().joined(separator: "、"))，请分别从对应入口导入。")
         }
-        if let kind = kinds.first, kind != "书源" {
-            throw BookSourceImportError.invalidDocument("检测到\(kind)，当前入口仅支持书源，请从对应的规则管理入口导入。")
-        }
+        return kinds.first ?? "书源"
     }
 
     func cancelPendingImport() { pendingImport = nil }
@@ -497,15 +570,13 @@ final class SourceLibraryModel: ObservableObject {
         return (result.sources, result.rejected.map { .init(source: $0.source, issues: $0.issues) })
     }
 
-    private func stage(
-        _ incoming: [BookSource],
-        invalidItems: [PendingImport.InvalidItem] = []
-    ) {
+    private func stage(_ batch: ImportBatch) {
+        let incoming = batch.sources
         let existingByID = Dictionary(uniqueKeysWithValues: sources.map { ($0.id, $0) })
         let unique = incoming.reduce(into: [String: BookSource]()) { $0[$1.id] = $1 }
         pendingImport = .init(items: Array(unique.values)
             .sorted { $0.bookSourceName.localizedStandardCompare($1.bookSourceName) == .orderedAscending }
             .map { .init(source: $0, existing: existingByID[$0.id]) },
-            invalidItems: invalidItems)
+            invalidItems: batch.invalidItems, rules: batch.rules)
     }
 }

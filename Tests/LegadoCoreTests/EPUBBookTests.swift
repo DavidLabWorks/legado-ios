@@ -39,7 +39,7 @@ struct EPUBBookTests {
         return url
     }
 
-    private func fixture(epub3: Bool = true, navigation: Bool = true, extras: [(String, Data)] = [], chapter: String? = nil) throws -> URL {
+    func fixture(epub3: Bool = true, navigation: Bool = true, extras: [(String, Data)] = [], chapter: String? = nil) throws -> URL {
         let navItem = epub3
             ? #"<item id="nav" href="目录/nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>"#
             : #"<item id="nav" href="目录/toc.ncx" media-type="application/x-dtbncx+xml"/>"#

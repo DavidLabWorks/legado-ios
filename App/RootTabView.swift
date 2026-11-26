@@ -1,10 +1,14 @@
 import SwiftUI
 import UniformTypeIdentifiers
 
+enum AppTab: String {
+    case bookshelf, explore, websites
+    case my = "settings"
+}
+
 struct RootTabView: View {
     @EnvironmentObject private var sourceLibrary: SourceLibraryModel
-    private enum Tab: Hashable { case bookshelf, explore, statistics, my }
-    @State private var selection: Tab
+    @State private var selection: AppTab
     @State private var showsDemoReader = false
     @State private var didOpenDemoReader = false
     @State private var sourceImportIsPresented = false
@@ -15,18 +19,8 @@ struct RootTabView: View {
         let arguments = ProcessInfo.processInfo.arguments
         let requested = arguments.firstIndex(of: "-uiDemoTab")
             .flatMap { arguments.indices.contains($0 + 1) ? arguments[$0 + 1] : nil }
-        let initial: Tab = switch requested {
-        case "explore": .explore
-        case "statistics": .statistics
-        case "settings": .my
-        default:
-            switch UserDefaults.standard.string(forKey: "defaultHomePage") {
-            case "explore": .explore
-            case "statistics": .statistics
-            case "settings": .my
-            default: .bookshelf
-            }
-        }
+        let page = requested ?? UserDefaults.standard.string(forKey: "defaultHomePage")
+        let initial = page == "rss" ? .websites : page.flatMap(AppTab.init(rawValue:)) ?? .bookshelf
         _selection = State(initialValue: initial)
     }
 
@@ -50,10 +44,9 @@ struct RootTabView: View {
                         SearchView(initialKeyword: automationSearchKeyword)
                     } else if requestedDemoPage == "sources" {
                         SourceManagementView()
-                    } else if requestedDemoPage == "rss" {
-                        RSSHomeView()
                     } else if requestedDemoPage == "rss-photo" {
-                        RSSPhotoView(value: "data:image/png;base64,", source: RssSource(sourceUrl: "https://appearance.invalid", sourceName: "图片外观检查"))
+                        let source = RssSource(sourceUrl: "https://appearance.invalid", sourceName: "图片外观检查")
+                        RSSPhotoView(urls: ["data:image/png;base64,"], index: 0, source: source, referer: source.sourceUrl)
                     } else {
                         BookshelfView()
                     }
@@ -73,15 +66,15 @@ struct RootTabView: View {
                 }
             }
                 .tabItem { Label("书架", systemImage: selection == .bookshelf ? "book.fill" : "book").environment(\.symbolVariants, .none) }
-                .tag(Tab.bookshelf)
+                .tag(AppTab.bookshelf)
 
             ReadingNavigationStack { ExploreView() }
                 .tabItem { Label("发现", systemImage: "safari").environment(\.symbolVariants, .none) }
-                .tag(Tab.explore)
+                .tag(AppTab.explore)
 
-            ReadingNavigationStack { ReadingStatisticsView() }
-                .tabItem { Label("统计", systemImage: selection == .statistics ? "chart.bar.fill" : "chart.bar").environment(\.symbolVariants, .none) }
-                .tag(Tab.statistics)
+            ReadingNavigationStack { RSSHomeView() }
+                .tabItem { Label("网站", systemImage: "network").environment(\.symbolVariants, .none) }
+                .tag(AppTab.websites)
 
             ReadingNavigationStack {
                 if ProcessInfo.processInfo.arguments.contains("-uiDemoRules") {
@@ -101,7 +94,7 @@ struct RootTabView: View {
                 }
             }
                 .tabItem { Label("我的", systemImage: "person").environment(\.symbolVariants, .none) }
-                .tag(Tab.my)
+                .tag(AppTab.my)
         }
         .readingTabBarBackground()
         .preferredColorScheme(themeMode == "2" ? .dark : (themeMode == "1" || themeMode == "3" ? .light : nil))
@@ -112,9 +105,13 @@ struct RootTabView: View {
             sourceImportIsPresented = false
             displayedSourceNotice = sourceLibrary.notice
         }) { pending in
-            SourceImportReviewView(pending: pending)
-                .environmentObject(sourceLibrary)
-                .onAppear { sourceImportIsPresented = true }
+            Group {
+                if let backup = pending.backup { BackupRestoreView(backup: backup) }
+                else if let rules = pending.rules { DetectedRuleImportView(rules: rules) }
+                else { SourceImportReviewView(pending: pending) }
+            }
+            .environmentObject(sourceLibrary)
+            .onAppear { sourceImportIsPresented = true }
         }
         .onChange(of: sourceLibrary.notice?.id) { _ in
             if !sourceImportIsPresented { displayedSourceNotice = sourceLibrary.notice }
@@ -186,7 +183,7 @@ private struct BookshelfView: View {
         GeometryReader { geometry in
             ScrollView {
                 VStack(spacing: 0) {
-                    ReadingPageHeader(title: "书架", subtitle: "阅读，让时间有了形状") {
+                    ReadingPageHeader(title: "书架", subtitle: "阅读，让时间有了形状", artwork: .bookshelf) {
                         NavigationLink { SearchView() } label: {
                             ReadingToolbarIcon(systemName: "magnifyingglass")
                         }
@@ -238,6 +235,10 @@ private struct BookshelfView: View {
                 }
                 .frame(maxWidth: .infinity)
             }
+            .refreshable {
+                guard selectedGroup.enableRefresh else { return }
+                library.startGroupUpdate(sources: sources.sources, group: selectedGroup, defaultSort: bookshelfSort)
+            }
         }
         .background(ReadingTheme.canvas)
         .navigationBarHidden(true)
@@ -261,10 +262,6 @@ private struct BookshelfView: View {
             let reader = await ReaderViewModel.cachedOpening(book: restored, chapters: chapters, source: source,
                                                              rules: replaceRules.rules, speculative: true)
             if !Task.isCancelled, reader.hasLoadedCurrentChapter { warmedReader = reader }
-        }
-        .refreshable {
-            guard selectedGroup.enableRefresh else { return }
-            await library.startGroupUpdate(sources: sources.sources, group: selectedGroup, defaultSort: bookshelfSort).value
         }
         .readingLocalBookFileImporter(isPresented: $showsLocalImporter) { files in
             pendingLocalFiles = files
@@ -321,6 +318,19 @@ private struct BookshelfView: View {
     private func open(_ book: Book) {
         opening?.cancel()
         let source = sources.sources.first { $0.id == book.origin }
+        if book.origin == "local", book.localTXTRevision != nil {
+            opening = Task {
+                let chapters = await library.cachedTXTChapters(for: book)
+                guard !Task.isCancelled else { return }
+                if chapters.isEmpty {
+                    readerDestination = .book(book, nil)
+                } else {
+                    readerDestination = .prepared(ReaderViewModel(book: book, chapters: chapters, initialIndex: book.durChapterIndex))
+                }
+                opening = nil
+            }
+            return
+        }
         guard book.origin != "local", let source, !ProcessInfo.processInfo.arguments.contains("-uiDemo") else {
             readerDestination = .book(book, source)
             return
@@ -374,53 +384,49 @@ private struct BookshelfView: View {
         .padding(.bottom, 20)
     }
 
-    @ViewBuilder
     private var bookshelfMenu: some View {
-        if library.isCheckingUpdates {
-            ProgressView().controlSize(.small).frame(width: 44, height: 44)
-        } else {
-            Menu {
-                Button("更新目录", systemImage: "arrow.clockwise") {
-                    library.startGroupUpdate(sources: sources.sources, group: selectedGroup, defaultSort: bookshelfSort)
-                }
-                Button("本地书", systemImage: "plus") { showsLocalImporter = true }
-                Button("书架分组", systemImage: "rectangle.3.group") { showsGroupManager = true }
-                Menu("本分组设置", systemImage: "slider.horizontal.3") {
-                    Picker("书籍排序", selection: Binding(
-                        get: { selectedGroup.bookSort },
-                        set: { sort in Task { await library.setGroupSort(selectedGroup, sort: sort) } }
-                    )) {
-                        Text("跟随默认排序").tag(-1)
-                        ForEach(BookshelfSort.allCases) { sort in Text(sort.title).tag(sort.rawValue) }
-                    }
-                    Button("调整书籍顺序") { showsBookOrder = true }
-                        .disabled(displayedBooks.count < 2)
-                    Toggle("允许下拉更新", isOn: Binding(
-                        get: { selectedGroup.enableRefresh },
-                        set: { enabled in Task { await library.setGroupRefreshEnabled(selectedGroup, enabled: enabled) } }
-                    ))
-                    Toggle("仅更新已读至最新章的书", isOn: Binding(
-                        get: { selectedGroup.onlyUpdateRead },
-                        set: { enabled in Task { await library.setGroupOnlyUpdateRead(selectedGroup, enabled: enabled) } }
-                    ))
-                }
-                Menu("书架布局", systemImage: "square.grid.2x2") {
-                    layoutButton("列表", value: "list")
-                    layoutButton("紧凑列表", value: "compact")
-                    ForEach(2...6, id: \.self) { count in
-                        layoutButton("\(count) 列宫格", value: "grid\(count)")
-                    }
-                }
-                NavigationLink {
-                    FileManagementView()
-                } label: {
-                    Label("文件管理", systemImage: "folder")
-                }
-            } label: {
-                ReadingToolbarIcon(systemName: "ellipsis")
+        Menu {
+            Button("更新目录", systemImage: "arrow.clockwise") {
+                library.startGroupUpdate(sources: sources.sources, group: selectedGroup, defaultSort: bookshelfSort)
             }
-            .accessibilityLabel("更多")
+            .disabled(library.isCheckingUpdates)
+            Button("本地书", systemImage: "plus") { showsLocalImporter = true }
+            Button("书架分组", systemImage: "rectangle.3.group") { showsGroupManager = true }
+            Menu("本分组设置", systemImage: "slider.horizontal.3") {
+                Picker("书籍排序", selection: Binding(
+                    get: { selectedGroup.bookSort },
+                    set: { sort in Task { await library.setGroupSort(selectedGroup, sort: sort) } }
+                )) {
+                    Text("跟随默认排序").tag(-1)
+                    ForEach(BookshelfSort.allCases) { sort in Text(sort.title).tag(sort.rawValue) }
+                }
+                Button("调整书籍顺序") { showsBookOrder = true }
+                    .disabled(displayedBooks.count < 2)
+                Toggle("允许下拉更新", isOn: Binding(
+                    get: { selectedGroup.enableRefresh },
+                    set: { enabled in Task { await library.setGroupRefreshEnabled(selectedGroup, enabled: enabled) } }
+                ))
+                Toggle("仅更新已读至最新章的书", isOn: Binding(
+                    get: { selectedGroup.onlyUpdateRead },
+                    set: { enabled in Task { await library.setGroupOnlyUpdateRead(selectedGroup, enabled: enabled) } }
+                ))
+            }
+            Menu("书架布局", systemImage: "square.grid.2x2") {
+                layoutButton("列表", value: "list")
+                layoutButton("紧凑列表", value: "compact")
+                ForEach(2...6, id: \.self) { count in
+                    layoutButton("\(count) 列宫格", value: "grid\(count)")
+                }
+            }
+            NavigationLink {
+                FileManagementView()
+            } label: {
+                Label("文件管理", systemImage: "folder")
+            }
+        } label: {
+            ReadingToolbarIcon(systemName: "ellipsis")
         }
+        .accessibilityLabel("更多")
     }
 
     private var bookshelfGroups: some View {
@@ -695,7 +701,6 @@ private struct BookshelfGridItem: View {
 }
 
 private struct BookshelfBookDestination: View {
-    @EnvironmentObject private var library: BookLibraryModel
     let book: Book
     let source: BookSource?
 
@@ -703,7 +708,7 @@ private struct BookshelfBookDestination: View {
         if ProcessInfo.processInfo.arguments.contains("-uiDemo"), book.origin != "local" {
             ReaderView(demoBook: book, chapters: DemoContent.readerChapters, initialIndex: 0, content: DemoContent.readerText)
         } else {
-            BookshelfReadView(book: book, source: source, coordinator: library.updateCoordinator)
+            BookshelfReadView(book: book, source: source)
         }
     }
 }
@@ -1020,13 +1025,7 @@ struct BookshelfReadView: View {
     let book: Book
     let source: BookSource?
     @EnvironmentObject private var library: BookLibraryModel
-    @StateObject private var model: BookshelfReadViewModel
-
-    init(book: Book, source: BookSource?, coordinator: BookUpdateCoordinator) {
-        self.book = book
-        self.source = source
-        _model = StateObject(wrappedValue: BookshelfReadViewModel(updateCoordinator: coordinator))
-    }
+    @StateObject private var model = BookshelfReadViewModel()
 
     var body: some View {
         Group {
@@ -1041,19 +1040,32 @@ struct BookshelfReadView: View {
                 } else {
                     ReaderView(book: resolvedBook, chapters: model.chapters, initialIndex: resolvedBook.durChapterIndex)
                 }
-            } else if model.isLoading {
-                ProgressView("正在打开…")
-            } else if let errorMessage = model.errorMessage {
-                ReadingUnavailableView("无法打开书籍", systemImage: "book.closed", description: Text(errorMessage))
             } else {
-                ProgressView("正在打开…")
+                ReaderOpeningPage {
+                    if let error = model.errorMessage {
+                        ReadingUnavailableView("无法打开书籍", systemImage: "book.closed", description: Text(error))
+                    } else {
+                        ReaderLoadingOverlay(title: book.name, heading: "正在打开书籍")
+                    }
+                }
             }
         }
-        .task {
-            await model.load(book: book, source: source) { report in
-                await library.commitPreparedUpdate(requestedBook: book, report: report)
-            }
-        }
+        .task { await model.load(book: book, source: source, library: library) }
+    }
+}
+
+private struct ReaderOpeningPage<Content: View>: View {
+    @ViewBuilder var content: Content
+    @AppStorage("readerTheme") private var readerTheme = "wechat"
+    @AppStorage("themeMode") private var themeMode = "0"
+
+    var body: some View {
+        let style = themeMode == "3" ? ReaderStylePreset.eInk : ReaderStylePreset.resolve(readerTheme)
+        content
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(Color(uiColor: style.background).ignoresSafeArea())
+            .preferredColorScheme(style.id == "night" ? .dark : .light)
+            .readingTabBarHidden()
     }
 }
 
@@ -1101,6 +1113,8 @@ struct SearchView: View {
     private let initialKeyword: String
     @State private var keyword: String
     @StateObject private var model = SearchViewModel()
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @State private var editsHistory = false
     @State private var showsScope = false
     @State private var selectedGroups = Set<String>()
     @State private var selectedSourceID: String?
@@ -1117,6 +1131,14 @@ struct SearchView: View {
     }
 
     var body: some View {
+        if #available(iOS 17.1, *) {
+            searchPage.searchPresentationToolbarBehavior(.avoidHidingContent)
+        } else {
+            searchPage
+        }
+    }
+
+    private var searchPage: some View {
         ScrollView {
             LazyVStack(spacing: 12) {
                 switch model.state {
@@ -1225,31 +1247,64 @@ struct SearchView: View {
 
     @ViewBuilder
     private var idleContent: some View {
-        discoveryPrompt
-        if !model.searchKeywords.isEmpty {
-            searchHistoryView
+        VStack(alignment: .leading, spacing: 22) {
+            if fixedSource == nil {
+                Button { showsScope = true } label: { scopeCard }
+                    .buttonStyle(.plain)
+                    .accessibilityHint("选择要搜索的分组或书源")
+            } else {
+                scopeCard
+            }
+            if !model.searchKeywords.isEmpty {
+                searchHistoryView
+                    .onDisappear { editsHistory = false }
+            }
         }
+        .frame(maxWidth: 620)
+        .frame(maxWidth: .infinity)
     }
 
-    private var discoveryPrompt: some View {
-        Button { searchIsPresented = true } label: {
-            HStack(alignment: .top, spacing: 12) {
-                Image(systemName: "magnifyingglass")
-                    .font(.body)
-                    .foregroundStyle(ReadingTheme.accent)
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("搜索书名或作者")
-                        .font(.headline.weight(.medium))
-                        .foregroundStyle(.primary)
-                    Text("\(searchableSourceCount) 个书源 · \(scopeDisplay)")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+    private var scopeCard: some View {
+        HStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("搜索范围")
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(.secondary)
+                HStack(spacing: 8) {
+                    Text(scopeDisplay)
+                        .font(.title2.weight(.bold))
+                        .lineLimit(2)
+                    if fixedSource == nil {
+                        Image(systemName: "chevron.down")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                            .accessibilityHidden(true)
+                    }
                 }
-                Spacer(minLength: 0)
+                Text("\(searchableSourceCount) 个可搜索书源")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
             }
-            .padding(.vertical, 20)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            if !dynamicTypeSize.isAccessibilitySize {
+                Image("ExploreBookStack")
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: 94)
+                    .accessibilityHidden(true)
+            }
         }
-        .buttonStyle(.plain)
+        .padding(20)
+        .background {
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .fill(ReadingTheme.groupedCanvas)
+                .overlay {
+                    RoundedRectangle(cornerRadius: 20, style: .continuous)
+                        .fill(LinearGradient(colors: [ReadingTheme.coral.opacity(0.05), ReadingTheme.coral.opacity(0.13)],
+                                             startPoint: .leading, endPoint: .trailing))
+                }
+        }
+        .accessibilityElement(children: .combine)
     }
 
     private var initialLoadingView: some View {
@@ -1279,15 +1334,18 @@ struct SearchView: View {
     private var resultsContent: some View {
         Group {
             VStack(alignment: .leading, spacing: 8) {
-                HStack(alignment: .firstTextBaseline) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("“\(model.submittedKeyword)”").font(.headline).lineLimit(1)
+                HStack(alignment: .top, spacing: 12) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(model.submittedKeyword)
+                            .font(.title2.bold())
+                            .lineLimit(2)
+                            .accessibilityAddTraits(.isHeader)
                         Text(model.isShowingCachedResults
                              ? (model.state == .searching ? "已显示缓存结果，正在更新书源" : "已显示缓存结果")
                              : "找到 \(model.books.count) 条结果")
                             .font(.caption).foregroundStyle(.secondary)
                     }
-                    Spacer()
+                    .frame(maxWidth: .infinity, alignment: .leading)
                     if model.isPaused {
                         Button("继续", systemImage: "play.fill") { model.resume() }
                             .readingSecondaryButtonStyle()
@@ -1296,6 +1354,10 @@ struct SearchView: View {
                         StatusPill(text: "\(model.completedSourceCount)/\(model.totalSourceCount)", systemImage: "magnifyingglass")
                     } else {
                         StatusPill(text: scopeDisplay, systemImage: "scope")
+                            .lineLimit(2)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 5)
+                            .background(ReadingTheme.groupedCanvas, in: Capsule())
                     }
                 }
                 if model.state == .searching {
@@ -1309,13 +1371,13 @@ struct SearchView: View {
                     NavigationLink {
                         BookDetailView(searchBook: book, source: source)
                     } label: {
-                        SearchBookRow(book: book)
+                        SearchBookRow(book: book, showsDisclosure: true)
                     }
                     .buttonStyle(.plain)
                     .onAppear { resultAppeared(book) }
                     .onDisappear { visibleResultIDs.remove(book.id) }
                 } else {
-                    SearchBookRow(book: book)
+                    SearchBookRow(book: book, showsDisclosure: false)
                         .onAppear { resultAppeared(book) }
                         .onDisappear { visibleResultIDs.remove(book.id) }
                 }
@@ -1336,18 +1398,47 @@ struct SearchView: View {
     }
 
     private var emptyResultsView: some View {
-        SearchStateCard(
-            title: model.isPaused ? "搜索已停止" : "没有找到“\(model.submittedKeyword)”",
-            detail: emptyResultsDetail,
-            systemImage: model.isPaused ? "pause.circle" : "book.closed"
-        ) {
-            if model.isPaused {
-                Button("继续搜索", systemImage: "play.fill") { model.resume() }
-                    .readingProminentButtonStyle()
+        VStack(spacing: 0) {
+            if !dynamicTypeSize.isAccessibilitySize {
+                Image("ExploreEmptyBook")
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: 132, height: 88)
+                    .accessibilityHidden(true)
             }
-            Button("修改关键词", systemImage: "text.cursor") { searchIsPresented = true }
-                .readingSecondaryButtonStyle()
+            Text(model.isPaused ? "搜索已停止" : "未找到“\(model.submittedKeyword)”")
+                .font(.title3.weight(.semibold))
+                .accessibilityAddTraits(.isHeader)
+                .padding(.top, 12)
+            Text(emptyResultsDetail)
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .padding(.top, 8)
+            if model.isPaused {
+                Button("继续搜索") { model.resume() }
+                    .readingProminentButtonStyle()
+                    .controlSize(.large)
+                    .padding(.top, 20)
+            }
+            Button {
+                if keyword.isEmpty { keyword = model.submittedKeyword }
+                searchIsPresented = true
+            } label: {
+                Text("修改关键词")
+                    .font(.subheadline.weight(.semibold))
+                    .padding(.horizontal, 24)
+                    .frame(minHeight: 44)
+                    .foregroundStyle(model.isPaused ? ReadingTheme.accent : ReadingTheme.onAccent)
+                    .background(model.isPaused ? Color.clear : ReadingTheme.accentFill, in: Capsule())
+                    .contentShape(Capsule())
+            }
+            .buttonStyle(.plain)
+            .padding(.top, model.isPaused ? 4 : 20)
         }
+        .multilineTextAlignment(.center)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 32)
+        .frame(maxWidth: .infinity)
     }
 
     private var unavailableView: some View {
@@ -1373,9 +1464,9 @@ struct SearchView: View {
     }
 
     private var emptyResultsDetail: String {
-        if model.isPaused { return "你可以继续搜索剩余书源，或修改关键词重新搜索。" }
-        if precisionSearch { return "试试更短的书名、作者名，或关闭精准搜索。" }
-        return "试试更短的书名、作者名，或调整搜索范围。"
+        if model.isPaused { return "还有书源未搜索完。" }
+        if precisionSearch { return "可以缩短关键词，或在搜索选项中关闭精准搜索。" }
+        return "试试书名中的几个字，或用作者名搜索。"
     }
 
     private var searchProgressText: String {
@@ -1420,36 +1511,53 @@ struct SearchView: View {
     }
 
     private var searchHistoryView: some View {
-        ReadingCard {
-            VStack(alignment: .leading, spacing: 0) {
-                HStack {
-                    Text("搜索历史").font(.headline)
-                    Spacer()
-                    Button("清空") { Task { await model.clearSearchKeywords() } }.font(.subheadline)
-                }
-                .padding(.bottom, 8)
-                ForEach(model.searchKeywords) { item in
-                    Divider().padding(.leading, 28)
-                    HStack(spacing: 10) {
-                        Button { keyword = item.word; startSearch() } label: {
-                            HStack(spacing: 10) {
-                                Image(systemName: "clock.arrow.circlepath").foregroundStyle(.secondary)
-                                Text(item.word).foregroundStyle(.primary).lineLimit(1)
-                                Spacer()
-                            }
-                            .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-                        Button {
-                            Task { await model.deleteSearchKeyword(item.word) }
-                        } label: {
-                            Image(systemName: "xmark").font(.caption.bold()).foregroundStyle(.tertiary)
-                                .frame(width: 28, height: 28)
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel("删除 \(item.word)")
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 12) {
+                Text("最近搜索")
+                    .font(.headline)
+                    .accessibilityAddTraits(.isHeader)
+                Spacer()
+                if editsHistory {
+                    Button(role: .destructive) {
+                        Task { await model.clearSearchKeywords() }
+                    } label: {
+                        Text("清空").frame(minWidth: 44, minHeight: 44)
                     }
-                    .padding(.vertical, 7)
+                }
+                Button { editsHistory.toggle() } label: {
+                    Text(editsHistory ? "完成" : "管理")
+                        .frame(minWidth: 44, minHeight: 44, alignment: .trailing)
+                }
+                .foregroundStyle(editsHistory ? .primary : .secondary)
+            }
+            .font(.subheadline)
+            LazyVGrid(columns: [GridItem(dynamicTypeSize.isAccessibilitySize ? .flexible() : .adaptive(minimum: 145), spacing: 10)],
+                      alignment: .leading, spacing: 10) {
+                ForEach(model.searchKeywords) { item in
+                    Button {
+                        if editsHistory {
+                            Task { await model.deleteSearchKeyword(item.word) }
+                        } else {
+                            keyword = item.word
+                            startSearch()
+                        }
+                    } label: {
+                        HStack(spacing: 9) {
+                            Image(systemName: editsHistory ? "minus.circle.fill" : "clock")
+                                .font(.footnote)
+                                .foregroundStyle(editsHistory ? Color.red : .secondary)
+                            Text(item.word)
+                                .font(.subheadline)
+                                .lineLimit(2)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 8)
+                        .frame(minHeight: 44)
+                        .background(ReadingTheme.groupedCanvas, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(editsHistory ? "删除 \(item.word)" : item.word)
                 }
             }
         }
@@ -1521,42 +1629,59 @@ private struct SearchStateCard<Actions: View>: View {
 
 private struct SearchBookRow: View {
     let book: SearchBook
+    let showsDisclosure: Bool
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     var body: some View {
-        HStack(alignment: .top, spacing: 14) {
-            BookCoverArtwork(
-                title: book.name,
-                author: book.author,
-                remoteURL: book.coverURL,
-                width: 52,
-                height: 74
-            )
-            VStack(alignment: .leading, spacing: 6) {
-                Text(book.name).font(.body.weight(.medium)).foregroundStyle(.primary).lineLimit(2)
-                Text(book.author.isEmpty ? "未知作者" : book.author)
-                    .font(.caption).foregroundStyle(.secondary)
-                if let latest = book.latestChapterTitle, !latest.isEmpty {
-                    Text(latest)
-                        .font(.caption).foregroundStyle(.secondary).lineLimit(1)
-                }
-                HStack(spacing: 6) {
-                    Text(book.originName)
-                        .lineLimit(1)
-                    if let wordCount = book.wordCount, !wordCount.isEmpty {
-                        Text("·")
-                        Text(wordCount).lineLimit(1)
+        HStack(alignment: .center, spacing: 14) {
+            if !dynamicTypeSize.isAccessibilitySize {
+                BookCoverArtwork(title: book.name, author: book.author, remoteURL: book.coverURL)
+            }
+            VStack(alignment: .leading, spacing: 5) {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Text(book.name)
+                        .font(.headline)
+                        .lineLimit(dynamicTypeSize.isAccessibilitySize ? nil : 2)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    if showsDisclosure {
+                        Image(systemName: "chevron.right")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.tertiary)
+                            .accessibilityHidden(true)
                     }
                 }
-                .font(.caption)
-                .foregroundStyle(.secondary)
+                Text(book.author.isEmpty ? "未知作者" : book.author)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                if let latest = book.latestChapterTitle, !latest.isEmpty {
+                    Label(latest, systemImage: "text.book.closed")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(dynamicTypeSize.isAccessibilitySize ? nil : 2)
+                        .accessibilityLabel("最新章节，\(latest)")
+                }
+                HStack(spacing: 8) {
+                    if !book.originName.isEmpty {
+                        Text(book.originName)
+                            .font(.caption.weight(.medium))
+                            .lineLimit(2)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 3)
+                            .background(ReadingTheme.coral.opacity(0.14), in: Capsule())
+                            .accessibilityLabel("书源，\(book.originName)")
+                    }
+                    if let wordCount = book.wordCount, !wordCount.isEmpty {
+                        Text(wordCount).font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+                .padding(.top, 2)
             }
-            Spacer(minLength: 0)
-            Image(systemName: "chevron.right").font(.caption.bold()).foregroundStyle(.tertiary)
         }
-        .padding(.vertical, 12)
-        .overlay(alignment: .bottom) {
-            Rectangle().fill(ReadingTheme.separator).frame(height: 0.5)
-                .padding(.leading, 66)
+        .padding(14)
+        .background(ReadingTheme.surface, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .strokeBorder(ReadingTheme.separator, lineWidth: 0.5)
         }
         .contentShape(Rectangle())
         .accessibilityElement(children: .combine)
@@ -1564,72 +1689,32 @@ private struct SearchBookRow: View {
 }
 
 private struct SettingsView: View {
-    @Environment(\.colorScheme) private var colorScheme
     @AppStorage("themeMode") private var themeMode = "0"
     @ScaledMetric(relativeTo: .body) private var rowHeight = 52
 
     var body: some View {
-        GeometryReader { geometry in
-            ScrollView(showsIndicators: false) {
-                VStack(alignment: .leading, spacing: 0) {
-                    profileHeader(topInset: geometry.safeAreaInsets.top)
-                    LazyVStack(alignment: .leading, spacing: 24) {
-                        appCard
-                        readingSection
-                        rulesSection
-                        settingSection("文件与存储") {
-                            settingLink("文件管理", icon: "folder", showsSeparator: false) {
-                                FileManagementView()
-                            }
+        ScrollView(showsIndicators: false) {
+            VStack(alignment: .leading, spacing: 0) {
+                ReadingPageHeader(title: "我的", subtitle: "按照你的方式阅读", artwork: .profile) {}
+                LazyVStack(alignment: .leading, spacing: 24) {
+                    appCard
+                    readingSection
+                    rulesSection
+                    settingSection("文件与存储") {
+                        settingLink("文件管理", icon: "folder") {
+                            FileManagementView()
                         }
-                        supportSection
+                        settingLink("数据备份与恢复", icon: "externaldrive") { LibraryBackupView() }
+                        settingLink("其他设置", icon: "gearshape", showsSeparator: false) { OtherSettingsView() }
                     }
-                    .padding(.horizontal, 28)
-                    .padding(.bottom, 32)
                 }
-                .background(alignment: .top) {
-                    Image("ProfileHeader")
-                        .resizable()
-                        .scaledToFill()
-                        .frame(width: geometry.size.width, height: geometry.safeAreaInsets.top + 156)
-                        .clipped()
-                        .overlay {
-                            if colorScheme == .dark {
-                                Color.black.opacity(0.78)
-                            }
-                        }
-                        .overlay(alignment: .bottom) {
-                            LinearGradient(
-                                colors: [ProfileTheme.canvas.opacity(0), ProfileTheme.canvas],
-                                startPoint: .top, endPoint: .bottom
-                            )
-                            .frame(height: 44)
-                        }
-                        .accessibilityHidden(true)
-                }
+                .padding(.horizontal, 24)
+                .padding(.bottom, 32)
             }
-            .background(ProfileTheme.canvas)
-            .ignoresSafeArea(.container, edges: .top)
-            .accessibilityIdentifier("profile.scroll")
         }
-        .background(ProfileTheme.canvas)
+        .background(ReadingTheme.canvas)
+        .accessibilityIdentifier("profile.scroll")
         .navigationBarHidden(true)
-    }
-
-    private func profileHeader(topInset: CGFloat) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("我的")
-                .font(.largeTitle.bold())
-                .foregroundStyle(ProfileTheme.ink)
-                .accessibilityAddTraits(.isHeader)
-            Text("按照你的方式阅读")
-                .font(.subheadline)
-                .foregroundStyle(ProfileTheme.secondary)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.horizontal, 28)
-        .padding(.top, topInset + 42)
-        .padding(.bottom, 34)
     }
 
     private var appCard: some View {
@@ -1637,7 +1722,7 @@ private struct SettingsView: View {
             AboutView()
         } label: {
             HStack(spacing: 16) {
-                Image("BrandIcon")
+                Image("ProfileMascot")
                     .resizable()
                     .scaledToFit()
                     .frame(width: 58, height: 58)
@@ -1648,7 +1733,7 @@ private struct SettingsView: View {
                         .font(.headline)
                         .foregroundStyle(ProfileTheme.ink)
                         .fixedSize(horizontal: false, vertical: true)
-                    Text("快速搜书，自由阅读")
+                    Text("读小说、听书、整理网页")
                         .font(.footnote)
                         .foregroundStyle(ProfileTheme.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -1683,7 +1768,6 @@ private struct SettingsView: View {
 
     private var readingSection: some View {
         settingSection("阅读") {
-            settingLink("阅读设置", icon: "textformat.size") { ReadingPreferencesView() }
             Menu {
                 Picker("外观", selection: $themeMode) {
                     Text("跟随系统").tag("0")
@@ -1698,37 +1782,21 @@ private struct SettingsView: View {
             .accessibilityLabel("外观")
             .accessibilityValue(appearanceTitle)
             .accessibilityIdentifier("profile.appearance")
-            settingLink("在线朗读", icon: "waveform") { HttpTTSManagementView() }
+            settingLink("听书设置", icon: "headphones") { ListeningSettingsView() }
             settingLink("书签", icon: "bookmark") { AllBookmarksView() }
-            settingLink("阅读记录", icon: "clock", showsSeparator: false) {
-                ReadingHistoryView()
-            }
+            settingLink("阅读统计", icon: "chart.bar", showsSeparator: false) { ReadingStatisticsView() }
         }
     }
 
     private var rulesSection: some View {
         settingSection("书源与规则") {
             settingLink("书源管理", icon: "globe") { SourceManagementView() }
+            settingLink("网站源管理", icon: "network") { WebsiteSourceManagementView() }
             settingLink("规则订阅", icon: "link") { RuleSubscriptionView() }
             settingLink("替换净化", icon: "text.badge.checkmark") { ReplaceRuleManagementView() }
             settingLink("TXT 目录规则", icon: "list.bullet.rectangle", showsSeparator: false) {
                 TxtTocRuleManagementView()
             }
-        }
-    }
-
-    private var supportSection: some View {
-        settingSection("项目与支持") {
-            Link(destination: AppIdentity.authorURL) {
-                settingRow("开发者 Aminark", icon: "person.crop.circle", isExternal: true)
-            }
-            .buttonStyle(.plain)
-            Link(destination: AppIdentity.projectURL) {
-                settingRow("GitHub 项目", icon: "chevron.left.forwardslash.chevron.right", isExternal: true)
-            }
-            .buttonStyle(.plain)
-            settingLink("其他设置", icon: "gearshape") { OtherSettingsView() }
-            settingLink("关于", icon: "info.circle", showsSeparator: false) { AboutView() }
         }
     }
 
@@ -1772,7 +1840,6 @@ private struct SettingsView: View {
         icon: String,
         value: String? = nil,
         showsValuePill: Bool = false,
-        isExternal: Bool = false,
         showsSeparator: Bool = true
     ) -> some View {
         HStack(spacing: 18) {
@@ -1798,7 +1865,7 @@ private struct SettingsView: View {
                         }
                     }
             }
-            Image(systemName: isExternal ? "arrow.up.right" : "chevron.right")
+            Image(systemName: "chevron.right")
                 .font(.caption.weight(.medium))
                 .foregroundStyle(ProfileTheme.secondary.opacity(0.65))
                 .accessibilityHidden(true)
@@ -1829,7 +1896,6 @@ private struct ProfileDestination<Content: View>: View {
 }
 
 private enum ProfileTheme {
-    static let canvas = adaptive(0xF8F8F7, dark: 0x141416)
     static let surface = adaptive(0xFFFFFF, dark: 0x232326)
     static let appCardTint = adaptive(0xFBF3EC, dark: 0x302923)
     static let ink = adaptive(0x171817, dark: 0xF3F0EC)
@@ -2133,14 +2199,18 @@ private struct BookmarkReaderDestination: View {
                 } else {
                     ReadingUnavailableView("书源不可用", systemImage: "network.slash", description: Text("请先恢复或启用这本书对应的书源。"))
                 }
-            } else if isLoading {
-                ProgressView("正在恢复书签位置…")
             } else {
-                ReadingUnavailableView(
-                    "无法打开书签",
-                    systemImage: "bookmark.slash",
-                    description: Text(errorMessage ?? "当前目录中找不到书签对应章节。")
-                )
+                ReaderOpeningPage {
+                    if isLoading {
+                        ReaderLoadingOverlay(title: book.name, heading: "正在恢复书签位置")
+                    } else {
+                        ReadingUnavailableView(
+                            "无法打开书签",
+                            systemImage: "bookmark.slash",
+                            description: Text(errorMessage ?? "当前目录中找不到书签对应章节。")
+                        )
+                    }
+                }
             }
         }
         .navigationTitle(bookmark.chapterName.isEmpty ? book.name : bookmark.chapterName)
@@ -2153,11 +2223,8 @@ private struct BookmarkReaderDestination: View {
         let loaded: [BookChapter]
         var resolvedBook = book
         if book.origin == "local" {
-            let targetBook = book
             do {
-                loaded = try await Task.detached {
-                    try LocalBookService.live().loadChapters(book: targetBook).chapters
-                }.value
+                loaded = try await library.localReadingChapters(for: book)
             } catch {
                 errorMessage = error.localizedDescription
                 isLoading = false
@@ -2306,152 +2373,6 @@ private struct SearchScopeSheet: View {
         return sources.filter {
             $0.bookSourceName.localizedCaseInsensitiveContains(sourceFilter)
                 || $0.bookSourceUrl.localizedCaseInsensitiveContains(sourceFilter)
-        }
-    }
-}
-
-private struct ReadingPreferencesView: View {
-    @AppStorage("appTtsEngine") private var defaultVoice = ""
-    @AppStorage(OfflineVoicePack.preferenceKey) private var selectedVoicePack = ""
-    private var availableOfflineVoices: [OfflineVoice] {
-        guard let pack = OfflineVoicePack(rawValue: selectedVoicePack), pack.isInstalled else { return [] }
-        return OfflineVoice.allCases
-    }
-
-    @AppStorage(EPUBReadingMode.preferenceKey) private var defaultEPUBMode = EPUBReadingMode.original
-    @AppStorage("textSize") private var fontSize = 20.0
-    @AppStorage("letterSpacing") private var letterSpacing = 0.1
-    @AppStorage("lineSpacingExtra") private var lineSpacing = 12.0
-    @AppStorage("paragraphSpacing") private var paragraphSpacing = 2.0
-    @AppStorage("paragraphIndent") private var paragraphIndent = "　　"
-    @AppStorage("paddingLeft") private var paddingLeft = 16.0
-    @AppStorage("paddingRight") private var paddingRight = 16.0
-    @AppStorage("paddingTop") private var paddingTop = 6.0
-    @AppStorage("paddingBottom") private var paddingBottom = 6.0
-    @AppStorage("textBold") private var fontWeight = 0
-    @AppStorage("titleMode") private var titleMode = 0
-    @AppStorage("titleSize") private var titleSize = 0.0
-    @AppStorage("titleTopSpacing") private var titleTopSpacing = 0.0
-    @AppStorage("titleBottomSpacing") private var titleBottomSpacing = ReaderTypography.defaultTitleBottomSpacing
-    @AppStorage("underlineMode") private var underlineMode = 0
-    @AppStorage("readerTheme") private var theme = "wechat"
-    @AppStorage("pageAnim") private var pageAnimation = 0
-    @AppStorage("readerKeepScreenOn") private var keepScreenOn = false
-    @AppStorage("readerHideHomeIndicator") private var hideHomeIndicator = false
-
-    var body: some View {
-        Form {
-            Section("朗读") {
-                NavigationLink("离线语音包") { OfflineVoicePackView() }
-                Picker("默认朗读声音", selection: $defaultVoice) {
-                    ForEach(availableOfflineVoices, id: \.self) { voice in
-                        Text(voice.title).tag(voice.rawValue)
-                    }
-                    Text("系统 TTS").tag("")
-                    if !defaultVoice.isEmpty, OfflineVoice(rawValue: defaultVoice) == nil {
-                        Text(defaultVoice == AzureSpeechSettings.selection ? "微软自然语音" : "在线朗读引擎").tag(defaultVoice)
-                    }
-                }
-                NavigationLink("配置微软自然语音") { AzureSpeechSettingsView() }
-            }
-            Section("EPUB") {
-                Picker("默认 EPUB 阅读模式", selection: $defaultEPUBMode) {
-                    ForEach(EPUBReadingMode.allCases, id: \.self) { mode in
-                        Text(mode.title).tag(mode)
-                    }
-                }
-            }
-            Section("排版") {
-                ReadingLabeledContent("字号", value: String(format: "%.0f", fontSize))
-                Slider(value: $fontSize, in: 5...50, step: 1)
-                ReadingLabeledContent("字间距", value: String(format: "%.2f", letterSpacing))
-                Slider(value: $letterSpacing, in: -0.5...0.5, step: 0.01)
-                ReadingLabeledContent("行间距", value: String(format: "%.0f", lineSpacing))
-                Slider(value: $lineSpacing, in: 0...50, step: 1)
-                ReadingLabeledContent("段距", value: String(format: "%.1f", paragraphSpacing))
-                Slider(value: $paragraphSpacing, in: 0...50, step: 1)
-                Picker("字重", selection: $fontWeight) {
-                    Text("正常").tag(0)
-                    Text("粗体").tag(1)
-                    Text("细体").tag(2)
-                }
-                TextField("段落缩进字符", text: $paragraphIndent)
-                Picker("下划线", selection: $underlineMode) {
-                    Text("关闭").tag(0)
-                    Text("实线").tag(1)
-                    Text("虚线").tag(2)
-                }
-            }
-            Section("正文边距") {
-                paddingSlider("左边距", value: $paddingLeft)
-                paddingSlider("右边距", value: $paddingRight)
-                paddingSlider("上边距", value: $paddingTop)
-                paddingSlider("下边距", value: $paddingBottom)
-            }
-            Section("章节标题") {
-                Picker("标题模式", selection: $titleMode) {
-                    Text("左对齐").tag(0)
-                    Text("居中").tag(1)
-                    Text("隐藏").tag(2)
-                }
-                ReadingLabeledContent("字号增量", value: String(format: "%+.0f", titleSize))
-                Slider(value: $titleSize, in: -10...30, step: 1)
-                ReadingLabeledContent("上间距", value: String(Int(titleTopSpacing)))
-                Slider(value: $titleTopSpacing, in: 0...100, step: 1)
-                ReadingLabeledContent("下间距", value: String(Int(titleBottomSpacing)))
-                Slider(value: $titleBottomSpacing, in: 0...100, step: 1)
-            }
-            Section("翻页") {
-                Picker("翻页模式", selection: $pageAnimation) {
-                    Text("覆盖").tag(0)
-                    Text("滑动").tag(1)
-                    Text("仿真").tag(2)
-                    Text("滚动").tag(3)
-                    Text("无动画").tag(4)
-                }
-            }
-            Section("屏幕") {
-                Toggle("阅读时不自动锁屏", isOn: $keepScreenOn)
-                Toggle("阅读时隐藏小横条", isOn: $hideHomeIndicator)
-            }
-            Section("阅读背景") {
-                ForEach(ReaderStylePreset.legadoDefaults) { preset in
-                    Button {
-                        theme = preset.id
-                    } label: {
-                        HStack {
-                            RoundedRectangle(cornerRadius: 5)
-                                .fill(Color(uiColor: preset.background))
-                                .frame(width: 38, height: 28)
-                                .overlay {
-                                    RoundedRectangle(cornerRadius: 5).stroke(Color.secondary.opacity(0.5))
-                                }
-                            Text(preset.name).foregroundStyle(.primary)
-                            Spacer()
-                            if ReaderStylePreset.resolve(theme).id == preset.id {
-                                Image(systemName: "checkmark").foregroundStyle(ReadingTheme.accent)
-                            }
-                        }
-                    }
-                }
-            }
-            Section("预览") {
-                Text("雨落在旧城的瓦檐上，故事从一束灯光开始。")
-                    .tracking(letterSpacing * fontSize)
-                    .font(.system(size: fontSize, design: .serif))
-                    .lineSpacing(lineSpacing)
-                    .foregroundStyle(Color(uiColor: ReaderStylePreset.resolve(theme).foreground))
-                    .padding(.vertical, 12)
-                    .listRowBackground(Color(uiColor: ReaderStylePreset.resolve(theme).background))
-            }
-        }
-        .navigationTitle("阅读设置")
-    }
-
-    private func paddingSlider(_ title: String, value: Binding<Double>) -> some View {
-        VStack {
-            ReadingLabeledContent(title, value: String(Int(value.wrappedValue)))
-            Slider(value: value, in: 0...100, step: 1)
         }
     }
 }

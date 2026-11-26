@@ -18,6 +18,19 @@ enum EPUBReadingMode: String, CaseIterable {
     }
 }
 
+struct EPUBDefaultModePicker: View {
+    @Binding var selection: EPUBReadingMode
+
+    var body: some View {
+        Picker("默认 EPUB 阅读模式", selection: $selection) {
+            ForEach(EPUBReadingMode.allCases, id: \.self) { mode in
+                Text(mode.title).tag(mode)
+            }
+        }
+        .pickerStyle(.menu)
+    }
+}
+
 /// EPUB keeps its XHTML, CSS, SVG, images and navigation in Readium. The text
 /// reader remains available for the app's existing speech and text tools.
 @MainActor
@@ -245,6 +258,7 @@ struct EPUBReaderView: View {
     @State private var showsTOC = false
     @State private var showsSettings = false
     @State private var showsBookmarks = false
+    @Binding private var defaultMode: EPUBReadingMode
     let onReadText: (Int) -> Void
     @State private var switchingToText = false
     @State private var collapsedTOCEntries: Set<Int> = []
@@ -257,7 +271,8 @@ struct EPUBReaderView: View {
     @AppStorage("epubTheme") private var theme = "system"
 
     init(book: Book, chapters: [BookChapter], initialIndex: Int, restoresSavedLocation: Bool,
-         onReadText: @escaping (Int) -> Void) {
+         defaultMode: Binding<EPUBReadingMode>, onReadText: @escaping (Int) -> Void) {
+        _defaultMode = defaultMode
         self.onReadText = onReadText
         _model = StateObject(wrappedValue: EPUBReaderModel(book: book, chapters: chapters, initialIndex: initialIndex,
                                                          restoresSavedLocation: restoresSavedLocation))
@@ -445,6 +460,7 @@ struct EPUBReaderView: View {
         ReadingNavigationStack {
             Form {
                 Section("阅读方式") {
+                    EPUBDefaultModePicker(selection: $defaultMode)
                     Toggle("滚动阅读", isOn: $scroll)
                     Toggle("使用原书排版", isOn: $publisherStyles)
                 }

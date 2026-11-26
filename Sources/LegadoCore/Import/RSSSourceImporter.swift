@@ -17,9 +17,9 @@ public enum RSSSourceImportError: Error, LocalizedError, Sendable {
     public var errorDescription: String? {
         switch self {
         case .emptyDocument: "导入内容为空"
-        case .wrongFormat: "RSS源格式错误"
-        case .invalidSource: "不是订阅源"
-        case .duplicate(let url): "RSS源已存在：\(url)"
+        case .wrongFormat: "网站源规则格式错误"
+        case .invalidSource: "请选择包含 sourceUrl 的网站源规则"
+        case .duplicate(let url): "网站源已存在：\(url)"
         }
     }
 }

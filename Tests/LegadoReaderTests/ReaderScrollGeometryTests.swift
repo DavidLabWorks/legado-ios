@@ -6,6 +6,24 @@ import XCTest
 
 @MainActor
 final class ReaderPagingGeometryTests: XCTestCase {
+    func testSelectedSimplifiedTextMatchesTheOriginalBodyAcrossParagraphs() throws {
+        let body = "閱讀📖。\n頭髮 [a.b]"
+        let heading = "章節\n"
+        let view = UITextView(frame: CGRect(x: 0, y: 0, width: 320, height: 300))
+        view.text = heading + body.readerText(simplified: true)
+        let manager = view.layoutManager
+        manager.ensureLayout(for: view.textContainer)
+        let glyph = manager.glyphIndexForCharacter(at: heading.utf16.count)
+        let rect = manager.boundingRect(forGlyphRange: NSRange(location: glyph, length: 1), in: view.textContainer)
+        let selection = try XCTUnwrap(ReaderTextSelection(manager: manager, container: view.textContainer,
+            at: CGPoint(x: rect.midX, y: rect.midY), body: body, bodyStart: heading.utf16.count,
+            insets: .zero, viewportOffset: 0))
+        let displayed = view.text as NSString
+        XCTAssertEqual(selection.originalText(in: displayed.range(of: "读📖。\n头发 [a.b]")), "讀📖。\n頭髮 [a.b]")
+        XCTAssertNil(selection.originalText(in: displayed.range(of: heading)))
+        XCTAssertNil(selection.originalText(in: NSRange(location: heading.utf16.count, length: 0)))
+    }
+
     func testPagesContainWholeLinesAndCoverTheDocumentWithoutGaps() throws {
         for size in [CGSize(width: 430, height: 750), CGSize(width: 844, height: 280)] {
             for fontSize in [28.0, 40.0] {
@@ -90,7 +108,10 @@ final class ReaderPagingGeometryTests: XCTestCase {
         try XCTSkipIf(UIAccessibility.isReduceMotionEnabled)
         let text = String(repeating: "连续往回翻页时，左侧应一直能看到上一页的正文。\n", count: 160)
         let reader = pagedReader(text: text, title: "连续翻页", animation: 0)
-        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 844))
+        // UIKit only runs the final page animation in a window attached to a scene.
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let window = UIWindow(windowScene: scene)
+        window.frame = CGRect(x: 0, y: 0, width: 390, height: 844)
         let host = UIHostingController(rootView: reader)
         window.rootViewController = host
         window.makeKeyAndVisible()
@@ -172,7 +193,7 @@ final class ReaderPagingGeometryTests: XCTestCase {
             fontSize: 32, fontPath: "", letterSpacing: 0, lineSpacing: 8, paragraphSpacing: 12,
             paragraphIndent: "　　", paddingLeft: 18, paddingRight: 18, paddingTop: 16, paddingBottom: 16,
             headerInset: 0, footerInset: 0, fontWeight: 0, titleMode: 0, titleSize: 4,
-            titleTopSpacing: 16, titleBottomSpacing: 24, underlineMode: 0, isSelectable: false,
+            titleTopSpacing: 16, titleBottomSpacing: 24, underlineMode: 0,
             fullJustify: true, pageAnimation: animation, isEInkMode: false, clickActions: Array(repeating: 0, count: 9),
             backgroundColor: .white, foregroundColor: .black, requestedPosition: 0, jumpPosition: nil,
             renderRevision: 0, readerPosition: .constant(0), pageRanges: ranges,
@@ -546,12 +567,12 @@ final class ReaderScrollGeometryTests: XCTestCase {
     }
 
     private func configuration(fontSize: Double = 20) -> ReaderTextView {
-        .init(text: "", title: "", previousTitle: nil, previousText: "", isPreviousReady: false,
+        .init(adjacentPagePreview: { _ in nil }, text: "", title: "", previousTitle: nil, previousText: "", isPreviousReady: false,
               continuationTitle: nil, continuationText: "", isContinuationReady: false, isVolume: false,
               fontSize: fontSize, fontPath: "", letterSpacing: 0, lineSpacing: 8, paragraphSpacing: 12,
               paragraphIndent: "　　", paddingLeft: 20, paddingRight: 20, paddingTop: 16, paddingBottom: 16,
               headerInset: 0, footerInset: 0, fontWeight: 0, titleMode: 0, titleSize: 4,
-              titleTopSpacing: 16, titleBottomSpacing: 24, underlineMode: 0, isSelectable: false,
+              titleTopSpacing: 16, titleBottomSpacing: 24, underlineMode: 0,
               fullJustify: true, pageAnimation: 3, isEInkMode: false, clickActions: Array(repeating: 0, count: 9),
               backgroundColor: .white, foregroundColor: .black, requestedPosition: 0, jumpPosition: nil,
               renderRevision: 0, readerPosition: .constant(0), pageRanges: .constant([]),

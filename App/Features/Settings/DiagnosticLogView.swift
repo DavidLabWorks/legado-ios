@@ -67,7 +67,8 @@ struct DiagnosticLogView: View {
                 }
             }
         }
-        .confirmationDialog("清空全部日志？", isPresented: $confirmsClear, titleVisibility: .visible) {
+        .alert("清空全部日志？", isPresented: $confirmsClear) {
+            Button("取消", role: .cancel) {}
             Button("清空日志", role: .destructive) {
                 do { try DiagnosticLog.shared.clear(); reload() }
                 catch { errorMessage = error.localizedDescription }

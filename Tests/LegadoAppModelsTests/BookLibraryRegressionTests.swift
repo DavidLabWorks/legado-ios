@@ -382,7 +382,7 @@ struct BookLibraryRegressionTests {
         #expect(await loader.requestedURLs == [selected.bookUrl])
         #expect(try await directory.load(bookURL: selected.bookUrl).count == 3)
         #expect(try await directory.load(bookURL: other.bookUrl).isEmpty)
-        #expect(model.updateMessage?.contains("新增 1 章") == true)
+        #expect(model.updateMessage == nil)
     }
 
     @Test func manualLocalRefreshReadsTheChangedFile() async throws {
@@ -397,8 +397,10 @@ struct BookLibraryRegressionTests {
         try (firstChapter + "第二章 归途\n新正文。").write(to: url, atomically: true, encoding: .utf8)
         await model.checkForUpdates(sources: [], bookURL: book.bookUrl)
         #expect(try await directory.load(bookURL: book.bookUrl).last?.title.contains("归途") == true)
-        #expect(model.books.first?.totalChapterNum == 2)
-        #expect(model.updateMessage?.contains("新增 1 章") == true)
+        let refreshed = try #require(model.books.first)
+        #expect(refreshed.totalChapterNum == 2)
+        #expect(await model.cachedTXTChapters(for: refreshed).count == 2)
+        #expect(model.updateMessage == nil)
     }
 
     @Test func groupUpdateHonorsMembershipAndCaughtUpSetting() async {
@@ -457,7 +459,7 @@ struct BookLibraryRegressionTests {
         await loader.finish()
         await gesture.value
         #expect(await directory.load(bookURL: book.bookUrl) == chapters)
-        #expect(model.updateMessage?.hasPrefix("更新完成") == true)
+        #expect(model.updateMessage == nil)
     }
 
     @Test(arguments: [false, true]) func parallelRefreshTracksActiveBooksAndStopsSchedulingOnCancel(cancel: Bool) async {
@@ -495,7 +497,7 @@ struct BookLibraryRegressionTests {
         if cancel {
             #expect(Set(await loader.requestedURLs) == initial)
             #expect(model.books == books)
-            #expect(model.updateMessage?.hasPrefix("更新已取消") == true)
+            #expect(model.updateMessage == nil)
         } else {
             #expect(await loader.requestedURLs.count == books.count)
             let additions = model.updateMessage?.components(separatedBy: "\n").filter { $0.contains("》新增") }

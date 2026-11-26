@@ -47,6 +47,7 @@ public struct BookUpdateMerger: Sendable {
         apply(\.bookUrl); apply(\.tocUrl); apply(\.origin); apply(\.originName)
         apply(\.name); apply(\.author); apply(\.kind); apply(\.customTag)
         apply(\.coverUrl); apply(\.customCoverUrl); apply(\.intro); apply(\.customIntro)
+        apply(\.localTXTRevision)
         apply(\.charset); apply(\.type); apply(\.group); apply(\.wordCount)
         apply(\.canUpdate); apply(\.order); apply(\.originOrder); apply(\.variable)
         apply(\.readConfig); apply(\.syncTime)
@@ -134,7 +135,8 @@ public actor BookUpdateCoordinator {
 
     public func refresh(
         book: Book, source: BookSource, now: Int64? = nil, maxPages: Int = 20,
-        persistDirectory: Bool = true, runPreUpdateScript: Bool = true, isFromBookInfo: Bool = false
+        persistDirectory: Bool = true, runPreUpdateScript: Bool = true, isFromBookInfo: Bool = false,
+        detail: BookDetailReport? = nil
     ) async -> BookUpdateReport {
         let old = (try? await repository.load(bookURL: book.bookUrl)) ?? []
         let prepared: BookDetailReport
@@ -145,7 +147,14 @@ public actor BookUpdateCoordinator {
         guard !Task.isCancelled, !prepared.diagnostics.contains(where: { $0.severity == .error }) else {
             return .init(book: book, chapters: old, addedChapterCount: 0, diagnostics: prepared.diagnostics, refreshed: false)
         }
-        let loaded = await loader.loadChapters(book: prepared.book, source: source, maxPages: maxPages)
+        let loaded: ChapterListReport
+        if !runPreUpdateScript, let detail, let page = detail.directoryPage,
+           detail.book.origin == source.id, detail.book.bookUrl == prepared.book.bookUrl,
+           detail.book.tocUrl == prepared.book.tocUrl, let network = loader as? NetworkBookService {
+            loaded = await network.loadChapters(book: prepared.book, source: source, maxPages: maxPages, firstPage: page)
+        } else {
+            loaded = await loader.loadChapters(book: prepared.book, source: source, maxPages: maxPages)
+        }
         let diagnostics = prepared.diagnostics + loaded.diagnostics
         guard !Task.isCancelled, !loaded.chapters.isEmpty,
               !loaded.diagnostics.contains(where: { $0.severity == .error }) else {

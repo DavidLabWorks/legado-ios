@@ -16,8 +16,26 @@ struct ReaderStylePreset: Identifiable {
     let background: UIColor
     let foreground: UIColor
 
+    var speechBackground: UIColor {
+        var hue: CGFloat = 0, saturation: CGFloat = 0, value: CGFloat = 0, alpha: CGFloat = 0
+        background.getHue(&hue, saturation: &saturation, brightness: &value, alpha: &alpha)
+        if value < 0.35 { return UIColor(white: 0.22, alpha: 1) }
+        let tint = UIColor(hue: hue, saturation: saturation == 0 ? 0 : min(1, saturation + 0.055),
+                           brightness: max(0, value - 0.075), alpha: 1)
+        // Muted ink on the lavender and green presets needs a lighter highlight.
+        for step in 0...10 {
+            let candidate = tint.lightened(by: CGFloat(step) / 10)
+            if candidate.relativeLuminance + 0.05 >= 4.5 * (foreground.relativeLuminance + 0.05) { return candidate }
+        }
+        return .white
+    }
+
+    var menuBackground: UIColor {
+        background.lightened(by: id == "night" ? 0.10 : 0.4)
+    }
+
     static let legadoDefaults: [ReaderStylePreset] = [
-        .init(id: "wechat", name: "微信读书", background: UIColor(hex: 0xC0EDC6), foreground: UIColor(hex: 0x0B0B0B)),
+        .init(id: "wechat", name: "微信读书", background: UIColor(hex: 0xDAE9DB), foreground: UIColor(hex: 0x19261C)),
         .init(id: "preset1", name: "预设1", background: UIColor(hex: 0xFFFFFF), foreground: UIColor(hex: 0x000000)),
         .init(id: "preset2", name: "预设2", background: UIColor(hex: 0xDDC090), foreground: UIColor(hex: 0x3E3422)),
         .init(id: "preset3", name: "预设3", background: UIColor(hex: 0xC2D8AA), foreground: UIColor(hex: 0x596C44)),
@@ -44,6 +62,20 @@ struct ReaderStylePreset: Identifiable {
 }
 
 private extension UIColor {
+    func lightened(by fraction: CGFloat) -> UIColor {
+        var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
+        getRed(&r, green: &g, blue: &b, alpha: &a)
+        return UIColor(red: r + (1 - r) * fraction, green: g + (1 - g) * fraction,
+                       blue: b + (1 - b) * fraction, alpha: a)
+    }
+
+    var relativeLuminance: CGFloat {
+        var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
+        getRed(&r, green: &g, blue: &b, alpha: &a)
+        func linear(_ c: CGFloat) -> CGFloat { c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4) }
+        return 0.2126 * linear(r) + 0.7152 * linear(g) + 0.0722 * linear(b)
+    }
+
     convenience init(hex: UInt32) {
         self.init(
             red: CGFloat((hex >> 16) & 0xff) / 255,

@@ -1,55 +1,55 @@
 {
-  "name": "小浣熊阅读",
+  "name": "喵阅",
   "identifier": "com.epiboly.legado.source",
-  "subtitle": "小浣熊阅读官方应用源",
-  "description": "小浣熊阅读的最新正式版，供 AltStore Classic、SideStore 和 LiveContainer 添加。",
-  "sourceURL": "https://raw.githubusercontent.com/Aminark/legado-ios/main/docs/altstore.json",
-  "website": "https://github.com/Aminark/legado-ios",
-  "iconURL": "https://raw.githubusercontent.com/Aminark/legado-ios/main/App/Assets.xcassets/AppIcon.appiconset/AppIcon-1024.png",
+  "subtitle": "喵阅应用源",
+  "description": "喵阅的最新版本，供 AltStore Classic、SideStore 和 LiveContainer 添加。",
+  "sourceURL": "https://raw.githubusercontent.com/DavidLabWorks/legado-ios/main/docs/altstore.json",
+  "website": "https://github.com/DavidLabWorks/legado-ios",
+  "iconURL": "https://raw.githubusercontent.com/DavidLabWorks/legado-ios/main/release/MiaoYue-build99-mascot.png",
   "tintColor": "#315C50",
   "apps": [
     {
-      "name": "小浣熊阅读",
+      "name": "喵阅",
       "bundleIdentifier": "com.epiboly.legado",
-      "developerName": "Aminark",
-      "subtitle": "搜书快一点，读书舒服一点。",
+      "developerName": "DavidLabWorks",
+      "subtitle": "读小说、听书、整理网页",
       "localizedDescription": "一款优先兼容阅读书源的开源 iOS 阅读器，支持书架、搜索、阅读排版、本地 TXT、语音朗读和 RSS。应用不提供书源或在线书库，书源需自行导入。",
-      "iconURL": "https://raw.githubusercontent.com/Aminark/legado-ios/main/App/Assets.xcassets/AppIcon.appiconset/AppIcon-1024.png",
+      "iconURL": "https://raw.githubusercontent.com/DavidLabWorks/legado-ios/main/release/MiaoYue-build99-icon.png",
       "tintColor": "#315C50",
       "category": "utilities",
       "screenshots": [
         {
-          "imageURL": "https://raw.githubusercontent.com/Aminark/legado-ios/main/docs/images/bookshelf.png",
+          "imageURL": "https://raw.githubusercontent.com/DavidLabWorks/legado-ios/main/docs/images/bookshelf.png",
           "width": 1206,
           "height": 2622
         },
         {
-          "imageURL": "https://raw.githubusercontent.com/Aminark/legado-ios/main/docs/images/search.png",
+          "imageURL": "https://raw.githubusercontent.com/DavidLabWorks/legado-ios/main/docs/images/search.png",
           "width": 1206,
           "height": 2622
         },
         {
-          "imageURL": "https://raw.githubusercontent.com/Aminark/legado-ios/main/docs/images/reader.png",
+          "imageURL": "https://raw.githubusercontent.com/DavidLabWorks/legado-ios/main/docs/images/reader.png",
           "width": 1206,
           "height": 2622
         }
       ],
       "versions": [
         {
-          "version": "0.1.16",
-          "buildVersion": "30",
-          "date": "2026-11-23T14:47:50Z",
-          "localizedDescription": "小浣熊阅读 0.1.16 正式版（构建 30），支持 iOS / iPadOS 15.0 及以上。\n\n- **在线小说续读和切章**　书架和书籍详情页会提前准备上次读到的正文。已缓存的章节可以离线打开，来回切换时会复用相邻章节的正文和排版。\n- **后台缓存**　阅读时默认静默缓存后面 5 章，往后读会继续补齐。接近目录末尾时，会为允许更新的书籍检查新章节。\n- **目录和排版**　目录改为全屏，未下载的章节右侧有云图标。章节标题与正文的间距更宽，阅读设置中的文字统一左对齐。支持的书源可查看本章评论。\n- **EPUB 与字体**　可以选择默认使用原书排版或文字阅读模式。原书目录支持折叠，改善章节跳转、阅读位置恢复和自定义字体导入。\n\n下载附件中的 IPA，使用自己的签名工具安装。可用同页的 SHA256SUMS 校验下载文件。此版本已在模拟器验证缓存续读与前后切章，尚未进行真机安装验证。应用不附带书源或在线书库，在线阅读需自行导入书源。\n",
-          "downloadURL": "https://github.com/Aminark/legado-ios/releases/download/v0.1.16/legado-ios-v0.1.16-build30-unsigned.ipa",
-          "size": 16507334,
+          "version": "0.1.87",
+          "buildVersion": "101",
+          "date": "2026-11-26T11:12:30Z",
+          "localizedDescription": "新增 JSON 备份与恢复，可迁移书架、书源、网站源、本地书籍及网络与缓存设置。支持从分享菜单打开备份。",
+          "downloadURL": "https://raw.githubusercontent.com/DavidLabWorks/legado-ios/main/release/MiaoYue-0.1.87-build101-unsigned.ipa",
+          "size": 34620144,
           "minOSVersion": "15.0"
         }
       ],
-      "version": "0.1.16",
-      "versionDate": "2026-11-23T14:47:50Z",
-      "versionDescription": "小浣熊阅读 0.1.16 正式版（构建 30），支持 iOS / iPadOS 15.0 及以上。\n\n- **在线小说续读和切章**　书架和书籍详情页会提前准备上次读到的正文。已缓存的章节可以离线打开，来回切换时会复用相邻章节的正文和排版。\n- **后台缓存**　阅读时默认静默缓存后面 5 章，往后读会继续补齐。接近目录末尾时，会为允许更新的书籍检查新章节。\n- **目录和排版**　目录改为全屏，未下载的章节右侧有云图标。章节标题与正文的间距更宽，阅读设置中的文字统一左对齐。支持的书源可查看本章评论。\n- **EPUB 与字体**　可以选择默认使用原书排版或文字阅读模式。原书目录支持折叠，改善章节跳转、阅读位置恢复和自定义字体导入。\n\n下载附件中的 IPA，使用自己的签名工具安装。可用同页的 SHA256SUMS 校验下载文件。此版本已在模拟器验证缓存续读与前后切章，尚未进行真机安装验证。应用不附带书源或在线书库，在线阅读需自行导入书源。\n",
-      "downloadURL": "https://github.com/Aminark/legado-ios/releases/download/v0.1.16/legado-ios-v0.1.16-build30-unsigned.ipa",
-      "size": 16507334,
+      "version": "0.1.87",
+      "versionDate": "2026-11-26T11:12:30Z",
+      "versionDescription": "新增 JSON 备份与恢复，可迁移书架、书源、网站源、本地书籍及网络与缓存设置。支持从分享菜单打开备份。",
+      "downloadURL": "https://raw.githubusercontent.com/DavidLabWorks/legado-ios/main/release/MiaoYue-0.1.87-build101-unsigned.ipa",
+      "size": 34620144,
       "appPermissions": {
         "entitlements": [],
         "privacy": {

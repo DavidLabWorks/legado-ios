@@ -69,7 +69,7 @@ struct BookDetailRegressionTests {
                                         chapterRepository: InMemoryBookChapterRepository())
         let load = Task { await model.load() }
         await transport.waitUntilRequested()
-        #expect(model.state == .loading)
+        #expect(model.state == .loadingDetails)
         let url = try #require(model.browserDirectoryURL)
         let rows = [["url": source.id + "/txt/40391/14135616.html", "title": "第1章"]]
         do { try model.useBrowserDirectory(rows, at: url) }
@@ -202,6 +202,49 @@ struct BookDetailRegressionTests {
         #expect(model.book.durChapterIndex == 6)
         #expect(model.book.durChapterPos == 123)
     }
+    @Test func qidianUsesTheRenderedBookPageForItsDirectory() async {
+        var source = BookSource(bookSourceUrl: "https://www.qidian.com/#category-ranks", bookSourceName: "起点中文网·排行榜")
+        source.ruleBookInfo = BookInfoRule()
+        var toc = TocRule()
+        toc.chapterList = "@css:li"
+        toc.chapterName = "@css:a@text"
+        toc.chapterUrl = "@css:a@href"
+        source.ruleToc = toc
+        let item = SearchBook(bookURL: "https://www.qidian.com/book/123/", origin: source.id,
+                              originName: source.bookSourceName, type: 0, name: "青山")
+        let transport = CountingDetailTransport()
+        let model = BookDetailViewModel(searchBook: item, source: source, service: .init(transport: transport),
+                                        chapterRepository: InMemoryBookChapterRepository())
+        await model.load(persistDirectory: false)
+        #expect(model.chapters.map(\.title) == ["第一章", "第二章"])
+        #expect(await transport.requestedPaths.count == 1)
+        await model.refresh(persistDirectory: false)
+        #expect(model.state == .ready)
+        #expect(await transport.requestedPaths.count > 1)
+    }
+
+    @Test func unavailableQidianDirectoryKeepsTheOfficialBook() async {
+        var source = BookSource(bookSourceUrl: "https://www.qidian.com/#category-ranks", bookSourceName: "起点中文网·排行榜")
+        source.ruleBookInfo = .init()
+        var toc = TocRule()
+        toc.chapterList = "$[*]"
+        source.ruleToc = toc
+        let item = SearchBook(bookURL: #"https://www.qidian.com/book/1033014772/,{"webView":true}"#,
+                              origin: source.id, originName: source.bookSourceName, type: 0, name: "青山")
+        var other = BookSource(bookSourceUrl: "https://other.test", bookSourceName: "备用源")
+        other.searchUrl = "/search"
+        let alternate = AutomaticSwitchLoader()
+        let switcher = BookSourceSwitchService(searcher: alternate, detailLoader: alternate,
+                                              chapterLoader: alternate, contentLoader: alternate)
+        let model = BookDetailViewModel(searchBook: item, source: source,
+                                        service: .init(transport: ForbiddenDirectoryTransport()),
+                                        chapterRepository: InMemoryBookChapterRepository(), sourceSwitchService: switcher)
+        await model.load(sources: [source, other], persistDirectory: false)
+        #expect(model.state == .failed)
+        #expect(model.source.id == source.id)
+        #expect(model.qidianCatalogURL?.absoluteString == "https://www.qidian.com/book/1033014772/catalog/")
+    }
+
     @Test(arguments: [false, true]) func automaticSourceSwitchWaitsForSuccessfulShelfCommit(succeeds: Bool) async {
         let oldSource = BookSource(bookSourceUrl: "https://old-detail.test", bookSourceName: "旧源")
         var newSource = BookSource(bookSourceUrl: "https://new-detail.test", bookSourceName: "新源")

@@ -143,6 +143,18 @@ final class BookLibraryModel: ObservableObject {
         BookLibraryModel(repository: InMemoryBookRepository(books: books))
     }
 
+    func waitForBackupSnapshot() async throws {
+        guard !isCheckingUpdates else { throw CocoaError(.userCancelled, userInfo: [NSLocalizedDescriptionKey: "书架正在检查更新，请稍后再试。"]) }
+        await waitForSourceSwitch()
+        _ = await bookSaveTask?.value
+        _ = await groupSaveTask?.value
+    }
+
+    func reloadAfterBackup() async {
+        pendingProgress = progressDefaults.data(forKey: pendingProgressKey).flatMap { try? JSONDecoder().decode([String: BookProgress].self, from: $0) } ?? [:]
+        await load()
+    }
+
     func load() async {
         loadGeneration &+= 1
         let generation = loadGeneration
@@ -216,12 +228,13 @@ final class BookLibraryModel: ObservableObject {
     }
 
     @discardableResult
-    func addOrUpdate(_ book: Book, chapters: [BookChapter] = []) async -> Bool {
+    func addOrUpdate(_ book: Book, chapters: [BookChapter] = [], replacing expected: Book? = nil) async -> Bool {
         await waitForSourceSwitch()
-        if chapters.isEmpty { return await saveBook(book, chapters: []) }
+        if chapters.isEmpty, expected == nil { return await saveBook(book, chapters: []) }
         let save = Task { @MainActor in
             defer { sourceSwitchSaveTask = nil }
             _ = await bookSaveTask?.value
+            if let expected, !books.contains(expected) { return false }
             return await saveBook(book, chapters: chapters)
         }
         sourceSwitchSaveTask = save
@@ -418,14 +431,14 @@ final class BookLibraryModel: ObservableObject {
                     if let txtTocRuleRepository {
                         service = try await localService.usingStoredTocRules(from: txtTocRuleRepository)
                     } else { service = localService }
+                    var scanned = selected
+                    scanned.localTXTRevision = URL(string: bookURL).flatMap(LocalTXTRevision.init(url:))
                     let chapters = try await Task.detached { try service.loadChapters(book: selected).chapters }.value
                     let previous = try await chapterRepository.load(bookURL: bookURL)
-                    let report = BookUpdateMerger().merge(book: selected, oldChapters: previous, newChapters: chapters,
+                    let report = BookUpdateMerger().merge(book: scanned, oldChapters: previous, newChapters: chapters,
                                                          now: Int64(Date().timeIntervalSince1970 * 1_000))
                     guard report.refreshed else { updateMessage = "《\(selected.name)》没有可用目录。"; return }
-                    if await commitPreparedUpdate(requestedBook: selected, report: report) {
-                        updateMessage = "《\(selected.name)》目录已刷新，共 \(chapters.count) 章，新增 \(report.addedChapterCount) 章。"
-                    }
+                    _ = await commitPreparedUpdate(requestedBook: selected, report: report)
                 } catch { errorMessage = error.localizedDescription }
                 return
             }
@@ -492,20 +505,10 @@ final class BookLibraryModel: ObservableObject {
             }
         }
 
-        let summary: String
-        if Task.isCancelled {
-            summary = "更新已取消，已检查 \(checked) 本，发现 \(added) 个新章节。"
-        } else if checked == 0 && failures.isEmpty {
-            summary = "书架里暂时没有可更新的网络书籍。"
-        } else if !failures.isEmpty {
-            summary = "已检查 \(checked) 本，发现 \(added) 个新章节，\(failures.count) 本未更新。"
-        } else {
-            if bookURL != nil, added == 0, let book = requestedBooks.first {
-                summary = "《\(book.name)》已是最新目录。"
-            } else {
-                summary = added > 0 ? "更新完成，共发现 \(added) 个新章节。" : "更新完成，已是最新目录。"
-            }
-        }
+        guard !failures.isEmpty else { return }
+        let summary = Task.isCancelled
+            ? "更新已取消，已检查 \(checked) 本，\(failures.count) 本未更新。"
+            : "已检查 \(checked) 本，发现 \(added) 个新章节，\(failures.count) 本未更新。"
         let updates = requestedBooks.compactMap { updatesByBookURL[$0.bookUrl] }
         if !Task.isCancelled {
             booksRequiringVerification = requestedBooks.filter { challengedURLs.contains($0.bookUrl) }
@@ -778,9 +781,33 @@ final class BookLibraryModel: ObservableObject {
         let report = try await Task.detached { try service.openFile(at: url) }.value
         await waitForSourceSwitch()
         guard !books.contains(where: { $0.bookUrl == url.absoluteString }) else { return }
-        guard await persist(books + [report.book]) else {
+        let chapters = url.pathExtension.lowercased() == "txt" ? report.chapters : []
+        guard await addOrUpdate(report.book, chapters: chapters) else {
             throw LocalFileError.saveFailed(errorMessage ?? "无法写入数据库")
         }
+    }
+
+    func cachedTXTChapters(for book: Book) async -> [BookChapter] {
+        guard let indexed = book.localTXTRevision, let url = URL(string: book.bookUrl),
+              LocalTXTRevision(url: url) == indexed else { return [] }
+        return (try? await chapterRepository.load(bookURL: book.bookUrl)) ?? []
+    }
+
+    func localReadingChapters(for book: Book) async throws -> [BookChapter] {
+        let saved = await cachedTXTChapters(for: book)
+        if !saved.isEmpty { return saved }
+        try Task.checkCancellation()
+        let revision = URL(string: book.bookUrl).flatMap(LocalTXTRevision.init(url:))
+        let parsing = Task.detached { [localService] in try localService.loadChapters(book: book).chapters }
+        let chapters = try await withTaskCancellationHandler { try await parsing.value } onCancel: { parsing.cancel() }
+        try Task.checkCancellation()
+        // Backfill older shelf entries only while they still describe the file we parsed.
+        if let revision, let url = URL(string: book.bookUrl), revision == LocalTXTRevision(url: url) {
+            var updated = book
+            updated.localTXTRevision = revision
+            _ = await addOrUpdate(updated, chapters: chapters, replacing: book)
+        }
+        return chapters
     }
 
     func localTocRules() async throws -> [TxtTocRule] {

@@ -41,7 +41,7 @@ let package = Package(
             exclude: [
                 "Explore/ExploreView.swift", "TTS", "Settings",
                 "Activity/CacheManagementView.swift", "Activity/FileManagementView.swift", "Activity/ReadingHistoryView.swift", "Activity/ReadingStatisticsView.swift",
-                "RSS/RSSAddBookView.swift", "RSS/RSSSourceDebugView.swift", "RSS/RSSSourceEditorView.swift", "RSS/RSSViews.swift", "RSS/RSSWebReaderView.swift",
+                "RSS/RSSAddBookView.swift", "RSS/RSSSourceEditorView.swift", "RSS/RSSViews.swift", "RSS/RSSWebReaderView.swift", "RSS/RSSVideoPlayer.swift",
                 "Sources/SourceManagementView.swift", "Sources/SourceDebugView.swift", "Sources/SourceLoginView.swift", "Sources/SourceEditorView.swift",
                 "Rules/ReplaceRuleManagementView.swift", "Rules/ReplaceRuleEditorView.swift", "Rules/RuleSubscriptionView.swift", "Rules/TxtTocRuleManagementView.swift", "Rules/Editor",
                 "Books/BookCoverSearchView.swift", "Books/BookDetailView.swift", "Books/LocalBookDetailView.swift", "Books/SourceSwitchView.swift",

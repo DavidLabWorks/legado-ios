@@ -9,34 +9,25 @@ final class BookshelfReadViewModel: ObservableObject {
     @Published private(set) var resolvedBook: Book?
     @Published private(set) var isLoading = false
     @Published private(set) var errorMessage: String?
-    private let localService: LocalBookService
-    private let updateCoordinator: BookUpdateCoordinator
-
-    init(
-        localService: LocalBookService = .init(),
-        updateCoordinator: BookUpdateCoordinator = .init(repository: AppBookChapterRepository.live())
-    ) {
-        self.localService = localService
-        self.updateCoordinator = updateCoordinator
-    }
-
-    func load(book: Book, source: BookSource?, commitUpdate: (@MainActor (BookUpdateReport) async -> Bool)? = nil) async {
+    func load(book: Book, source: BookSource?, library: BookLibraryModel) async {
         guard chapters.isEmpty, !isLoading else { return }
         isLoading = true
         defer { isLoading = false }
         if book.origin == "local" {
             do {
-                let report = try await Task.detached { [localService] in
-                    try localService.loadChapters(book: book)
-                }.value
-                chapters = report.chapters
+                let loaded = try await library.localReadingChapters(for: book)
+                try Task.checkCancellation()
+                guard !loaded.isEmpty else { throw LocalBookError.emptyFile }
+                chapters = loaded
                 resolvedBook = book
+            } catch is CancellationError {
+                return
             } catch {
                 errorMessage = error.localizedDescription
             }
             return
         }
-        let stored = await updateCoordinator.storedChapters(bookURL: book.bookUrl)
+        let stored = await library.updateCoordinator.storedChapters(bookURL: book.bookUrl)
         if let restored = Self.restoredBook(book, chapters: stored) {
             chapters = stored
             resolvedBook = restored
@@ -46,9 +37,9 @@ final class BookshelfReadViewModel: ObservableObject {
             errorMessage = "目录与阅读进度不一致，且当前书籍的书源不存在。请先恢复或更换书源。"
             return
         }
-        let report = await updateCoordinator.refresh(book: book, source: source, persistDirectory: commitUpdate == nil)
+        let report = await library.updateCoordinator.refresh(book: book, source: source, persistDirectory: false)
         if report.refreshed, Self.matchesReadingProgress(report.book, chapters: report.chapters) {
-            if let commitUpdate, !(await commitUpdate(report)) {
+            if !(await library.commitPreparedUpdate(requestedBook: book, report: report)) {
                 errorMessage = "更新后的书籍保存失败，已保留原书籍和阅读位置。"
                 return
             }

@@ -1,5 +1,6 @@
 import SwiftUI
 import WebKit
+import ImageIO
 
 struct BookCoverSearchView: View {
     let book: Book
@@ -38,7 +39,7 @@ struct BookCoverSearchView: View {
         .task(id: pendingSave) {
             guard let pendingSave else { return }
             do {
-                let data = try await Self.imageData(for: pendingSave)
+                let data = try await BookCoverImage.imageData(for: pendingSave)
                 try await library.setCover(for: book, imageData: data)
                 dismiss()
             } catch is CancellationError {
@@ -50,9 +51,21 @@ struct BookCoverSearchView: View {
         }
     }
 
-    private static func imageData(for address: String) async throws -> Data {
-        let prefix = "data:image/jpeg;base64,"
-        if address.hasPrefix(prefix), let data = Data(base64Encoded: String(address.dropFirst(prefix.count))) { return data }
+}
+
+enum BookCoverImage {
+    static func thumbnail(for address: String) async -> UIImage? {
+        guard let data = try? await imageData(for: address), !Task.isCancelled,
+              let source = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
+        let options: [CFString: Any] = [kCGImageSourceCreateThumbnailFromImageAlways: true,
+                                         kCGImageSourceCreateThumbnailWithTransform: true,
+                                         kCGImageSourceThumbnailMaxPixelSize: 512]
+        return CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary).map { UIImage(cgImage: $0) }
+    }
+
+    static func imageData(for address: String) async throws -> Data {
+        if address.hasPrefix("data:image/"), let comma = address.firstIndex(of: ","),
+           let data = Data(base64Encoded: String(address[address.index(after: comma)...])) { return data }
         guard let url = URL(string: address), ["https", "http"].contains(url.scheme?.lowercased()) else { throw URLError(.badURL) }
         let (file, response) = try await URLSession.shared.download(from: url)
         defer { try? FileManager.default.removeItem(at: file) }

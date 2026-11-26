@@ -14,6 +14,7 @@ public struct Book: Codable, Hashable, Identifiable, Sendable {
     public var intro: String?
     public var customIntro: String?
     public var charset: String?
+    public var localTXTRevision: LocalTXTRevision?
     public var type: Int
     public var group: Int64
     public var latestChapterTitle: String?
@@ -79,7 +80,7 @@ public struct Book: Codable, Hashable, Identifiable, Sendable {
         case intro, customIntro, charset, type, group, latestChapterTitle, latestChapterTime, lastCheckTime
         case lastCheckCount, totalChapterNum, durChapterTitle, durChapterIndex, durVolumeIndex
         case chapterInVolumeIndex, durChapterPos, durChapterTime, wordCount, canUpdate, order, originOrder
-        case variable, readConfig, syncTime
+        case variable, readConfig, syncTime, localTXTRevision
     }
 
     public init(from decoder: Decoder) throws {
@@ -96,6 +97,7 @@ public struct Book: Codable, Hashable, Identifiable, Sendable {
         customCoverUrl = try value.decodeIfPresent(String.self, forKey: .customCoverUrl)
         intro = try value.decodeIfPresent(String.self, forKey: .intro)
         customIntro = try value.decodeIfPresent(String.self, forKey: .customIntro)
+        localTXTRevision = try value.decodeIfPresent(LocalTXTRevision.self, forKey: .localTXTRevision)
         charset = try value.decodeIfPresent(String.self, forKey: .charset)
         type = try value.decodeIfPresent(Int.self, forKey: .type) ?? 0
         group = try value.decodeIfPresent(Int64.self, forKey: .group) ?? 0

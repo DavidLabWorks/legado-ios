@@ -21,7 +21,9 @@ final class RSSLibraryModel: ObservableObject {
     private let importer = RSSSourceImporter()
     private let databaseResult: Result<LegadoDatabase, Error>
     private var database: LegadoDatabase { get throws { try databaseResult.get() } }
-    private var nextURL: String?
+    @Published private var nextURL: String?
+    var canLoadMore: Bool { nextURL?.nilIfBlank != nil }
+    private var visitedPageURLs: Set<String> = []
     private var page = 1
     private var order: Int64 = 0
     private struct Feed: Equatable {
@@ -30,8 +32,12 @@ final class RSSLibraryModel: ObservableObject {
         let key: String?
     }
     private var activeFeed: Feed?
+    private var hasLoadedFeed = false
     private var articleRequestID = UUID()
-    private var loadingMoreRequestID: UUID?
+    @Published private var loadingMoreRequestID: UUID?
+    @Published private(set) var refreshingFeed = false
+    @Published private(set) var paginationError: String?
+    var isLoadingMore: Bool { loadingMoreRequestID != nil }
     private var activeOperations = 0
 
     init(database: LegadoDatabase, service: RSSService = .init()) {
@@ -51,6 +57,19 @@ final class RSSLibraryModel: ObservableObject {
         catch { return .init(databaseError: error) }
     }
 
+    func reloadAfterBackup() async {
+        articleRequestID = UUID()
+        activeFeed = nil
+        loadingMoreRequestID = nil
+        refreshingFeed = false
+        paginationError = nil
+        visitedPageURLs.removeAll()
+        articles = []
+        nextURL = nil
+        hasLoadedFeed = false
+        await load()
+    }
+
     func load() async {
         do {
             async let loadedSources = sourceRepository.all()
@@ -58,6 +77,10 @@ final class RSSLibraryModel: ObservableObject {
             async let loadedRecords = recordRepository.all()
             (sources, stars, records) = try await (loadedSources, loadedStars, loadedRecords)
         } catch { errorMessage = error.localizedDescription }
+    }
+
+    func importSources(_ incoming: [RssSource]) async throws {
+        sources = try await database.mergeImportedRssSources(incoming)
     }
 
     func importFiles(_ urls: [URL]) async {
@@ -110,8 +133,19 @@ final class RSSLibraryModel: ObservableObject {
         catch { errorMessage = error.localizedDescription }
     }
     func remove(_ source: RssSource) async {
-        do { try await sourceRepository.remove(sourceURL: source.sourceUrl); sources = try await sourceRepository.all() }
-        catch { errorMessage = error.localizedDescription }
+        do {
+            try await sourceRepository.remove(sourceURL: source.sourceUrl)
+            if activeFeed?.origin == source.sourceUrl {
+                articleRequestID = UUID()
+                loadingMoreRequestID = nil
+                refreshingFeed = false
+                paginationError = nil
+                activeFeed = nil
+                nextURL = nil
+                articles = []
+            }
+            sources = try await sourceRepository.all()
+        } catch { errorMessage = error.localizedDescription }
     }
 
     func moveSources(from offsets: IndexSet, to destination: Int) async {
@@ -129,10 +163,7 @@ final class RSSLibraryModel: ObservableObject {
         do {
             var source = value; source.sourceName = name; source.sourceUrl = url
             let original = originalURL.flatMap { key in sources.first { $0.sourceUrl == key } }
-            let encoder = JSONEncoder()
-            let oldData = try encoder.encode(original)
-            let newData = try encoder.encode(source)
-            if oldData != newData { source.lastUpdateTime = Int64(Date().timeIntervalSince1970 * 1_000) }
+            if original != source { source.lastUpdateTime = Int64(Date().timeIntervalSince1970 * 1_000) }
             if let originalURL, originalURL != source.sourceUrl {
                 try await starRepository.updateOrigin(from: originalURL, to: source.sourceUrl)
                 try await articleRepository.updateOrigin(from: originalURL, to: source.sourceUrl)
@@ -146,20 +177,41 @@ final class RSSLibraryModel: ObservableObject {
         } catch { errorMessage = error.localizedDescription; return false }
     }
 
-    func refresh(_ source: RssSource, sortName: String? = nil, sortURL: String? = nil, key: String? = nil) async {
+    func refresh(_ source: RssSource, sortName: String? = nil, sortURL: String? = nil, key: String? = nil, preferCache: Bool = false) async {
         let name = sortName ?? source.sourceName
         let url = sortURL ?? source.sortUrl?.nilIfBlank ?? source.sourceUrl
         let feed = Feed(origin: source.sourceUrl, sort: name, key: key)
+        if preferCache, activeFeed == feed, hasLoadedFeed { return }
         let requestID = UUID()
         articleRequestID = requestID
         loadingMoreRequestID = nil
+        paginationError = nil
+        refreshingFeed = true
+        defer { if articleRequestID == requestID { refreshingFeed = false } }
         if activeFeed != feed {
+            hasLoadedFeed = false
             articles = []
             nextURL = nil
             page = 1
         }
         activeFeed = feed
         await perform(isCurrent: { self.articleRequestID == requestID }) {
+            if preferCache, key == nil {
+                let cached = try await self.database.cachedRssFeed(origin: source.sourceUrl, sort: name)
+                guard self.articleRequestID == requestID else { return }
+                if let cached {
+                    self.visitedPageURLs = []
+                    self.page = cached.page ?? 1
+                    self.nextURL = cached.nextURL
+                    self.order = (cached.articles.last?.order ?? 1) - 1
+                    self.articles = cached.articles
+                    // Legacy caches have articles but no record of whether another page exists.
+                    if cached.page != nil || source.ruleNextPage?.nilIfBlank == nil {
+                        self.hasLoadedFeed = true
+                        return
+                    }
+                }
+            }
             let report = try await self.service.articles(sortName: name, sortURL: url, source: source, page: 1, key: key)
             guard self.articleRequestID == requestID else { return }
             var nextOrder = Int64(Date().timeIntervalSince1970 * 1_000)
@@ -173,35 +225,43 @@ final class RSSLibraryModel: ObservableObject {
                 for index in values.indices { values[index].read = readLinks.contains(values[index].link) }
                 articles = values
             } else {
-                if source.ruleNextPage?.nilIfBlank != nil {
-                    try await self.articleRepository.replace(values, origin: source.sourceUrl, sort: name)
-                } else {
-                    try await self.articleRepository.put(values)
-                }
-                articles = try await self.articleRepository.articles(origin: source.sourceUrl, sort: name)
+                articles = try await self.database.saveRssFeedPage(values, origin: source.sourceUrl, sort: name,
+                    page: 1, nextURL: report.result.nextURL, replaceFeed: source.ruleNextPage?.nilIfBlank != nil)
             }
             guard self.articleRequestID == requestID else { return }
+            self.visitedPageURLs = [url]
             self.page = 1
             self.order = nextOrder
             self.nextURL = report.result.nextURL
             self.articles = articles
+            self.hasLoadedFeed = true
         }
     }
 
     func loadMore(_ source: RssSource, sortName: String? = nil, key: String? = nil) async {
         let name = sortName ?? source.sourceName
         guard activeFeed == Feed(origin: source.sourceUrl, sort: name, key: key),
-              loadingMoreRequestID == nil, let nextURL, !nextURL.isEmpty else { return }
+              !refreshingFeed, loadingMoreRequestID == nil, let nextURL, !nextURL.isEmpty else { return }
         let requestID = articleRequestID
         loadingMoreRequestID = requestID
+        paginationError = nil
         defer { if loadingMoreRequestID == requestID { loadingMoreRequestID = nil } }
         let nextPage = page + 1
-        await perform(isCurrent: { self.articleRequestID == requestID }) {
+        do {
             let report = try await self.service.articles(sortName: name, sortURL: nextURL, source: source, page: nextPage, key: key)
             guard self.articleRequestID == requestID else { return }
             var nextOrder = self.order
             var values = report.result.articles
             for index in values.indices { values[index].order = nextOrder; nextOrder -= 1 }
+            var followingURL = report.result.nextURL
+            let usesPageTemplate = source.ruleNextPage?.uppercased() == "PAGE"
+            if usesPageTemplate {
+                // PAGE reuses the request template even when the site has run out of results.
+                let ids = Set(self.articles.map(\.id))
+                if values.allSatisfy({ ids.contains($0.id) }) { followingURL = nil }
+            } else if let url = followingURL, url == nextURL || visitedPageURLs.contains(url) {
+                followingURL = nil
+            }
             let articles: [RssArticle]
             if key != nil {
                 let records = try await self.recordRepository.all()
@@ -211,18 +271,24 @@ final class RSSLibraryModel: ObservableObject {
                 var seen = Set(self.articles.map(\.id))
                 articles = self.articles + values.filter { seen.insert($0.id).inserted }
             } else {
-                try await self.articleRepository.append(values)
-                articles = try await self.articleRepository.articles(origin: source.sourceUrl, sort: name)
+                articles = try await self.database.saveRssFeedPage(values, origin: source.sourceUrl, sort: name,
+                    page: nextPage, nextURL: followingURL, replaceFeed: false)
             }
             guard self.articleRequestID == requestID else { return }
+            if !usesPageTemplate { self.visitedPageURLs.insert(nextURL) }
             self.page = nextPage
             self.order = nextOrder
-            self.nextURL = report.result.nextURL
+            self.nextURL = followingURL
             self.articles = articles
+        } catch {
+            if articleRequestID == requestID, !isRequestCancellation(error) { paginationError = error.localizedDescription }
         }
     }
 
+    static let websiteHistoryKey = "recordWebsiteBrowsingHistory"
+
     func read(_ article: RssArticle) async {
+        guard UserDefaults.standard.object(forKey: Self.websiteHistoryKey) as? Bool ?? true else { return }
         do {
             try await recordRepository.insertIgnoringExisting(article.record())
             records = try await recordRepository.all()
@@ -263,6 +329,7 @@ final class RSSLibraryModel: ObservableObject {
             }
             return policy.mode(article: updated, source: source, resolvedContent: content)
         } catch {
+            if isRequestCancellation(error) { return policy.mode(article: article, source: source) }
             errorMessage = error.localizedDescription
             if article.type == 0 { return .html(content: "加载正文失败\n\(error.localizedDescription)", baseURL: nil) }
             return policy.mode(article: article, source: source)
@@ -309,11 +376,15 @@ final class RSSLibraryModel: ObservableObject {
         let payload = try importer.decode(data)
         return try importer.merge(payload.sources, into: existing)
     }
+    private func isRequestCancellation(_ error: Error) -> Bool {
+        Task.isCancelled || error is CancellationError || (error as? URLError)?.code == .cancelled
+    }
+
     private func perform(isCurrent: () -> Bool = { true }, _ operation: () async throws -> Void) async {
         activeOperations += 1
         isWorking = true
         defer { activeOperations -= 1; isWorking = activeOperations > 0 }
-        do { try await operation() } catch { if isCurrent() { errorMessage = error.localizedDescription } }
+        do { try await operation() } catch { if isCurrent(), !isRequestCancellation(error) { errorMessage = error.localizedDescription } }
     }
 }
 

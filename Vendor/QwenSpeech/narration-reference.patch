@@ -1,0 +1,67 @@
+--- a/src/qwen3_tts.cpp
++++ b/src/qwen3_tts.cpp
+@@ -662,6 +662,8 @@
+ 
+ struct qwen3_tts_context {
+     bool (*should_cancel)() = nullptr;
++    std::string narration_text;
++    std::vector<float> narration_frames;
+     qwen3_tts_context_params params{};
+     int n_threads = 4;
+ 
+@@ -7248,6 +7250,34 @@
+     return true;
+ }
+ 
++// Keep a short, known recording of the selected stock voice in the acoustic
++// context. Only newly predicted frames are decoded and sent to the player.
++extern "C" int legado_qwen_set_narrator(qwen3_tts_context* ctx, const char* name,
++                                        const char* transcript, const uint8_t* codes, size_t bytes) {
++    if (!ctx || !transcript || !*transcript || !codes || bytes == 0 ||
++        ctx->hp.n_code_groups != 16 || bytes % 32 != 0 || bytes / 32 > 120)
++        return -1;
++    if (qwen3_tts_set_speaker_by_name(ctx, name) != 0)
++        return -1;
++    const int d = (int)ctx->hp.d_model;
++    std::vector<float> frames((bytes / 32) * d), scratch(d);
++    for (size_t frame = 0; frame < bytes / 32; ++frame) {
++        int32_t ids[16];
++        for (int cb = 0; cb < 16; ++cb) {
++            const uint8_t* p = codes + frame * 32 + 2 * cb;
++            ids[cb] = p[0] | (p[1] << 8);
++            const ggml_tensor* table = cb == 0 ? ctx->talker.token_embd_w : ctx->code_pred.codec_embd[cb - 1];
++            if (!table || ids[cb] >= table->ne[1])
++                return -1;
++        }
++        if (!qwen3_tts_sum_frame_embed(ctx, ids, 16, d, scratch, frames.data() + frame * d))
++            return -1;
++    }
++    ctx->narration_text = transcript;
++    ctx->narration_frames = std::move(frames);
++    return 0;
++}
++
+ template <typename OnFrame>
+ static bool qwen3_tts_generate_codes_ar(qwen3_tts_context* ctx, const char* text, std::vector<int32_t>& all_codes,
+                                         int* out_frames, OnFrame on_frame) {
+@@ -7347,9 +7377,19 @@
+     std::vector<float> prefill, trailing;
+     int T_pre = 0, M_trail = 0;
+     if (is_custom_voice) {
+-        if (!build_customvoice_prefill_embeds(ctx, text, prefill, T_pre, trailing, M_trail)) {
++        const std::string narration = ctx->narration_text + text;
++        if (!build_customvoice_prefill_embeds(ctx, narration, prefill, T_pre, trailing, M_trail)) {
+             return false;
+         }
++        const auto& frames = ctx->narration_frames;
++        const int prompt_frames = (int)(frames.size() / d);
++        if (T_pre + prompt_frames >= ctx->kv_max_ctx) return false;
++        prefill.reserve(prefill.size() + frames.size());
++        for (int frame = 0; frame < prompt_frames; ++frame) {
++            for (int j = 0; j < d; ++j)
++                prefill.push_back(frames[(size_t)frame * d + j] + trailing[j]);
++        }
++        T_pre += prompt_frames;
+     } else if (is_voice_design) {
+         if (!build_voicedesign_prefill_embeds(ctx, ctx->runtime_instruct, text, prefill, T_pre, trailing, M_trail)) {
+             return false;

@@ -201,14 +201,56 @@ struct RuleLibraryRegressionTests {
         }
     }
 
-    @Test func oneClickAutomaticImportRejectsRSSAndMixedKindsWithoutSourceMutation() async {
+    @Test func sharedBackupIsPreviewedAndDamagedOrFutureBackupsAreRejected() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let db = try LegadoDatabase(url: dir.appendingPathComponent("db"))
+        let file = dir.appendingPathComponent("书源.json")
+        let rule = BookSource(bookSourceUrl: "https://book.test", bookSourceName: "原书源")
+        let model = SourceLibraryModel.demo(sources: [rule])
+        await model.load()
+        let data = try await db.makeBackup(defaultsSuite: UUID().uuidString).encoded()
+        try data.write(to: file)
+        await model.handleDeepLink(file)
+        #expect(model.pendingImport?.backup?.type == LibraryBackup.identifier)
+        #expect(model.sources == [rule])
+        model.cancelPendingImport()
+        for version in [1, 99] {
+            try JSONSerialization.data(withJSONObject: ["type": LibraryBackup.identifier, "version": version]).write(to: file)
+            await model.handleDeepLink(file)
+            #expect(model.pendingImport == nil)
+            #expect(model.notice?.kind == .error)
+            #expect(model.sources == [rule])
+        }
+    }
+
+    @Test func openingJSONFileDetectsTheRuleLibraryFromItsContents() async throws {
+        let files = [
+            (#"[{"sourceUrl":"https://site.test","sourceName":"网站","ruleArticles":"item"}]"#, "网站源", "网站"),
+            (#"{"pattern":"广告","name":"净化","replacement":""}"#, "净化规则", "净化"),
+            (#"{"id":42,"name":"章节","rule":"^第.*章"}"#, "TXT 目录规则", "章节")
+        ]
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".json")
+        defer { try? FileManager.default.removeItem(at: file) }
+        let model = SourceLibraryModel.demo(sources: [])
+        for (json, title, name) in files {
+            try Data(json.utf8).write(to: file)
+            await model.handleDeepLink(file)
+            let preview = try #require(model.pendingImport)
+            #expect(preview.rules?.title == title)
+            #expect(preview.rules?.names == [name])
+            #expect(preview.validCount == 1)
+            #expect(model.sources.isEmpty)
+            model.cancelPendingImport()
+        }
+    }
+
+    @Test func oneClickAutomaticImportRejectsMixedAndUnsupportedKindsWithoutSourceMutation() async {
         let rss = #"{"sourceUrl":"https://rss.test","sourceName":"RSS订阅","ruleArticles":"item"}"#
         let source = #"{"bookSourceUrl":"https://source.test","bookSourceName":"书源"}"#
         let original = BookSource(bookSourceUrl: "https://kept.test", bookSourceName: "保留书源")
-        let purification = #"{"name":"净化","pattern":"广告","replacement":""}"#
         let unsupportedTheme = #"{"themeName":"主题"}"#
-        for (document, errorWord) in [(rss, "RSS"), ("[" + source + "," + rss + "]", "混合"),
-                                      (purification, "净化规则"), (unsupportedTheme, "阅读主题")] {
+        for (document, errorWord) in [("[" + source + "," + rss + "]", "混合"), (unsupportedTheme, "阅读主题")] {
             let transport = ImportFixtureTransport(documents: ["https://import.test/automatic": document])
             let repository = InMemoryBookSourceRepository(sources: [original])
             let model = SourceLibraryModel(repository: repository, importTransport: transport)

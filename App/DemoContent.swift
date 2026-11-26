@@ -54,6 +54,7 @@ enum DemoContent {
     static let books: [Book] = {
         var first = Book(bookUrl: "https://classic.example/book/1", name: "长夜里的灯", author: "林舟", origin: sources[0].bookSourceUrl)
         first.originName = sources[0].bookSourceName
+        first.coverUrl = ProcessInfo.processInfo.environment["LEGADO_UI_DEMO_COVER"]
         first.kind = "当代文学"
         first.latestChapterTitle = "第十八章 · 微光"
         first.totalChapterNum = 42

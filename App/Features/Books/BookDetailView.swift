@@ -19,7 +19,7 @@ struct BookDetailView: View {
     @State private var refreshTask: Task<Void, Never>?
     @State private var webPage: WebPage?
     @State private var showsSourceSwitch = false
-    @State private var showsTableOfContents = false
+    @State private var showsDemoReader = false
     @State private var warmedReader: ReaderViewModel?
     @State private var openedReader: ReaderViewModel?
     @State private var opening: Task<Void, Never>?
@@ -44,14 +44,14 @@ struct BookDetailView: View {
         .navigationTitle("书籍详情")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            ToolbarItem(placement: .topBarTrailing) {
+            ToolbarItemGroup(placement: .topBarTrailing) {
+                Button("换源") { showsSourceSwitch = true }
+                    .disabled(sourceLibrary.sources.filter(\.enabled).count < 2)
                 Menu {
                     if let url = model.originalWebPageURL {
                         Button("打开原网页", systemImage: "safari") { openWebPage(url) }
                             .accessibilityIdentifier("book.detail.openWebPage")
                     }
-                    Button("换源", systemImage: "arrow.triangle.2.circlepath") { showsSourceSwitch = true }
-                        .disabled(sourceLibrary.sources.filter(\.enabled).count < 2)
                     Button("允许更新", systemImage: model.book.canUpdate ? "checkmark" : "circle") {
                         model.toggleCanUpdate()
                         Task { await saveCurrentBook() }
@@ -69,18 +69,10 @@ struct BookDetailView: View {
                     ReadingShareLink(item: model.book.bookUrl) {
                         Label("分享", systemImage: "square.and.arrow.up")
                     }
-                    Divider()
-                    Button("缓存接下来 10 章", systemImage: "arrow.down.circle") { model.startCaching(limit: 10, using: batchCache) }
-                        .disabled(model.chapters.isEmpty || cacheProgress?.isActive == true)
-                    Button("缓存剩余章节", systemImage: "square.and.arrow.down.on.square") { model.startCaching(limit: nil, using: batchCache) }
-                        .disabled(model.chapters.isEmpty || cacheProgress?.isActive == true)
-                    if cacheProgress?.isActive == true {
-                        Divider()
-                        Button("停止缓存", systemImage: "stop.circle", role: .destructive) { batchCache.cancel(bookURL: model.book.bookUrl) }
-                    }
                 } label: {
-                    Image(systemName: "ellipsis.circle")
+                    Image(systemName: "ellipsis")
                 }
+                .accessibilityLabel("更多")
             }
         }
         .task {
@@ -116,6 +108,9 @@ struct BookDetailView: View {
             if !Task.isCancelled, reader.hasLoadedCurrentChapter { warmedReader = reader }
         }
         .onDisappear { opening?.cancel(); warmedReader = nil }
+        .readingNavigationDestination(isPresented: $showsDemoReader) {
+            ReaderView(demoBook: model.book, chapters: model.chapters, initialIndex: model.book.durChapterIndex, content: DemoContent.readerText)
+        }
         .readingNavigationDestination(isPresented: Binding(
             get: { openedReader != nil }, set: { if !$0 { openedReader = nil } }
         )) {
@@ -153,43 +148,28 @@ struct BookDetailView: View {
                 }
             }
         }
-        .fullScreenCover(isPresented: $showsTableOfContents) {
-            BookTableOfContentsView(book: model.book, chapters: model.chapters, source: model.source)
-        }
     }
 
-    @ViewBuilder
     private var detailScrollView: some View {
-        if #available(iOS 16.0, *) {
-            ScrollView { detailContent }
-        } else {
-            // On iOS 15 the native pull-to-refresh control is available on List.
-            List {
-                detailContent
-                    .listRowInsets(EdgeInsets())
-                    .listRowSeparator(.hidden)
-                    .listRowBackground(Color.clear)
-            }
-            .listStyle(.plain)
-        }
-    }
-
-    private var detailContent: some View {
-        VStack(alignment: .leading, spacing: 24) {
-            hero
-            Divider()
-            if let intro = MetadataTextSanitizer().clean(model.book.intro), !intro.isEmpty {
-                VStack(alignment: .leading, spacing: 10) {
-                    Text("简介").font(.headline)
-                    Text(intro).font(.subheadline).foregroundStyle(.secondary).lineSpacing(5)
-                }
+        List {
+            VStack(alignment: .leading, spacing: 24) {
+                hero
                 Divider()
+                if let intro = MetadataTextSanitizer().clean(model.book.intro), !intro.isEmpty {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("简介").font(.headline)
+                        Text(intro).font(.subheadline).foregroundStyle(.secondary).lineSpacing(5)
+                    }
+                    Divider()
+                }
+                if let cacheProgress { cacheProgressCard(cacheProgress) }
             }
-            chapterCard
-            if let cacheProgress { cacheProgressCard(cacheProgress) }
+            .listRowSeparator(.hidden)
+            chapterList
+                .listRowSeparator(.hidden)
         }
-        .padding(.horizontal, 20)
-        .padding(.bottom, 30)
+        .listStyle(.plain)
+        .readingScrollContentBackgroundHidden()
     }
 
     @MainActor
@@ -246,7 +226,8 @@ struct BookDetailView: View {
                     author: model.book.author,
                     remoteURL: model.book.displayCoverURL,
                     width: 88,
-                    height: 126
+                    height: 126,
+                    allowsPreview: true
                 )
                 VStack(alignment: .leading, spacing: 8) {
                     Text(model.book.name).font(.title2.weight(.semibold)).lineLimit(3)
@@ -282,9 +263,7 @@ struct BookDetailView: View {
             if let resume {
                 Button { resume(model.book, model.chapters, model.source, nil) } label: { readingLabel }
             } else if ProcessInfo.processInfo.arguments.contains("-uiDemo") {
-                NavigationLink {
-                    ReaderView(demoBook: model.book, chapters: model.chapters, initialIndex: model.book.durChapterIndex, content: DemoContent.readerText)
-                } label: { readingLabel }
+                Button { showsDemoReader = true } label: { readingLabel }
             } else {
                 Button(action: openReader) { readingLabel }
             }
@@ -346,136 +325,167 @@ struct BookDetailView: View {
         }
     }
 
-    private var chapterCard: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            HStack {
-                Text("目录").font(.headline)
-                Spacer()
-                Text("\(model.chapters.count) 章").font(.caption).foregroundStyle(.secondary)
+    private var directoryFailureHint: String {
+        if model.qidianCatalogURL != nil { return "起点暂未返回目录，可下拉重试或打开官方目录。" }
+        if model.browserDirectoryURL != nil { return "可下拉刷新重试，或轻点右上角的「换源」。" }
+        return "已自动尝试其他可搜索书源，可稍后刷新重试或手动换源。"
+    }
+
+    @ViewBuilder
+    private var chapterList: some View {
+        if model.state == .loadingDetails {
+            HStack { Spacer(); ProgressView("正在加载作品详情…"); Spacer() }.padding(.vertical, 28)
+        } else if model.state == .loading || model.state == .idle {
+            HStack { Spacer(); ProgressView("正在解析目录…"); Spacer() }.padding(.vertical, 28)
+        } else if model.state == .findingSource {
+            HStack { Spacer(); ProgressView("当前源不可用，正在自动寻找可用源…"); Spacer() }
+                .padding(.vertical, 28)
+        } else if model.state == .failed {
+            ReadingUnavailableView(
+                "没有找到可用目录",
+                systemImage: "exclamationmark.arrow.triangle.2.circlepath",
+                description: Text(directoryFailureHint)
+            )
+            .padding(.vertical, 12)
+            if let url = model.qidianCatalogURL {
+                Button("打开起点官方目录") { openWebPage(url) }
             }
-            .padding(.bottom, 12)
-            if model.state == .loading || model.state == .idle {
-                HStack { Spacer(); ProgressView("正在解析目录…"); Spacer() }.padding(.vertical, 28)
-            } else if model.state == .findingSource {
-                HStack { Spacer(); ProgressView("当前源不可用，正在自动寻找可用源…"); Spacer() }
-                    .padding(.vertical, 28)
-            } else if model.state == .failed {
-                ReadingUnavailableView(
-                    "没有找到可用目录",
-                    systemImage: "exclamationmark.arrow.triangle.2.circlepath",
-                    description: Text(model.browserDirectoryURL != nil ? "可下拉刷新重试，或在右上角菜单中换源。" : "已自动尝试其他可搜索书源，可稍后刷新重试或手动换源。")
-                )
-                .padding(.vertical, 12)
-                if let issue = model.diagnostics.last(where: { $0.severity == .error && $0.code != "toc.empty" }) ?? model.diagnostics.last(where: { $0.severity == .error }) {
-                    Text(issue.message).font(.footnote).foregroundStyle(.secondary)
-                }
-            } else {
-                ForEach(Array(model.chapters.filter { !$0.isVolume }.prefix(8).enumerated()), id: \.element.id) { offset, chapter in
-                    if offset > 0 { Divider() }
-                    if chapter.isVolume {
-                        Text(chapter.title).font(.subheadline.bold()).foregroundStyle(ReadingTheme.accent)
-                            .padding(.vertical, 12)
-                    } else {
-                        BookChapterLink(book: model.book, chapters: model.chapters, source: model.source, index: chapter.index) {
-                            HStack(spacing: 12) {
-                                Text(String(format: "%02d", chapter.index + 1))
-                                    .font(.caption.monospacedDigit()).foregroundStyle(.tertiary).frame(width: 28)
-                                Text(chapter.title).font(.subheadline).foregroundStyle(.primary).lineLimit(2)
-                                Spacer()
-                                if chapter.isVip { Image(systemName: "lock.fill").font(.caption).foregroundStyle(.orange) }
-                                Image(systemName: "chevron.right").font(.caption.bold()).foregroundStyle(.tertiary)
-                            }
-                            .padding(.vertical, 12)
+            if let issue = model.diagnostics.last(where: { $0.severity == .error && $0.code != "toc.empty" }) ?? model.diagnostics.last(where: { $0.severity == .error }) {
+                Text(issue.message).font(.footnote).foregroundStyle(.secondary)
+            }
+        } else {
+            BookDetailChapterRows(book: model.book, chapters: model.chapters, source: model.source)
+        }
+    }
+}
+
+struct BookDetailChapterRows: View {
+    let book: Book
+    let chapters: [BookChapter]
+    var source: BookSource?
+    @State private var descending = false
+
+    var body: some View {
+        VStack(spacing: 4) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text("目录").font(.title3.bold()).accessibilityAddTraits(.isHeader)
+                Text("\(chapters.count) 章").font(.footnote).foregroundStyle(.secondary)
+                Spacer(minLength: 8)
+                if chapters.count > 1 {
+                    Button { descending.toggle() } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "arrow.up.arrow.down").imageScale(.small)
+                            Text(descending ? "正序" : "倒序")
                         }
-                        .buttonStyle(.plain)
+                        .font(.footnote.weight(.medium))
+                        .foregroundStyle(.secondary)
+                        .frame(minWidth: 44, minHeight: 44)
+                        .contentShape(Rectangle())
                     }
+                    .buttonStyle(.borderless)
                 }
-                if model.chapters.count > 8 {
-                    Divider()
-                    Button {
-                        showsTableOfContents = true
-                    } label: {
-                        Label("查看全部目录", systemImage: "list.bullet")
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 10)
+            }
+            Divider()
+        }
+        .listRowInsets(EdgeInsets(top: 4, leading: 20, bottom: 4, trailing: 20))
+        .listRowSeparator(.hidden)
+
+        if #available(iOS 17.0, *) {
+            chapterRows.navigationLinkIndicatorVisibility(.hidden)
+        } else {
+            chapterRows
+        }
+    }
+
+    private var chapterRows: some View {
+        ForEach(descending ? Array(chapters.reversed()) : chapters, id: \.index) { chapter in
+            if chapter.isVolume {
+                ChapterVolumeLabel(title: chapter.title)
+            } else {
+                BookChapterLink(book: book, chapters: chapters, source: source, index: chapter.index) {
+                    HStack(alignment: .firstTextBaseline, spacing: 14) {
+                        ChapterDirectoryLabel(number: chapter.index + 1, count: chapters.count,
+                                              title: chapter.title)
+                        if chapter.isVip {
+                            Image(systemName: "lock.fill").font(.caption).foregroundStyle(.secondary)
+                                .accessibilityLabel("VIP 章节")
+                        }
                     }
+                    .frame(minHeight: 44)
+                    .contentShape(Rectangle())
                 }
+                .buttonStyle(.plain)
+            }
+        }
+        .listRowInsets(EdgeInsets(top: 2, leading: 20, bottom: 2, trailing: 20))
+        .listRowSeparator(.hidden)
+        .listRowBackground(Color.clear)
+    }
+}
+
+struct ChapterDirectoryLabel: View {
+    let number: Int
+    let count: Int
+    let title: String
+    var isCurrent = false
+    @ScaledMetric(relativeTo: .caption) private var digitWidth: CGFloat = 8
+    private static let chapterPrefix = try! NSRegularExpression(
+        pattern: #"^\s*(第\s*[0-9０-９零〇一二两兩三四五六七八九十百千万萬]+\s*[章节節回话話集卷])\s*"#
+    )
+
+    private var heading: (marker: String?, name: String) {
+        let original = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !original.isEmpty else { return (nil, "第\(number)章") }
+        guard let match = Self.chapterPrefix.firstMatch(in: original, range: NSRange(original.startIndex..., in: original)),
+              let prefix = Range(match.range(at: 1), in: original),
+              let matched = Range(match.range, in: original) else {
+            return (String(format: "%02d", number), original)
+        }
+        let remainder = original[matched.upperBound...].drop(while: { $0.isWhitespace || "·:：、".contains($0) })
+        return remainder.isEmpty ? (nil, original) : (String(original[prefix]), String(remainder))
+    }
+
+    var body: some View {
+        let heading = self.heading
+        HStack(alignment: .firstTextBaseline, spacing: 12) {
+            if let marker = heading.marker {
+                Text(verbatim: marker)
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                    .frame(minWidth: digitWidth * CGFloat(3 + max(2, String(count).count)), alignment: .leading)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Text(heading.name)
+                .font(.body.weight(isCurrent ? .semibold : .regular))
+                .foregroundStyle(.primary)
+                .multilineTextAlignment(.leading)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            if isCurrent {
+                Image(systemName: "bookmark.fill")
+                    .font(.footnote)
+                    .foregroundStyle(ReadingTheme.accent)
+                    .accessibilityLabel("正在阅读")
             }
         }
     }
 }
 
-private struct BookTableOfContentsView: View {
-    @Environment(\.resumeBookReading) private var resume
-    @Environment(\.dismiss) private var dismiss
-    let book: Book
-    let chapters: [BookChapter]
-    let source: BookSource
-    @State private var searchText = ""
-    @State private var descending = false
-    @State private var selectedChapter: BookChapter?
-
-    private var displayedChapters: [BookChapter] {
-        let filtered = searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            ? chapters
-            : chapters.filter { $0.title.localizedCaseInsensitiveContains(searchText) }
-        return descending ? Array(filtered.reversed()) : filtered
-    }
+struct ChapterVolumeLabel: View {
+    let title: String
 
     var body: some View {
-        ReadingNavigationStack {
-            List(displayedChapters) { chapter in
-                if chapter.isVolume {
-                    Text(chapter.title).font(.headline).foregroundStyle(ReadingTheme.accent)
-                } else {
-                    Button {
-                        if let resume { resume(book, chapters, source, chapter.index) }
-                        else { selectedChapter = chapter }
-                    } label: {
-                        HStack(spacing: 12) {
-                            Text("\(chapter.index + 1)")
-                                .font(.caption.monospacedDigit()).foregroundStyle(.secondary).frame(width: 36, alignment: .trailing)
-                            Text(chapter.title).lineLimit(2)
-                                .foregroundStyle(chapter.index == book.durChapterIndex ? ReadingTheme.accent : .primary)
-                            if chapter.isVip { Image(systemName: "lock.fill").font(.caption).foregroundStyle(.orange) }
-                            Spacer()
-                            ChapterAvailabilityIcon(bookURL: book.bookUrl, chapterURL: chapter.url, sourceID: source.id)
-                        }
-                        .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-            .id(descending)
-            .readingNavigationDestination(isPresented: Binding(
-                get: { selectedChapter != nil }, set: { if !$0 { selectedChapter = nil } }
-            )) {
-                if let chapter = selectedChapter {
-                    ReaderView(book: book, chapters: chapters, initialIndex: chapter.index, source: source)
-                }
-            }
-            .searchable(text: $searchText, prompt: "搜索目录")
-            .navigationTitle("目录")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) { Button("关闭") { dismiss() } }
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button(descending ? "正序" : "倒序", systemImage: "arrow.up.arrow.down") {
-                        descending.toggle()
-                    }
-                }
-            }
-            .safeAreaInset(edge: .bottom) {
-                HStack {
-                    Text(book.durChapterTitle ?? "尚未阅读").lineLimit(1)
-                    Spacer()
-                    Text("\(min(book.durChapterIndex + 1, chapters.count))/\(chapters.count)")
-                        .monospacedDigit().foregroundStyle(.secondary)
-                }
-                .font(.caption)
-                .padding(.horizontal, 16).padding(.vertical, 10)
-                .background(.bar)
-            }
+        HStack(spacing: 12) {
+            Text(title)
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .layoutPriority(1)
+                .accessibilityAddTraits(.isHeader)
+            Rectangle()
+                .fill(ReadingTheme.separator)
+                .frame(height: 1)
+                .accessibilityHidden(true)
         }
+        .padding(.top, 8)
     }
 }

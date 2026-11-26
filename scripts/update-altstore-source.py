@@ -40,7 +40,7 @@ def make_source(ipa: Path, release: dict, repository: str, branch: str) -> dict:
     for key in ("CFBundleIdentifier", "CFBundleShortVersionString", "CFBundleVersion", "MinimumOSVersion"):
         if not isinstance(info.get(key), str) or not info[key] or "$(" in info[key]:
             raise ValueError(f"IPA has an invalid or unresolved {key}")
-    if info["CFBundleIdentifier"] != "com.epiboly.legado":
+    if info["CFBundleIdentifier"] != "com.davidlabworks.miaoreader":
         raise ValueError("IPA bundle identifier does not belong to this app")
     if release["tag_name"] != "v" + info["CFBundleShortVersionString"]:
         raise ValueError("Release tag does not match the IPA version")
@@ -60,20 +60,21 @@ def make_source(ipa: Path, release: dict, repository: str, branch: str) -> dict:
         "size": asset["size"],
         "minOSVersion": info["MinimumOSVersion"],
     }
+    name = info.get("CFBundleDisplayName") or info["CFBundleName"]
     return {
-        "name": "小浣熊阅读",
+        "name": name,
         "identifier": "com.epiboly.legado.source",
-        "subtitle": "小浣熊阅读官方应用源",
-        "description": "小浣熊阅读的最新正式版，供 AltStore Classic、SideStore 和 LiveContainer 添加。",
+        "subtitle": f"{name}应用源",
+        "description": f"{name}的最新正式版，供 AltStore Classic、SideStore 和 LiveContainer 添加。",
         "sourceURL": f"{raw_url}/docs/altstore.json",
         "website": website,
-        "iconURL": icon_url,
+        "iconURL": f"{raw_url}/App/Assets.xcassets/BrandIcon.imageset/BrandIcon.png",
         "tintColor": "#315C50",
         "apps": [{
-            "name": info.get("CFBundleDisplayName") or info["CFBundleName"],
+            "name": name,
             "bundleIdentifier": info["CFBundleIdentifier"],
             "developerName": repository.split("/")[0],
-            "subtitle": "搜书快一点，读书舒服一点。",
+            "subtitle": "读小说、听书、整理网页",
             "localizedDescription": "一款优先兼容阅读书源的开源 iOS 阅读器，支持书架、搜索、阅读排版、本地 TXT、语音朗读和 RSS。应用不提供书源或在线书库，书源需自行导入。",
             "iconURL": icon_url,
             "tintColor": "#315C50",
@@ -102,7 +103,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--ipa", required=True, type=Path)
     parser.add_argument("--release", required=True, type=Path, help="GitHub REST release JSON")
-    parser.add_argument("--repository", default="Aminark/legado-ios")
+    parser.add_argument("--repository", default="DavidLabWorks/legado-ios")
     parser.add_argument("--branch", default="main", help="Branch hosting the source and images")
     parser.add_argument("--output", type=Path, default=Path("docs/altstore.json"))
     args = parser.parse_args()

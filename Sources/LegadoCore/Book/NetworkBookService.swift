@@ -10,6 +10,7 @@ private struct BookUpdatePreparationError: LocalizedError {
 }
 
 public struct BookDetailReport: Sendable {
+    var directoryPage: HTTPResponse?
     public var book: Book
     public var diagnostics: [RuleDiagnostic]
 
@@ -212,7 +213,13 @@ public struct NetworkBookService: Sendable {
                 searchBook.bookURL, source: source, stage: .detail,
                 context: .init(variables: searchBook.variables, source: source, book: book)
             )
-            return await analyzeDetail(response: response, book: book, source: source)
+            var detail = await analyzeDetail(response: response, book: book, source: source)
+            // The official Qidian book page contains both metadata and the full directory.
+            if URL(string: source.id)?.host == "www.qidian.com", response.finalURL.host == "www.qidian.com",
+               detail.book.tocUrl == searchBook.bookURL {
+                detail.directoryPage = response
+            }
+            return detail
         } catch {
             return .init(book: book, diagnostics: [diagnostic(error, stage: "detail", rule: searchBook.bookURL)])
         }
@@ -411,6 +418,10 @@ public struct NetworkBookService: Sendable {
         source: BookSource,
         maxPages: Int = 20
     ) async -> ChapterListReport {
+        await loadChapters(book: book, source: source, maxPages: maxPages, firstPage: nil)
+    }
+
+    func loadChapters(book: Book, source: BookSource, maxPages: Int, firstPage: HTTPResponse?) async -> ChapterListReport {
         guard let rules = source.ruleToc,
               var listRule = nonempty(rules.chapterList) else {
             return .init(chapters: [], diagnostics: [diagnostic(
@@ -437,13 +448,15 @@ public struct NetworkBookService: Sendable {
             queue.removeFirst()
             guard requested.insert(pageURL).inserted else { continue }
             do {
-                let response = try await request(
-                    pageURL,
-                    source: source,
-                    stage: .toc,
-                    baseURL: URL(string: book.bookUrl),
-                    context: .init(variables: sharedContext.variables, source: source, book: book)
-                )
+                let response: HTTPResponse
+                if pageURL == firstURL, let firstPage {
+                    response = firstPage
+                } else {
+                    response = try await request(
+                        pageURL, source: source, stage: .toc, baseURL: URL(string: book.bookUrl),
+                        context: .init(variables: sharedContext.variables, source: source, book: book)
+                    )
+                }
                 let canonicalURL = response.finalURL.absoluteString
                 guard visited.insert(pageIdentity(pageURL, finalURL: canonicalURL)).inserted else { continue }
                 let document = PageDocument(response: response)

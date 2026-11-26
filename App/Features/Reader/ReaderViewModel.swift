@@ -359,6 +359,11 @@ final class ReaderViewModel: ObservableObject {
 
     var currentChapter: BookChapter? { chapters.indices.contains(currentIndex) ? chapters[currentIndex] : nil }
 
+    var currentChapterWebPageURL: URL? {
+        guard book.origin != "local", let chapter = currentChapter, !chapter.isVolume else { return nil }
+        return URL.originalWebPage(from: chapter.url, relativeTo: chapter.baseUrl.isEmpty ? book.bookUrl : chapter.baseUrl)
+    }
+
     func commentsTarget(at index: Int) -> ReaderChapterCommentsTarget? {
         guard let source, source.id == book.origin, chapters.indices.contains(index) else { return nil }
         let chapter = chapters[index]

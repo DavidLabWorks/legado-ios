@@ -2009,6 +2009,8 @@ public final class BookSourceRuntimeStore: @unchecked Sendable {
     private var values: [String: [String: String]] = [:]
     private let persistent = PersistentRuntimeCache.shared
 
+    func reloadPersistentValues() { lock.withLock { values.removeAll() } }
+
     public func get(sourceID: String, key: String) -> String {
         lock.lock()
         defer { lock.unlock() }

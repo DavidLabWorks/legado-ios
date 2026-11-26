@@ -50,6 +50,7 @@ struct ReaderScrollView: UIViewRepresentable {
         private var wasLoadingAhead = false
         private var wasLoadingBehind = false
         private var lastPageKey = ""
+        private var followedPosition: Int?
         private var reachedEnd = false
         #if DEBUG
         private var decelerationInsertions = 0
@@ -74,6 +75,10 @@ struct ReaderScrollView: UIViewRepresentable {
             let tap = UITapGestureRecognizer(target: self, action: #selector(tapped(_:)))
             tap.delegate = self
             collection.addGestureRecognizer(tap)
+            let press = UILongPressGestureRecognizer(target: self, action: #selector(selectText(_:)))
+            press.delegate = self
+            collection.addGestureRecognizer(press)
+            tap.require(toFail: press)
             collection.viewportChanged = { [weak self, weak collection] in
                 guard let self, let collection else { return }
                 self.update(collection)
@@ -182,6 +187,23 @@ struct ReaderScrollView: UIViewRepresentable {
                     seek(chapter: parent.activeIndex, position: position, includeHeading: position == 0)
                 }
             } else { jumpKey = nil }
+            var repaint = false
+            for (index, chapter) in chapterLayouts {
+                if chapter.highlight.apply(to: chapter.storage, bodyStart: chapter.bodyStart, bodyLength: chapter.chapter.content.utf16.count,
+                                           sentence: index == parent.activeIndex ? config.spokenRange : nil, tint: config.speechColor) {
+                    repaint = true
+                }
+            }
+            if repaint { view.visibleCells.forEach { ($0 as? ReaderScrollCell)?.redrawText() } }
+            if let position = config.spokenPosition, position != followedPosition, !view.isDragging {
+                let anchor = Anchor(chapter: parent.activeIndex, position: position, inHeading: false, screenY: 0)
+                let frames = (view.collectionViewLayout as! ReaderContinuousLayout).frames
+                if let y = offset(for: anchor, blocks: blocks, frames: frames),
+                   y < view.bounds.minY || y > view.bounds.maxY - 72 {
+                    seek(chapter: parent.activeIndex, position: position, includeHeading: false)
+                }
+            }
+            followedPosition = config.spokenPosition
             scheduleReport()
         }
 
@@ -338,6 +360,23 @@ struct ReaderScrollView: UIViewRepresentable {
             return true
         }
 
+        @objc private func selectText(_ gesture: UILongPressGestureRecognizer) {
+            guard gesture.state == .began, let view, let onSelect = parent.configuration.onSelectText,
+                  let layout = view.collectionViewLayout as? ReaderContinuousLayout else { return }
+            let point = gesture.location(in: view)
+            guard let row = layout.row(at: point.y), layout.frames[row].contains(point) else { return }
+            let block = blocks[row], chapter = block.chapter
+            guard chapter.chapter.error == nil else { return }
+            let originY = layout.frames[row].minY - block.top
+            let insets = UIEdgeInsets(top: 0, left: chapter.left, bottom: 0,
+                                      right: view.bounds.width - chapter.left - chapter.container.size.width)
+            if let selection = ReaderTextSelection(manager: chapter.manager, container: chapter.container,
+                at: CGPoint(x: point.x - chapter.left, y: point.y - originY), body: chapter.chapter.content,
+                bodyStart: chapter.bodyStart, insets: insets, viewportOffset: view.contentOffset.y - originY) {
+                onSelect(selection)
+            }
+        }
+
         @objc private func tapped(_ gesture: UITapGestureRecognizer) {
             guard let view, !view.isDragging, !view.isDecelerating else { return }
             let point = gesture.location(in: view)
@@ -466,6 +505,7 @@ final class ReaderScrollChapterLayout {
     let storage: NSTextStorage
     let manager = NSLayoutManager()
     let container: NSTextContainer
+    var highlight = ReaderSpeechHighlight()
     let bodyStart: Int
     let left: CGFloat
     static let commentsHeight: CGFloat = 44
@@ -512,6 +552,7 @@ final class ReaderScrollChapterLayout {
 @MainActor
 private final class ReaderScrollCell: UICollectionViewCell {
     private let canvas = ReaderScrollCanvas()
+    func redrawText() { canvas.setNeedsDisplay() }
     private let comments = UIButton(type: .system)
     private var onOpenComments: ((Int) -> Void)?
 

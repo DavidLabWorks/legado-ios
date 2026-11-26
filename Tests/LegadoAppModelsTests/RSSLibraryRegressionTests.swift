@@ -190,6 +190,90 @@ struct RSSLibraryRegressionTests {
         #expect(try await database.loadRssArticles(origin: source.sourceUrl, sort: source.sourceName).map(\.title) == ["已有文章"])
     }
 
+    @Test func reopeningFeedsUsesDiskAndRestoresTheNextPageEvenAfterRelaunch() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let database = try LegadoDatabase(url: directory.appendingPathComponent("rss.sqlite3"))
+        let transport = RSSSequenceTransport(bodies: [
+            #"{"items":[{"title":"第一篇","link":"/one"}],"next":"/two"}"#,
+            #"{"items":[]}"#,
+            #"{"items":[{"title":"第二篇","link":"/two"}]}"#,
+            #"{"items":[{"title":"更新","link":"/new"}]}"#
+        ])
+        let service = RSSService(transport: transport, networkPolicy: .init())
+        let first = RSSLibraryModel(database: database, service: service)
+        var source = source()
+        source.ruleNextPage = "$.next"
+        await first.refresh(source, preferCache: true)
+        await first.refresh(source, preferCache: true)
+        await first.refresh(source, sortName: "空分类", preferCache: true)
+        let reopened = RSSLibraryModel(database: database, service: service)
+        await reopened.refresh(source, sortName: "空分类", preferCache: true)
+        await reopened.refresh(source, preferCache: true)
+        #expect(await transport.requestCount() == 2)
+        #expect(reopened.articles.map(\.title) == ["第一篇"])
+        await reopened.loadMore(source)
+        #expect(reopened.articles.map(\.title) == ["第一篇", "第二篇"])
+        await reopened.refresh(source)
+        #expect(reopened.articles.map(\.title) == ["更新"])
+        #expect(await transport.requestCount() == 4)
+    }
+
+    @Test func failedNextPageCanRetryAndRepeatedPageStopsPagination() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let database = try LegadoDatabase(url: directory.appendingPathComponent("rss.sqlite3"))
+        let first = #"{"items":[{"title":"一","link":"/1"}]}"#
+        let second = #"{"items":[{"title":"二","link":"/2"}]}"#
+        let transport = RSSSequenceTransport(bodies: [first, nil, second, second])
+        let model = RSSLibraryModel(database: database, service: .init(transport: transport, networkPolicy: .init()))
+        var source = source()
+        source.ruleNextPage = "PAGE"
+        await model.refresh(source)
+        await model.loadMore(source)
+        #expect(model.paginationError != nil && !model.isLoadingMore && model.canLoadMore)
+        await model.loadMore(source)
+        #expect(model.paginationError == nil && model.articles.count == 2)
+        await model.loadMore(source)
+        #expect(!model.canLoadMore && !model.isLoadingMore)
+        await model.loadMore(source)
+        #expect(await transport.requestCount() == 4)
+        let cached = try await database.cachedRssFeed(origin: source.sourceUrl, sort: source.sourceName)
+        #expect(cached?.page == 3 && cached?.nextURL == nil)
+    }
+
+    @Test func cachedArticlesWithoutPagingMetadataRecoverNextPage() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let database = try LegadoDatabase(url: dir.appendingPathComponent("feed.sqlite"))
+        let transport = RSSSequenceTransport(bodies: [#"{"items":[{"title":"刷新","link":"/1"}],"next":"/page/2/"}"#])
+        let model = RSSLibraryModel(database: database, service: .init(transport: transport, networkPolicy: .init()))
+        var source = source()
+        source.ruleNextPage = "$.next"
+        try await database.putRssArticles([RssArticle(origin: source.sourceUrl, sort: source.sourceName, title: "旧缓存", link: "/1")])
+        await model.refresh(source, preferCache: true)
+        #expect(model.articles.map(\.title) == ["刷新"])
+        #expect(model.canLoadMore)
+    }
+
+    @Test func cancelledFirstVisitCanReopenAndPaginate() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let transport = RSSSequenceTransport(bodies: [nil,
+            #"{"items":[{"title":"首页","link":"/1"}],"next":"/page/2/"}"#,
+            #"{"items":[{"title":"第二页","link":"/2"}]}"#], failure: .cancelled)
+        let model = RSSLibraryModel(database: try LegadoDatabase(url: dir.appendingPathComponent("feed.sqlite")),
+                                    service: .init(transport: transport, networkPolicy: .init()))
+        var source = source()
+        source.ruleNextPage = "$.next"
+        await model.refresh(source, preferCache: true)
+        #expect(model.errorMessage == nil)
+        await model.refresh(source, preferCache: true)
+        #expect(model.canLoadMore)
+        await model.loadMore(source)
+        #expect(model.articles.map(\.title) == ["首页", "第二页"])
+    }
+
     private func source() -> RssSource {
         var source = RssSource(sourceUrl: "https://rss-model.test", sourceName: "全部")
         source.ruleArticles = "$.items"
@@ -202,10 +286,11 @@ struct RSSLibraryRegressionTests {
 private actor RSSSequenceTransport: HTTPTransport {
     private var bodies: [String?]
     private var count = 0
-    init(bodies: [String?]) { self.bodies = bodies }
+    private let failure: URLError.Code
+    init(bodies: [String?], failure: URLError.Code = .networkConnectionLost) { self.bodies = bodies; self.failure = failure }
     func data(for request: URLRequest) async throws -> HTTPResponse {
         count += 1
-        guard !bodies.isEmpty, let body = bodies.removeFirst() else { throw URLError(.networkConnectionLost) }
+        guard !bodies.isEmpty, let body = bodies.removeFirst() else { throw URLError(failure) }
         return .init(data: Data(body.utf8), statusCode: 200, headers: [:], finalURL: request.url!)
     }
     func requestCount() -> Int { count }

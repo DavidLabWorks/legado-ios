@@ -18,9 +18,9 @@ class AltStoreSourceTests(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         self.ipa = Path(temporary.name) / "reader-unsigned.ipa"
         self.info = {
-            "CFBundleIdentifier": "com.epiboly.legado",
+            "CFBundleIdentifier": "com.davidlabworks.miaoreader",
             "CFBundleName": "Reader",
-            "CFBundleDisplayName": "小浣熊阅读",
+            "CFBundleDisplayName": "喵阅",
             "CFBundleShortVersionString": "1.2.3",
             "CFBundleVersion": "42",
             "MinimumOSVersion": "15.0",
@@ -115,7 +115,7 @@ class AltStoreSourceTests(unittest.TestCase):
         self.write_ipa()
         with self.assertRaisesRegex(ValueError, "bundle identifier"):
             self.generate()
-        self.info["CFBundleIdentifier"] = "com.epiboly.legado"
+        self.info["CFBundleIdentifier"] = "com.davidlabworks.miaoreader"
         self.info["CFBundleShortVersionString"] = "1.2.4"
         self.write_ipa()
         with self.assertRaisesRegex(ValueError, "Release tag"):

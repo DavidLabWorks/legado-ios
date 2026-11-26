@@ -14,164 +14,41 @@ struct ExploreView: View {
     }
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 0) {
-                header
-                VStack(spacing: 0) {
-                    introduction
-                    sectionHeading
-                        .padding(.top, 24)
-                        .padding(.bottom, sources.isEmpty ? 0 : 10)
-                    if sources.isEmpty {
-                        emptyState
-                    } else {
-                        LazyVStack(spacing: 8) {
-                            ForEach(Array(sources.enumerated()), id: \.element.id) { index, source in
-                                NavigationLink { ExploreSourceView(source: source) } label: {
-                                    ExploreSourceRow(source: source, position: index)
-                                }
-                                .buttonStyle(.plain)
+        SourceBrowsePage(showsExploreWave: !sources.isEmpty) {
+            header
+            VStack(spacing: 0) {
+                SourceBrowseSectionHeading(title: "分类与榜单", countText: "\(sources.count)个书源", hasSources: !sources.isEmpty,
+                                           countIdentifier: "explore.sourceCount") {
+                    SourceManagementView()
+                }
+                if sources.isEmpty {
+                    emptyState
+                } else {
+                    LazyVStack(spacing: 8) {
+                        ForEach(Array(sources.enumerated()), id: \.element.id) { index, source in
+                            NavigationLink { ExploreSourceView(source: source) } label: {
+                                ExploreSourceRow(source: source, position: index)
                             }
+                            .buttonStyle(.plain)
                         }
                     }
                 }
-                .padding(.horizontal, sources.isEmpty ? 24 : 20)
-                .padding(.bottom, 28)
             }
-            .frame(maxWidth: 620)
-            .frame(maxWidth: .infinity)
+            .padding(.horizontal, sources.isEmpty ? 24 : 20)
+            .padding(.bottom, 28)
         }
         .accessibilityIdentifier("explore.scroll")
-        .background {
-            ReadingTheme.canvas.ignoresSafeArea()
-                .overlay(alignment: .top) {
-                    if !sources.isEmpty {
-                        ExploreHeaderWave()
-                            .fill(ReadingTheme.groupedCanvas.opacity(0.6))
-                            .frame(height: 160)
-                            .padding(.top, 46)
-                            .accessibilityHidden(true)
-                    }
-                }
-        }
-        .navigationBarHidden(true)
     }
 
     private var header: some View {
-        VStack(alignment: .leading, spacing: 9) {
-            HStack {
-                Text("发现")
-                    .font(.largeTitle.bold())
-                    .accessibilityAddTraits(.isHeader)
-                Spacer()
-                NavigationLink { SearchView() } label: {
-                    Image(systemName: "magnifyingglass")
-                        .font(.system(size: 22, weight: .regular))
-                        .frame(width: 44, height: 44)
-                        .background {
-                            RoundedRectangle(cornerRadius: 15, style: .continuous)
-                                .fill(ReadingTheme.groupedCanvas.opacity(0.75))
-                                .shadow(color: .black.opacity(0.06), radius: 4, y: 3)
-                        }
-                }
-                .buttonStyle(.plain)
+        ReadingPageHeader(title: "发现", subtitle: "下一本好书，在这里遇见") {
+            NavigationLink { SearchView() } label: { ReadingToolbarIcon(systemName: "magnifyingglass") }
                 .accessibilityLabel("搜索")
                 .accessibilityIdentifier("explore.search")
-            }
-            Text("下一本好书，在这里遇见")
-                .font(.subheadline)
-                .foregroundStyle(ReadingTheme.ink.opacity(0.55))
+            NavigationLink { SourceManagementView() } label: { ReadingToolbarIcon(systemName: "slider.horizontal.3") }
+                .accessibilityLabel("书源管理")
+                .accessibilityIdentifier("explore.manageSources")
         }
-        .padding(.horizontal, 26)
-        .padding(.top, 18)
-        .padding(.bottom, 26)
-    }
-
-    private var introduction: some View {
-        NavigationLink { SourceManagementView() } label: {
-            HStack(spacing: 11) {
-                Image(systemName: "safari")
-                    .font(.system(size: 27, weight: .light))
-                    .frame(width: 46, height: 46)
-                    .background(ReadingTheme.surface, in: RoundedRectangle(cornerRadius: 15, style: .continuous))
-                    .shadow(color: .black.opacity(0.07), radius: 8, y: 5)
-                    .accessibilityHidden(true)
-                Rectangle()
-                    .fill(ReadingTheme.ink.opacity(0.28))
-                    .frame(width: 0.5, height: 36)
-                    .accessibilityHidden(true)
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("从喜欢的书源开始")
-                        .font(.headline)
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.8)
-                    Text("浏览分类与榜单，发现更多故事")
-                        .font(.caption)
-                        .foregroundStyle(ReadingTheme.ink.opacity(0.55))
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.8)
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                Image(systemName: "chevron.right")
-                    .font(.system(size: 12, weight: .medium))
-                    .frame(width: 28, height: 28)
-                    .background(ReadingTheme.surface.opacity(sources.isEmpty ? 0 : 0.9), in: Circle())
-                    .accessibilityHidden(true)
-            }
-            .padding(.horizontal, 20)
-            .padding(.vertical, sources.isEmpty ? 20 : 23)
-            .background(alignment: .trailing) {
-                Image("ExploreBookStack")
-                    .resizable()
-                    .scaledToFit()
-                    .frame(width: 112, height: 86)
-                    .opacity(colorScheme == .dark ? 0.16 : 0.55)
-                    .padding(.trailing, 10)
-                    .accessibilityHidden(true)
-            }
-            .background {
-                RoundedRectangle(cornerRadius: 20, style: .continuous)
-                    .fill(LinearGradient(
-                        colors: [ReadingTheme.groupedCanvas.opacity(0.8), ReadingTheme.groupedCanvas],
-                        startPoint: .topLeading, endPoint: .bottomTrailing
-                    ))
-            }
-            .contentShape(RoundedRectangle(cornerRadius: 20))
-        }
-        .buttonStyle(.plain)
-        .accessibilityHint("添加与管理书源")
-        .accessibilityIdentifier("explore.manageSources")
-    }
-
-    private var sectionHeading: some View {
-        HStack(spacing: 10) {
-            if !sources.isEmpty {
-                Capsule()
-                    .fill(ReadingTheme.ink)
-                    .frame(width: 4, height: 18)
-                    .accessibilityHidden(true)
-            }
-            Text("分类与榜单")
-                .font(.title3.bold())
-                .accessibilityAddTraits(.isHeader)
-            Spacer(minLength: 8)
-            NavigationLink { SourceManagementView() } label: {
-                HStack(spacing: 5) {
-                    Text("\(sources.count)个书源")
-                        .font(.footnote)
-                    if !sources.isEmpty {
-                        Image(systemName: "chevron.right")
-                            .font(.system(size: 11, weight: .medium))
-                    }
-                }
-                .foregroundStyle(ReadingTheme.ink.opacity(0.55))
-                .padding(.vertical, 8)
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .accessibilityIdentifier("explore.sourceCount")
-        }
-        .padding(.horizontal, sources.isEmpty ? 0 : 3)
     }
 
     private var emptyState: some View {
@@ -217,47 +94,92 @@ struct ExploreView: View {
     }
 }
 
+struct SourceBrowseSectionHeading<Destination: View>: View {
+    let title: String
+    let countText: String
+    let hasSources: Bool
+    let countIdentifier: String
+    @ViewBuilder var destination: () -> Destination
+
+    var body: some View {
+        HStack(spacing: 10) {
+            if hasSources {
+                Capsule()
+                    .fill(ReadingTheme.ink)
+                    .frame(width: 4, height: 18)
+                    .accessibilityHidden(true)
+            }
+            Text(title)
+                .font(.title3.bold())
+                .accessibilityAddTraits(.isHeader)
+            Spacer(minLength: 8)
+            NavigationLink { destination() } label: {
+                HStack(spacing: 5) {
+                    Text(countText)
+                        .font(.footnote)
+                    if hasSources {
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 11, weight: .medium))
+                    }
+                }
+                .foregroundStyle(ReadingTheme.ink.opacity(0.55))
+                .padding(.vertical, 8)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier(countIdentifier)
+        }
+        .padding(.horizontal, hasSources ? 3 : 0)
+        .padding(.bottom, hasSources ? 10 : 0)
+    }
+}
+
+struct SourceBrowsePage<Content: View>: View {
+    @Environment(\.refresh) private var refresh
+    var showsExploreWave = false
+    @ViewBuilder var content: Content
+
+    var body: some View {
+        Group {
+            if #available(iOS 16.0, *) {
+                ScrollView { pageContent }
+            } else if refresh != nil {
+                List { pageContent.listRowInsets(EdgeInsets()).listRowSeparator(.hidden) }
+                    .listStyle(.plain)
+            } else {
+                ScrollView { pageContent }
+            }
+        }
+        .background {
+            ReadingTheme.canvas.ignoresSafeArea()
+                .overlay(alignment: .top) {
+                    if showsExploreWave {
+                        ExploreHeaderWave()
+                            .fill(ReadingTheme.groupedCanvas.opacity(0.6))
+                            .frame(height: 160)
+                            .padding(.top, 46)
+                            .accessibilityHidden(true)
+                    }
+                }
+        }
+        .navigationBarHidden(true)
+    }
+
+    private var pageContent: some View {
+        VStack(alignment: .leading, spacing: 0) { content }
+            .frame(maxWidth: 620)
+            .frame(maxWidth: .infinity)
+    }
+}
+
 private struct ExploreSourceRow: View {
     let source: BookSource
     let position: Int
-    @ScaledMetric(relativeTo: .body) private var nameSize: CGFloat = 16
-
     var body: some View {
-        HStack(spacing: 16) {
+        SourceBrowseRow(title: source.bookSourceName,
+                        detail: source.groups.isEmpty ? (URL(string: source.bookSourceUrl)?.host ?? source.bookSourceUrl) : source.groups.joined(separator: " · ")) {
             ExploreSourceIcon(source: source, position: position)
-                .frame(width: 26, height: 26)
-                .frame(width: 44, height: 44)
-                .background {
-                    RoundedRectangle(cornerRadius: 14, style: .continuous)
-                        .fill(LinearGradient(colors: [ReadingTheme.groupedCanvas.opacity(0.65), ReadingTheme.groupedCanvas.opacity(0.9)],
-                                             startPoint: .topLeading, endPoint: .bottomTrailing))
-                }
-                .accessibilityHidden(true)
-            VStack(alignment: .leading, spacing: 4) {
-                Text(source.bookSourceName)
-                    .font(.system(size: nameSize, weight: .semibold))
-                    .foregroundStyle(.primary)
-                    .lineLimit(2)
-                Text(source.groups.isEmpty ? (URL(string: source.bookSourceUrl)?.host ?? source.bookSourceUrl) : source.groups.joined(separator: " · "))
-                    .font(.caption)
-                    .foregroundStyle(ReadingTheme.ink.opacity(0.55))
-                    .lineLimit(1)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            Image(systemName: "chevron.right")
-                .font(.system(size: 13, weight: .regular))
-                .foregroundStyle(ReadingTheme.ink.opacity(0.55))
-                .padding(.trailing, 4)
-                .accessibilityHidden(true)
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .background {
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .fill(ReadingTheme.surface)
-                .shadow(color: .black.opacity(0.035), radius: 12, y: 6)
-        }
-        .contentShape(RoundedRectangle(cornerRadius: 18))
     }
 }
 
@@ -340,46 +262,64 @@ private struct ExploreSourceView: View {
     }
 
     var body: some View {
-        ScrollView {
-            LazyVStack(spacing: 0) {
-                if model.kinds.count > 1 { kindPicker }
-                content
-                if model.isLoadingMore { ProgressView("继续加载…").padding(.vertical, 12) }
-                if let error = model.paginationError {
-                    VStack(spacing: 8) {
-                        Text(error).font(.caption).foregroundStyle(.secondary)
-                        Button("重试加载下一页") { model.retryNextPage() }
-                    }
-                    .padding(.vertical, 12)
-                }
+        VStack(spacing: 0) {
+            if model.kinds.count > 1 {
+                kindPicker
+                Divider()
             }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 12)
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVStack(spacing: 0) {
+                        content
+                        if model.isLoadingMore { ProgressView("继续加载…").padding(.vertical, 12) }
+                        if let error = model.paginationError {
+                            VStack(spacing: 8) {
+                                Text(error).font(.caption).foregroundStyle(.secondary)
+                                Button("重试加载下一页") { model.retryNextPage() }
+                            }
+                            .padding(.vertical, 12)
+                        }
+                    }
+                    .id("booksTop")
+                }
+                .accessibilityIdentifier("explore.books")
+                .onChange(of: model.selectedKind?.id) { _ in
+                    proxy.scrollTo("booksTop", anchor: .top)
+                }
+                .refreshable { await model.reload() }
+            }
         }
         .background(ReadingTheme.canvas)
         .navigationTitle(model.source.bookSourceName)
         .navigationBarTitleDisplayMode(.inline)
         .task { await model.load() }
-        .refreshable { await model.reload() }
     }
 
     private var kindPicker: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 8) {
                 ForEach(model.kinds) { kind in
-                    Button(kind.title) { Task { await model.select(kind: kind) } }
-                        .font(.subheadline.weight(.medium))
-                        .padding(.horizontal, 12)
-                        .frame(minHeight: 44)
-                        .foregroundStyle(model.selectedKind?.id == kind.id ? Color.primary : .secondary)
-                        .overlay(alignment: .bottom) {
-                            if model.selectedKind?.id == kind.id {
-                                Rectangle().fill(Color.primary).frame(height: 2)
-                            }
+                    let selected = model.selectedKind?.id == kind.id
+                    Button {
+                        Task { await model.select(kind: kind) }
+                    } label: {
+                        Text(kind.title)
+                            .font(.subheadline.weight(selected ? .semibold : .regular))
+                            .foregroundStyle(selected ? Color.primary : .secondary)
+                            .padding(.horizontal, 10)
+                            .frame(minHeight: 44)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .overlay(alignment: .bottom) {
+                        if selected {
+                            Capsule().fill(Color.primary).frame(height: 2)
                         }
-                        .accessibilityAddTraits(model.selectedKind?.id == kind.id ? .isSelected : [])
+                    }
+                    .accessibilityAddTraits(selected ? .isSelected : [])
                 }
             }
+            .padding(.horizontal, 10)
         }
     }
 
@@ -396,6 +336,7 @@ private struct ExploreSourceView: View {
                 systemImage: "books.vertical",
                 description: Text("当前书源或分类暂时没有内容，可以下拉刷新。")
             )
+            .padding(.horizontal, 16)
             .padding(.vertical, 40)
         case .failed where model.books.isEmpty:
             ReadingUnavailableView(
@@ -403,6 +344,7 @@ private struct ExploreSourceView: View {
                 systemImage: "exclamationmark.triangle",
                 description: Text(model.diagnostics.first?.message ?? "书源发现规则解析失败。")
             )
+            .padding(.horizontal, 16)
             .padding(.vertical, 40)
         default:
             ForEach(model.books) { book in
@@ -421,27 +363,27 @@ private struct ExploreSourceView: View {
 private struct ExploreBookRow: View {
     let book: SearchBook
 
+    private var byline: String {
+        let author = book.author.isEmpty ? "未知作者" : book.author
+        guard let kind = book.kind, !kind.isEmpty else { return author }
+        return "\(author) · \(kind)"
+    }
+
     var body: some View {
-        HStack(alignment: .top, spacing: 13) {
-            BookCoverArtwork(title: book.name, author: book.author, remoteURL: book.coverURL, width: 52, height: 74)
+        HStack(spacing: 12) {
+            BookCoverArtwork(title: book.name, author: book.author, remoteURL: book.coverURL, width: 60, height: 84)
             VStack(alignment: .leading, spacing: 6) {
                 Text(book.name)
-                    .font(.body.weight(.medium))
+                    .font(.headline)
                     .foregroundStyle(ReadingTheme.ink)
                     .lineLimit(2)
-                Text(book.author.isEmpty ? "未知作者" : book.author)
+                Text(byline)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
-                if let kind = book.kind, !kind.isEmpty {
-                    Text(kind)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
                 if let intro = book.intro, !intro.isEmpty {
                     Text(intro)
-                        .font(.caption)
+                        .font(.footnote)
                         .foregroundStyle(.secondary)
                         .lineLimit(2)
                 }
@@ -450,12 +392,14 @@ private struct ExploreBookRow: View {
             Image(systemName: "chevron.right")
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(.tertiary)
-                .padding(.top, 4)
+                .accessibilityHidden(true)
         }
         .padding(.vertical, 12)
         .overlay(alignment: .bottom) {
             Rectangle().fill(ReadingTheme.separator).frame(height: 0.5)
-                .padding(.leading, 65)
+                .padding(.leading, 72)
         }
+        .padding(.horizontal, 16)
+        .contentShape(Rectangle())
     }
 }

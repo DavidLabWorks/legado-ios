@@ -198,6 +198,7 @@ enum ReadingTheme {
 struct ReadingPageHeader<Actions: View>: View {
     let title: String
     let subtitle: String
+    var artwork: ReadingHeaderArtwork? = nil
     @ViewBuilder var actions: Actions
 
     var body: some View {
@@ -218,6 +219,80 @@ struct ReadingPageHeader<Actions: View>: View {
         .padding(.horizontal, 24)
         .padding(.top, 20)
         .padding(.bottom, 28)
+        .background(alignment: .bottomTrailing) {
+            if let artwork {
+                artwork.aspectRatio(220.0 / 72, contentMode: .fit)
+                    .frame(width: artwork == .websites ? 172 : 220)
+                    .padding(.trailing, 8)
+                    .accessibilityHidden(true)
+                    .allowsHitTesting(false)
+            }
+        }
+    }
+}
+
+enum ReadingHeaderArtwork: View {
+    case bookshelf, websites, profile
+
+    var body: some View {
+        Canvas { context, size in
+            context.scaleBy(x: size.width / 220, y: size.height / 72)
+            let paper = GraphicsContext.Shading.color(ReadingTheme.groupedCanvas)
+            let edge = GraphicsContext.Shading.color(ReadingTheme.separator.opacity(0.75))
+            switch self {
+            case .bookshelf:
+                // A shallow open spread with a second leaf showing under the fore edge.
+                var spread = Path()
+                spread.move(to: CGPoint(x: 4, y: 50))
+                spread.addQuadCurve(to: CGPoint(x: 64, y: 34), control: CGPoint(x: 39, y: 48))
+                spread.addQuadCurve(to: CGPoint(x: 112, y: 52), control: CGPoint(x: 94, y: 33))
+                spread.addQuadCurve(to: CGPoint(x: 199, y: 15), control: CGPoint(x: 139, y: 22))
+                spread.addLine(to: CGPoint(x: 216, y: 35))
+                spread.addQuadCurve(to: CGPoint(x: 116, y: 66), control: CGPoint(x: 157, y: 41))
+                spread.addQuadCurve(to: CGPoint(x: 4, y: 50), control: CGPoint(x: 69, y: 46))
+                spread.closeSubpath()
+                context.fill(spread.offsetBy(dx: 0, dy: 5), with: edge)
+                context.fill(spread, with: paper)
+                var fold = Path()
+                fold.move(to: CGPoint(x: 112, y: 52))
+                fold.addQuadCurve(to: CGPoint(x: 116, y: 65), control: CGPoint(x: 115, y: 59))
+                context.stroke(fold, with: edge, lineWidth: 1.5)
+            case .profile:
+                // A closed journal with a ribbon peeking out between the pages.
+                var cover = Path()
+                cover.move(to: CGPoint(x: 82, y: 40))
+                cover.addLine(to: CGPoint(x: 163, y: 12))
+                cover.addQuadCurve(to: CGPoint(x: 168, y: 12), control: CGPoint(x: 166, y: 11))
+                cover.addLine(to: CGPoint(x: 208, y: 32))
+                cover.addLine(to: CGPoint(x: 121, y: 64))
+                cover.addLine(to: CGPoint(x: 82, y: 45))
+                cover.addQuadCurve(to: CGPoint(x: 82, y: 40), control: CGPoint(x: 78, y: 42))
+                cover.closeSubpath()
+                context.fill(cover.offsetBy(dx: 0, dy: 4), with: edge)
+                context.fill(cover, with: paper)
+
+                var ribbon = Path()
+                ribbon.move(to: CGPoint(x: 149, y: 54))
+                ribbon.addLine(to: CGPoint(x: 160, y: 50))
+                ribbon.addLine(to: CGPoint(x: 175, y: 58))
+                ribbon.addLine(to: CGPoint(x: 167, y: 59))
+                ribbon.addLine(to: CGPoint(x: 164, y: 62))
+                ribbon.closeSubpath()
+                context.fill(ribbon, with: .color(ReadingTheme.ink.opacity(0.13)))
+            case .websites:
+                // Three outward sweeps share the rounded ends of a printed RSS mark.
+                let origin = CGPoint(x: 68, y: 64)
+                context.fill(Path(ellipseIn: CGRect(x: origin.x - 5, y: origin.y - 5, width: 10, height: 10)), with: edge)
+                for (index, reach) in [40.0, 84.0, 132.0].enumerated() {
+                    var signal = Path()
+                    signal.move(to: CGPoint(x: origin.x + reach * 0.10, y: origin.y - reach * 0.43))
+                    signal.addQuadCurve(to: CGPoint(x: origin.x + reach, y: origin.y),
+                                        control: CGPoint(x: origin.x + reach * 0.67, y: origin.y - reach * 0.48))
+                    context.stroke(signal, with: index == 0 ? edge : paper,
+                                   style: StrokeStyle(lineWidth: 6 + CGFloat(index) * 2, lineCap: .round))
+                }
+            }
+        }
     }
 }
 
@@ -231,6 +306,107 @@ struct ReadingToolbarIcon: View {
             .frame(width: 44, height: 44)
             .background(ReadingTheme.groupedCanvas, in: Circle())
             .accessibilityHidden(true)
+    }
+}
+
+struct SourceGroupPicker: View {
+    let groups: [String]
+    @Binding var selection: String?
+
+    var body: some View {
+        Picker("分组", selection: $selection) {
+            Text("全部").tag(String?.none)
+            Text("未分组").tag(String?.some(""))
+            ForEach(groups, id: \.self) { group in
+                Text(group).tag(String?.some(group))
+            }
+        }
+    }
+}
+
+struct SourceManagementRow: View {
+    let name: String
+    let url: String
+    let groups: [String]
+    let enabled: Bool
+    var showsToggle = true
+    let onEnabledChanged: @MainActor @Sendable (Bool) -> Void
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: enabled ? "network" : "network.slash")
+                .font(.system(size: 20))
+                .frame(width: 28)
+                .foregroundStyle(.secondary)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(name)
+                    .font(.body)
+                    .foregroundStyle(enabled ? Color.primary : .secondary)
+                Text(groups.isEmpty ? (URL(string: url)?.host ?? url) : groups.joined(separator: " · "))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            Spacer()
+            if showsToggle {
+                Toggle("启用", isOn: Binding(
+                    get: { enabled },
+                    set: { enabled in
+                        Task { @MainActor in onEnabledChanged(enabled) }
+                    }
+                ))
+                .labelsHidden()
+                .tint(.green)
+                .accessibilityLabel("启用\(name)")
+            }
+        }
+        .padding(.vertical, 5)
+    }
+}
+
+struct SourceBrowseRow<Icon: View>: View {
+    let title: String
+    let detail: String
+    @ViewBuilder var icon: Icon
+    @ScaledMetric(relativeTo: .body) private var nameSize: CGFloat = 16
+
+    var body: some View {
+        HStack(spacing: 16) {
+            icon
+                .frame(width: 26, height: 26)
+                .frame(width: 44, height: 44)
+                .background {
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .fill(LinearGradient(colors: [ReadingTheme.groupedCanvas.opacity(0.65), ReadingTheme.groupedCanvas.opacity(0.9)],
+                                             startPoint: .topLeading, endPoint: .bottomTrailing))
+                }
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title)
+                    .font(.system(size: nameSize, weight: .semibold))
+                    .foregroundStyle(.primary)
+                    .lineLimit(2)
+                Text(detail)
+                    .font(.caption)
+                    .foregroundStyle(ReadingTheme.ink.opacity(0.55))
+                    .lineLimit(1)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            Image(systemName: "chevron.right")
+                .font(.system(size: 13, weight: .regular))
+                .foregroundStyle(ReadingTheme.ink.opacity(0.55))
+                .padding(.trailing, 4)
+                .accessibilityHidden(true)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background {
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(ReadingTheme.surface)
+                .shadow(color: .black.opacity(0.035), radius: 12, y: 6)
+        }
+        .contentShape(RoundedRectangle(cornerRadius: 18))
     }
 }
 
@@ -281,6 +457,9 @@ struct BookCoverArtwork: View {
     var remoteURL: String?
     var width: CGFloat = 68
     var height: CGFloat = 96
+    var allowsPreview = false
+    @State private var showsPreview = false
+    @State private var loadedCover: (url: URL, photo: PreviewPhoto)?
 
     private var coverStyle: Int {
         switch title {
@@ -300,32 +479,62 @@ struct BookCoverArtwork: View {
     }
 
     var body: some View {
-        Group {
-            if let remoteURL, remoteURL.hasPrefix("data:image/"),
-               let comma = remoteURL.firstIndex(of: ","),
-               let data = Data(base64Encoded: String(remoteURL[remoteURL.index(after: comma)...])),
-               let image = UIImage(data: data) {
-                Image(uiImage: image).resizable().scaledToFill()
-            } else {
-                AsyncImage(url: remoteURL.flatMap(URL.init(string:))) { phase in
-                    if case .success(let image) = phase {
-                        image.resizable().scaledToFill()
-                    } else {
-                        placeholder
+        if allowsPreview, let url = remoteURL.flatMap(URL.init(string:)) {
+            Group {
+                if let loadedCover, loadedCover.url == url {
+                    Button { showsPreview = true } label: {
+                        artwork(Image(uiImage: loadedCover.photo.image).resizable().scaledToFill())
                     }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("查看封面")
+                    .fullScreenCover(isPresented: $showsPreview) {
+                        PhotoViewer(imageLabel: title) { _ in loadedCover.photo }
+                    }
+                } else {
+                    artwork(placeholder)
+                }
+            }
+            .task(id: url) {
+                guard loadedCover?.url != url else { return }
+                do {
+                    let (data, response) = try await URLSession.shared.data(from: url)
+                    if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
+                        throw URLError(.badServerResponse)
+                    }
+                    try Task.checkCancellation()
+                    loadedCover = (url, try PreviewPhoto(data: data))
+                } catch {
+                    if !Task.isCancelled { loadedCover = nil }
+                }
+            }
+        } else if let remoteURL, remoteURL.hasPrefix("data:image/"),
+           let comma = remoteURL.firstIndex(of: ","),
+           let data = Data(base64Encoded: String(remoteURL[remoteURL.index(after: comma)...])),
+           let image = UIImage(data: data) {
+            artwork(Image(uiImage: image).resizable().scaledToFill())
+        } else {
+            AsyncImage(url: remoteURL.flatMap(URL.init(string:))) { phase in
+                if case .success(let image) = phase {
+                    artwork(image.resizable().scaledToFill())
+                } else {
+                    artwork(placeholder)
                 }
             }
         }
-        .frame(width: width, height: height)
-        .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
-        .overlay(alignment: .leading) {
-            Rectangle().fill(.black.opacity(0.15)).frame(width: max(2, width * 0.035))
-        }
-        .overlay {
-            RoundedRectangle(cornerRadius: 4, style: .continuous)
-                .strokeBorder(.black.opacity(0.08), lineWidth: 0.5)
-        }
-        .accessibilityHidden(true)
+    }
+
+    private func artwork(_ content: some View) -> some View {
+        content
+            .frame(width: width, height: height)
+            .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
+            .overlay(alignment: .leading) {
+                Rectangle().fill(.black.opacity(0.15)).frame(width: max(2, width * 0.035))
+            }
+            .overlay {
+                RoundedRectangle(cornerRadius: 4, style: .continuous)
+                    .strokeBorder(.black.opacity(0.08), lineWidth: 0.5)
+            }
+            .accessibilityHidden(true)
     }
 
     private var placeholder: some View {

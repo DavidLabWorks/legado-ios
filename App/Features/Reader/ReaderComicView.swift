@@ -16,6 +16,7 @@ struct ReaderComicView: UIViewRepresentable {
     let jumpPosition: Int?
     let onPosition: (Int, Int, Int) -> Void
     let onTap: () -> Void
+    var onSelectText: ((ReaderTextSelection) -> Void)?
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
@@ -33,6 +34,10 @@ struct ReaderComicView: UIViewRepresentable {
         let tap = UITapGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.tapped))
         tap.delegate = context.coordinator
         table.addGestureRecognizer(tap)
+        let press = UILongPressGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.selectText(_:)))
+        press.delegate = context.coordinator
+        table.addGestureRecognizer(press)
+        tap.require(toFail: press)
         context.coordinator.table = table
         return table
     }
@@ -77,6 +82,34 @@ struct ReaderComicView: UIViewRepresentable {
             self.owner = owner
             super.init()
             images.totalCostLimit = 48 * 1024 * 1024
+        }
+
+        @objc func selectText(_ gesture: UILongPressGestureRecognizer) {
+            guard gesture.state == .began, let table, let onSelect = owner.onSelectText,
+                  let row = table.indexPathForRow(at: gesture.location(in: table)),
+                  case .text(let body) = owner.blocks[row.row].content,
+                  let cell = table.cellForRow(at: row) as? ComicCell else { return }
+            let label = cell.caption
+            let rect = label.textRect(forBounds: label.bounds, limitedToNumberOfLines: 0)
+            let point = gesture.location(in: label)
+            let paragraph = NSMutableParagraphStyle()
+            paragraph.alignment = label.textAlignment
+            let storage = NSTextStorage(string: label.text ?? "", attributes: [
+                .font: label.font as Any, .foregroundColor: owner.foreground, .paragraphStyle: paragraph
+            ])
+            let manager = NSLayoutManager()
+            let container = NSTextContainer(size: CGSize(width: label.bounds.width, height: .greatestFiniteMagnitude))
+            container.lineFragmentPadding = 0
+            storage.addLayoutManager(manager)
+            manager.addTextContainer(container)
+            manager.ensureLayout(for: container)
+            let origin = label.convert(CGPoint(x: 0, y: rect.minY), to: table)
+            if let selection = ReaderTextSelection(manager: manager, container: container,
+                at: CGPoint(x: point.x, y: point.y - rect.minY), body: body, bodyStart: 0,
+                insets: UIEdgeInsets(top: 0, left: 16, bottom: 0, right: 16),
+                viewportOffset: table.contentOffset.y - origin.y) {
+                onSelect(selection)
+            }
         }
 
         @objc func tapped() { owner.onTap() }

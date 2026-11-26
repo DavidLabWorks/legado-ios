@@ -5,6 +5,20 @@ import LegadoCore
 
 @MainActor
 struct ReaderRegressionTests {
+    @Test func originalWebPageFollowsTheSelectedChapter() {
+        let book = Book(bookUrl: "https://books.example/book/1", name: "测试", origin: "https://books.example")
+        var first = BookChapter(url: #"7.html?view=full#text, {"webView":true}"#, title: "第七章", bookUrl: book.bookUrl, index: 0)
+        first.baseUrl = "https://reader.example/story/toc.html"
+        let second = BookChapter(url: "/story/8.html", title: "第八章", bookUrl: book.bookUrl, index: 1)
+        let reader = ReaderViewModel(book: book, chapters: [first, second], initialIndex: 0)
+        #expect(reader.currentChapterWebPageURL?.absoluteString == "https://reader.example/story/7.html?view=full#text")
+        reader.select(index: 1)
+        #expect(reader.currentChapterWebPageURL?.absoluteString == "https://books.example/story/8.html")
+        var local = book
+        local.origin = "local"
+        #expect(ReaderViewModel(book: local, chapters: [first], initialIndex: 0).currentChapterWebPageURL == nil)
+    }
+
     @Test func simplifiedReadingPreservesOffsetsAndDirectoryIdentity() {
         let original = "頭髮與發展 📖\n勣與閱讀 ABC"
         #expect(original.readerText(simplified: false) == original)
@@ -44,9 +58,10 @@ struct ReaderRegressionTests {
 
         let reopenedDB = try LegadoDatabase(url: dbURL)
         let restored = try #require(try await reopenedDB.loadBooks().first)
-        let opener = BookshelfReadViewModel(updateCoordinator: .init(repository: SQLiteBookChapterRepository(database: reopenedDB),
-                                                                    loader: service))
-        await opener.load(book: restored, source: source)
+        let reopenedLibrary = BookLibraryModel(repository: SQLiteBookRepository(database: reopenedDB),
+                                               updateCoordinator: .init(repository: SQLiteBookChapterRepository(database: reopenedDB), loader: service))
+        let opener = BookshelfReadViewModel()
+        await opener.load(book: restored, source: source, library: reopenedLibrary)
         #expect(opener.chapters == chapters)
         let reopened = ReaderViewModel(book: restored, chapters: opener.chapters, initialIndex: restored.durChapterIndex,
                                        source: source, service: service, cache: .init(directory: cacheURL))
@@ -752,6 +767,34 @@ struct ReaderRegressionTests {
         #expect(model.scrollChapters.allSatisfy { $0.content.contains("new-source") })
     }
 
+    @Test func importedTXTDirectoryIsSavedWithByteRanges() async throws {
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".txt")
+        defer { try? FileManager.default.removeItem(at: file) }
+        try "第一章 开始\n正文\n第二章 继续\n后续正文".write(to: file, atomically: true, encoding: .utf8)
+        let chapters = InMemoryBookChapterRepository()
+        let library = BookLibraryModel(repository: InMemoryBookRepository(), chapterRepository: chapters)
+        try await library.addLocalFile(at: file)
+        let book = try #require(library.books.first)
+        let saved = await chapters.load(bookURL: book.bookUrl)
+        #expect(saved == (try LocalBookService.live().loadChapters(book: book).chapters))
+        #expect(await library.cachedTXTChapters(for: book) == saved)
+        let chapter = try #require(saved.last)
+        #expect(try LocalBookService().loadContent(book: book, chapter: chapter).content.contains("后续正文"))
+
+        try "第一章 新的开始\n第一段".write(to: file, atomically: true, encoding: .utf8)
+        #expect(await library.cachedTXTChapters(for: book).isEmpty)
+        let updated = try await library.localReadingChapters(for: book)
+        #expect(updated != saved)
+        let reindexed = try #require(library.books.first)
+        #expect(await library.cachedTXTChapters(for: reindexed) == updated)
+
+        try FileManager.default.removeItem(at: file)
+        let opener = BookshelfReadViewModel()
+        await opener.load(book: reindexed, source: nil, library: library)
+        #expect(opener.chapters.isEmpty)
+        #expect(opener.errorMessage != nil)
+    }
+
     @Test func localBookshelfLoadProvidesBookAndDirectory() async throws {
         let directory = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -759,12 +802,21 @@ struct ReaderRegressionTests {
         let file = directory.appending(path: "本地书.txt")
         try "第一章 开始\n正文\n第二章 继续\n后续正文".write(to: file, atomically: true, encoding: .utf8)
         let imported = try LocalBookService().importTextFile(at: file, into: directory.appending(path: "books"))
-        let model = BookshelfReadViewModel(updateCoordinator: .init(repository: InMemoryBookChapterRepository()))
+        var legacy = imported.book
+        legacy.localTXTRevision = nil
+        legacy.durChapterIndex = 1
+        legacy.durChapterPos = 2
+        let library = BookLibraryModel(repository: InMemoryBookRepository(books: [legacy]), chapterRepository: InMemoryBookChapterRepository())
+        await library.load()
+        let model = BookshelfReadViewModel()
 
-        await model.load(book: imported.book, source: nil)
+        await model.load(book: legacy, source: nil, library: library)
 
-        #expect(!model.chapters.isEmpty)
-        #expect(model.resolvedBook == imported.book)
+        #expect(model.chapters == imported.chapters)
+        #expect(model.resolvedBook == legacy)
+        let indexed = try #require(library.books.first)
+        #expect(await library.cachedTXTChapters(for: indexed) == imported.chapters)
+        #expect(indexed.durChapterIndex == 1 && indexed.durChapterPos == 2)
         #expect(!model.isLoading)
         #expect(model.errorMessage == nil)
     }

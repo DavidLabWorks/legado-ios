@@ -104,8 +104,7 @@ struct ReadingHistoryView: View {
         if let book = books.books.first(where: { $0.name == record.bookName }) {
             BookshelfReadView(
                 book: book,
-                source: sources.sources.first(where: { $0.bookSourceUrl == book.origin }),
-                coordinator: books.updateCoordinator
+                source: sources.sources.first(where: { $0.bookSourceUrl == book.origin })
             )
         } else {
             SearchView(initialKeyword: record.bookName)

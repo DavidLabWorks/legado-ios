@@ -32,7 +32,13 @@ struct LegadoApp: App {
         _readingActivity = StateObject(wrappedValue: demo
             ? ReadingActivityModel.demo(bookmarks: DemoContent.bookmarks, records: DemoContent.readRecords)
             : ReadingActivityModel.live())
-        _rssLibrary = StateObject(wrappedValue: RSSLibraryModel.live())
+        var rssDatabaseURL = LegadoDatabase.defaultURL()
+        #if DEBUG
+        if demo, let path = ProcessInfo.processInfo.environment["LEGADO_UI_RSS_DATABASE"] {
+            rssDatabaseURL = URL(fileURLWithPath: path)
+        }
+        #endif
+        _rssLibrary = StateObject(wrappedValue: RSSLibraryModel.live(databaseURL: rssDatabaseURL))
         _ruleSubscriptions = StateObject(wrappedValue: RuleSubscriptionModel())
     }
 

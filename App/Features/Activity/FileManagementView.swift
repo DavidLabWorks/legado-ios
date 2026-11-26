@@ -183,7 +183,7 @@ struct FileManagementView: View {
 
     private var deletionView: some View {
         importAndRenameView
-        .confirmationDialog("删除 \(pendingDeletion.count) 个文件？", isPresented: Binding(get: { !pendingDeletion.isEmpty }, set: { if !$0 { pendingDeletion = [] } }), titleVisibility: .visible, presenting: pendingDeletion) { urls in
+        .alert("删除 \(pendingDeletion.count) 个文件？", isPresented: Binding(get: { !pendingDeletion.isEmpty }, set: { if !$0 { pendingDeletion = [] } }), presenting: pendingDeletion) { urls in
             Button("删除文件并移出书架", role: .destructive) {
                 pendingDeletion = []
                 Task {
@@ -215,7 +215,7 @@ struct FileManagementView: View {
                 }
             }
         }
-        .confirmationDialog("缓存正文不完整", isPresented: $confirmsPartialExport, titleVisibility: .visible, presenting: model.partialExport) { file in
+        .alert("缓存正文不完整", isPresented: $confirmsPartialExport, presenting: model.partialExport) { file in
             Button("导出已缓存内容") {
                 model.readyExport = file
                 model.partialExport = nil
@@ -246,7 +246,7 @@ struct FileManagementView: View {
                 Group {
                     if selecting { fileLabel(file) }
                     else if let book = book(for: file.url) {
-                        NavigationLink { BookshelfReadView(book: book, source: nil, coordinator: library.updateCoordinator) } label: { fileLabel(file) }
+                        NavigationLink { BookshelfReadView(book: book, source: nil) } label: { fileLabel(file) }
                     } else {
                         Button { Task { await model.run(library) { try await library.addLocalFile(at: file.url) } } } label: { fileLabel(file) }
                     }

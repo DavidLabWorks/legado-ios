@@ -6,11 +6,10 @@ final class LocalBookDetailViewModel: ObservableObject {
     @Published private(set) var isLoading = false
     @Published private(set) var errorMessage: String?
 
-    private let service = LocalBookService.live()
     private var loadedBook: Book?
     private var generation = 0
 
-    func load(book: Book) async {
+    func load(book: Book, library: BookLibraryModel) async {
         guard loadedBook != book else { return }
         generation += 1
         let request = generation
@@ -18,9 +17,9 @@ final class LocalBookDetailViewModel: ObservableObject {
         errorMessage = nil
         defer { if generation == request { isLoading = false } }
         do {
-            let report = try await Task.detached { [service] in try service.loadChapters(book: book) }.value
+            let loaded = try await library.localReadingChapters(for: book)
             guard generation == request, !Task.isCancelled else { return }
-            chapters = report.chapters
+            chapters = loaded
             loadedBook = book
         } catch {
             guard generation == request, !Task.isCancelled else { return }
@@ -34,17 +33,16 @@ struct LocalBookDetailView: View {
     @Environment(\.dismiss) private var dismiss
     let book: Book
     @StateObject private var model = LocalBookDetailViewModel()
-    @State private var showsTableOfContents = false
     @State private var showsTocRule = false
 
     private var currentBook: Book { library.books.first { $0.bookUrl == book.bookUrl } ?? book }
 
     var body: some View {
         let book = currentBook
-        ScrollView {
+        List {
             VStack(spacing: 16) {
                 VStack(spacing: 14) {
-                    BookCoverArtwork(title: book.name, author: book.author, remoteURL: book.displayCoverURL, width: 108, height: 154)
+                    BookCoverArtwork(title: book.name, author: book.author, remoteURL: book.displayCoverURL, width: 108, height: 154, allowsPreview: true)
                     Text(book.name).font(.title2.bold())
                     if !book.author.isEmpty { Text(book.author).font(.subheadline).foregroundStyle(.secondary) }
                     HStack {
@@ -58,52 +56,25 @@ struct LocalBookDetailView: View {
                 if let intro = book.intro, !intro.isEmpty {
                     ReadingCard { Text(intro).font(.subheadline).frame(maxWidth: .infinity, alignment: .leading) }
                 }
-                ReadingCard {
-                    VStack(alignment: .leading, spacing: 0) {
-                        HStack {
-                            Label("目录", systemImage: "list.bullet.rectangle.portrait.fill").font(.headline)
-                            Spacer()
-                            Text("\(model.chapters.count) 章").font(.caption).foregroundStyle(.secondary)
-                        }
-                        .padding(.bottom, 12)
-                        if model.isLoading {
-                            HStack { Spacer(); ProgressView("正在识别章节…"); Spacer() }.padding(.vertical, 28)
-                        } else if let error = model.errorMessage {
-                            ReadingUnavailableView("无法读取本地书", systemImage: "doc.badge.ellipsis", description: Text(error))
-                        } else {
-                            ForEach(model.chapters.prefix(8)) { chapter in
-                                Divider()
-                                BookChapterLink(book: book, chapters: model.chapters, index: chapter.index) {
-                                    HStack(spacing: 12) {
-                                        Text(String(format: "%02d", chapter.index + 1))
-                                            .font(.caption.monospacedDigit()).foregroundStyle(.tertiary).frame(width: 28)
-                                        Text(chapter.title).font(.subheadline).foregroundStyle(.primary).lineLimit(2)
-                                        Spacer()
-                                        Image(systemName: "chevron.right").font(.caption.bold()).foregroundStyle(.tertiary)
-                                    }
-                                    .padding(.vertical, 12)
-                                }
-                            }
-                            if model.chapters.count > 8 {
-                                Divider()
-                                Button("查看全部目录", systemImage: "list.bullet") {
-                                    showsTableOfContents = true
-                                }
-                                .frame(maxWidth: .infinity).padding(.vertical, 10)
-                            }
-                        }
-                    }
-                }
             }
-            .padding(.horizontal, 16).padding(.bottom, 30)
+            .frame(maxWidth: .infinity)
+            .listRowSeparator(.hidden)
+            if model.isLoading {
+                HStack { Spacer(); ProgressView("正在识别章节…"); Spacer() }.padding(.vertical, 28)
+            } else if let error = model.errorMessage {
+                ReadingUnavailableView("无法读取本地书", systemImage: "doc.badge.ellipsis", description: Text(error))
+            } else {
+                BookDetailChapterRows(book: book, chapters: model.chapters)
+            }
         }
+        .listStyle(.plain)
+        .readingScrollContentBackgroundHidden()
         .background(ReadingTheme.canvas)
         .navigationTitle(book.name)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 Menu {
-                    Button("全部目录", systemImage: "list.bullet") { showsTableOfContents = true }
                     if URL(string: book.bookUrl)?.pathExtension.lowercased() == "txt" {
                         Button("重新分章", systemImage: "list.bullet.indent") { showsTocRule = true }
                     }
@@ -117,56 +88,10 @@ struct LocalBookDetailView: View {
                 .accessibilityLabel("本地书操作")
             }
         }
-        .task(id: book) { await model.load(book: book) }
+        .task(id: book) { await model.load(book: book, library: library) }
         .sheet(isPresented: $showsTocRule) { LocalBookTocRuleView(book: book) }
-        .fullScreenCover(isPresented: $showsTableOfContents) {
-            LocalBookTableOfContentsView(book: book, chapters: model.chapters)
-        }
     }
 }
-
-private struct LocalBookTableOfContentsView: View {
-    @Environment(\.dismiss) private var dismiss
-    let book: Book
-    let chapters: [BookChapter]
-    @State private var query = ""
-    @State private var descending = false
-
-    private var displayed: [BookChapter] {
-        let filtered = query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            ? chapters
-            : chapters.filter { $0.title.localizedCaseInsensitiveContains(query) }
-        return descending ? Array(filtered.reversed()) : filtered
-    }
-
-    var body: some View {
-        ReadingNavigationStack {
-            List(displayed) { chapter in
-                BookChapterLink(book: book, chapters: chapters, index: chapter.index) {
-                    HStack {
-                        Text("\(chapter.index + 1)").font(.caption.monospacedDigit()).foregroundStyle(.secondary).frame(width: 42, alignment: .trailing)
-                        Text(chapter.title).lineLimit(2)
-                        Spacer()
-                        if chapter.index == book.durChapterIndex {
-                            Image(systemName: "location.fill").foregroundStyle(ReadingTheme.accent)
-                        }
-                    }
-                }
-            }
-            .id(descending)
-            .searchable(text: $query, prompt: "搜索目录")
-            .navigationTitle("目录")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) { Button("关闭") { dismiss() } }
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button(descending ? "正序" : "倒序", systemImage: "arrow.up.arrow.down") { descending.toggle() }
-                }
-            }
-        }
-    }
-}
-
 
 private struct LocalBookTocRuleView: View {
     @EnvironmentObject private var library: BookLibraryModel

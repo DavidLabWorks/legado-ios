@@ -1,6 +1,6 @@
 # 第三方许可
 
-小浣熊阅读（项目仓库：<https://github.com/Aminark/legado-ios>）由 Aminark 维护。本项目的新增与修改部分以 GNU GPL v3 提供；第三方材料保留其原版权与适用许可。根目录 [LICENSE](LICENSE) 是完整 GPL v3 文本。
+喵阅（项目仓库：<https://github.com/DavidLabWorks/legado-ios>）基于 Aminark 维护的上游项目 <https://github.com/Aminark/legado-ios>。本项目的新增与修改部分以 GNU GPL v3 提供；第三方材料保留其原版权与适用许可。根目录 [LICENSE](LICENSE) 是完整 GPL v3 文本。
 
 ## 阅读 Legado
 
@@ -20,6 +20,10 @@
 - 项目：<https://github.com/tid-kijyun/Kanna>。
 - 用途：XPath 解析。
 - 许可：MIT，完整版权及许可见 [Kanna-LICENSE.txt](App/Resources/Kanna-LICENSE.txt)。
+
+## KSPlayer 与 FFmpegKit
+
+网站正文中的视频由 KSPlayer 2.3.4 提供播放界面和手势控制，KSMEPlayer 通过 FFmpegKit 6.1.5 解码。两个项目均以 GNU GPL v3 发布。[KSPlayer 源码及许可](https://github.com/kingslay/KSPlayer/tree/2.3.4) · [FFmpegKit 源码及许可](https://github.com/kingslay/FFmpegKit/tree/6.1.5)
 
 ## ZIPFoundation
 
@@ -45,4 +49,8 @@
 
 The optional voice packs use the Qwen3-TTS CustomVoice 0.6B model and 12 Hz codec from Qwen under Apache-2.0, distributed in GGUF format by cstr. The high-quality pack contains the Q8_0 talker and full codec. The medium and compact packs contain requantized weights and a decoder-only codec. Each archive includes the model license and is stored in 48 MB parts under `OfflineVoicePacks/v1`. Users download or import a pack into Application Support.
 
-The native runtime and C interface come from CrispStrobe/CrispASR v0.8.55. The app includes the runtime license, third-party notices and model license in its Licenses directory.
+The app statically links the CPU-only Qwen3-TTS target and its ggml dependencies from CrispStrobe/CrispASR v0.8.55. To reproduce the device and simulator libraries, run `Vendor/QwenSpeech/build-runtime.sh <CrispASR-checkout> <new-output.xcframework>` with Xcode, CMake and Ninja installed. The app includes the runtime license, third-party notices and model license in its Licenses directory.
+
+## ZipVoice offline voices
+
+The ZipVoice option uses k2-fsa/ZipVoice-Distill with the sherpa-onnx v2.0.3 iOS runtime, ONNX Runtime and the Vocos 24 kHz decoder. Model files are downloaded into Application Support or imported from a ZIP. The two bundled speaker references are synthesized Qwen3-TTS Uncle_Fu and Serena recordings. The runtime and model notices are included in the ZipVoice resources.

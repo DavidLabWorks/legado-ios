@@ -5,42 +5,52 @@ struct OtherSettingsView: View {
     @AppStorage("auto_refresh") private var autoRefresh = false
     @AppStorage("onlyUpdateRead") private var onlyUpdateRead = false
     @AppStorage("bookshelfSort") private var bookshelfSort = 0
-    @AppStorage("defaultHomePage") private var defaultHomePage = "bookshelf"
+    @AppStorage("defaultHomePage") private var defaultHomePage: AppTab = .bookshelf
     @State private var settings = ApplicationSettingsStore.shared.settings
-    @State private var maintenance: Maintenance?
-    @State private var isWorking = false
-    @State private var message: String?
+    @State private var confirmsCacheClear = false
+    @State private var running: Maintenance?
+    @State private var completed: Set<Maintenance> = []
+    @State private var errorMessage: String?
 
-    private enum Maintenance: String, Identifiable {
+    private enum Maintenance: String {
         case webCache = "清理网页缓存"
         case database = "整理数据库"
-        var id: String { rawValue }
     }
 
     var body: some View {
         Form {
             Section("启动与书架") {
                 Picker("启动页面", selection: $defaultHomePage) {
-                    Text("书架").tag("bookshelf")
-                    Text("发现").tag("explore")
-                    Text("统计").tag("statistics")
-                    Text("设置").tag("settings")
+                    Text("书架").tag(AppTab.bookshelf)
+                    Text("发现").tag(AppTab.explore)
+                    Text("网站").tag(AppTab.websites)
+                    Text("我的").tag(AppTab.my)
                 }
-                Toggle("启动时更新书架", isOn: $autoRefresh)
-                Toggle("自动更新仅检查已读至最新章的书", isOn: $onlyUpdateRead).disabled(!autoRefresh)
                 Picker("默认书架排序", selection: $bookshelfSort) {
                     ForEach(BookshelfSort.allCases) { sort in Text(sort.title).tag(sort.rawValue) }
                 }
+                Toggle("启动时更新书架", isOn: $autoRefresh)
+                if autoRefresh {
+                    Toggle("仅检查已读到最新章的书", isOn: $onlyUpdateRead)
+                }
             }
-            Section("网络与存储") {
+            Section("网络与缓存") {
                 NavigationLink {
                     NetworkSettingsView()
                 } label: { Label("网络与缓存设置", systemImage: "network") }
                 NavigationLink {
                     CacheManagementView()
                 } label: { Label("章节缓存管理", systemImage: "internaldrive") }
-                Button("清理网页缓存", systemImage: "globe") { maintenance = .webCache }
-                Button("整理数据库", systemImage: "externaldrive.badge.checkmark") { maintenance = .database }
+            }
+            Section("存储维护") {
+                maintenanceRow(.webCache, title: "网页缓存", icon: "globe",
+                               detail: "清理网页和图片的临时文件。", action: "清理", done: "已清理") {
+                    confirmsCacheClear = true
+                }
+                maintenanceRow(.database, title: "数据库", icon: "externaldrive",
+                               detail: "保留书籍、规则和阅读记录，回收空闲空间。", action: "整理", done: "已整理") {
+                    Task { await perform(.database) }
+                }
             }
             Section {
                 Toggle("记录运行日志", isOn: Binding(get: { settings.recordLog }, set: { enabled in
@@ -51,7 +61,7 @@ struct OtherSettingsView: View {
                         settings = value
                         if enabled { DiagnosticLog.shared.record(category: "诊断", message: "已开启运行日志") }
                     }
-                    catch { message = error.localizedDescription }
+                    catch { errorMessage = error.localizedDescription }
                 }))
                 NavigationLink {
                     DiagnosticLogView()
@@ -62,28 +72,55 @@ struct OtherSettingsView: View {
         }
         .navigationTitle("其他设置")
         .navigationBarTitleDisplayMode(.inline)
-        .disabled(isWorking)
-        .overlay { if isWorking { ProgressView("正在处理…").padding().background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12)) } }
         .onAppear { settings = ApplicationSettingsStore.shared.settings }
-        .confirmationDialog(maintenance?.rawValue ?? "", isPresented: Binding(
-            get: { maintenance != nil }, set: { if !$0 { maintenance = nil } }
-        ), titleVisibility: .visible) {
-            if let operation = maintenance {
-                Button(operation.rawValue) { Task { await perform(operation) } }
-            }
-            Button("取消", role: .cancel) { maintenance = nil }
+        .alert("清理网页缓存？", isPresented: $confirmsCacheClear) {
+            Button("取消", role: .cancel) {}
+            Button("清理", role: .destructive) { Task { await perform(.webCache) } }
         } message: {
-            Text(maintenance == .webCache ? "清理网页和图片的临时缓存，保留登录 Cookie、书架和阅读进度。" : "回收数据库中的空闲空间，保留全部书籍、规则和阅读记录。")
+            Text("下次打开网页时需要重新加载图片和网页内容。登录状态、书架和阅读进度都会保留。")
         }
-        .alert("操作结果", isPresented: Binding(get: { message != nil }, set: { if !$0 { message = nil } })) {
-            Button("好") { message = nil }
-        } message: { Text(message ?? "") }
+        .alert("操作失败", isPresented: Binding(get: { errorMessage != nil }, set: { if !$0 { errorMessage = nil } })) {
+            Button("好", role: .cancel) {}
+        } message: { Text(errorMessage ?? "") }
+    }
+
+    private func maintenanceRow(_ operation: Maintenance, title: String, icon: String, detail: String,
+                                action: String, done: String, onTap: @escaping () -> Void) -> some View {
+        let finished = completed.contains(operation)
+        return Button(action: onTap) {
+            Label {
+                HStack(spacing: 12) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(title)
+                        Text(detail).font(.footnote).foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    Spacer(minLength: 0)
+                    if running == operation {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        Text(finished ? done : action)
+                            .font(.subheadline.weight(.medium))
+                            .fixedSize()
+                            .padding(.horizontal, 12).padding(.vertical, 5)
+                            .background(ReadingTheme.accentSoft, in: Capsule())
+                    }
+                }
+            } icon: { Image(systemName: icon) }
+            .padding(.vertical, 3)
+            .contentShape(Rectangle())
+        }
+        .disabled(running != nil)
+        .accessibilityLabel(operation.rawValue)
+        .accessibilityValue(running == operation ? "处理中" : (finished ? done : ""))
+        .accessibilityHint(detail)
     }
 
     @MainActor private func perform(_ operation: Maintenance) async {
-        maintenance = nil
-        isWorking = true
-        defer { isWorking = false }
+        guard running == nil else { return }
+        running = operation
+        completed.remove(operation)
+        defer { running = nil }
         do {
             switch operation {
             case .webCache:
@@ -94,10 +131,11 @@ struct OtherSettingsView: View {
                 try await database.compact()
             }
             DiagnosticLog.shared.record(category: "存储", message: "\(operation.rawValue)完成")
-            message = "\(operation.rawValue)完成"
+            completed.insert(operation)
+            UIAccessibility.post(notification: .announcement, argument: "\(operation.rawValue)完成")
         } catch {
             DiagnosticLog.shared.record(.error, category: "存储", message: error.localizedDescription)
-            message = error.localizedDescription
+            errorMessage = error.localizedDescription
         }
     }
 }

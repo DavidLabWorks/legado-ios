@@ -65,14 +65,21 @@ final class TxtTocRuleManagementModel: ObservableObject {
             let decoded: [TxtTocRule]
             if let values = try? JSONDecoder().decode([TxtTocRule].self, from: data) { decoded = values }
             else { decoded = [try JSONDecoder().decode(TxtTocRule.self, from: data)] }
-            var merged = rules
-            for value in decoded {
-                if let index = merged.firstIndex(where: { $0.id == value.id }) { merged[index] = value }
-                else { merged.append(value) }
-            }
-            for index in merged.indices { merged[index].serialNumber = index + 1 }
-            if await persist(merged) { message = "已导入 \(decoded.count) 条目录规则" }
+            try await importRules(decoded)
+            message = "已导入 \(decoded.count) 条目录规则"
         } catch { message = error.localizedDescription }
+    }
+
+    func importRules(_ incoming: [TxtTocRule]) async throws {
+        guard let repository else { throw LegadoDatabaseError.open("无法打开目录规则数据库") }
+        var merged = try await repository.loadTxtTocRules(initialDefaults: TxtTocRuleDefaults.load()).sorted { $0.serialNumber < $1.serialNumber }
+        for value in incoming {
+            if let index = merged.firstIndex(where: { $0.id == value.id }) { merged[index] = value }
+            else { merged.append(value) }
+        }
+        for index in merged.indices { merged[index].serialNumber = index + 1 }
+        try await repository.saveTxtTocRules(merged)
+        rules = merged
     }
 
     private func persist(_ values: [TxtTocRule]) async -> Bool {

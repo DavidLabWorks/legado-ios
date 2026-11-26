@@ -11,7 +11,6 @@ struct ReadingStatisticsView: View {
         GeometryReader { geometry in
             ScrollView {
                 VStack(spacing: 18) {
-                    header
                     todayCard
                     overviewGrid
                     weeklyCard(chartHeight: max(96, min(148, geometry.size.height - 650)))
@@ -25,21 +24,8 @@ struct ReadingStatisticsView: View {
             }
         }
         .background(ReadingTheme.canvas)
-        .navigationBarHidden(true)
-    }
-
-    private var header: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("阅读统计")
-                .font(.system(size: 30, weight: .bold))
-                .foregroundStyle(ReadingTheme.ink)
-                .accessibilityAddTraits(.isHeader)
-            Text("每一页，都算数")
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.bottom, 8)
+        .navigationTitle("阅读统计")
+        .navigationBarTitleDisplayMode(.inline)
     }
 
     private var todayCard: some View {

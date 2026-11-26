@@ -3,7 +3,114 @@ import XCTest
 
 @MainActor
 final class DarkModeUITests: XCTestCase {
-    func testLegacyProfileScrollsBetweenHeaderAndSupport() {
+    func testSharedBackupShowsRestorePreviewAndAllowsCancellation() throws {
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".json")
+        defer { try? FileManager.default.removeItem(at: file) }
+        var backup: [String: Any] = [
+            "type": "com.epiboly.legado.backup", "version": 1, "createdAt": "2026-01-01T00:00:00Z",
+            "shelf": ["books": [], "groups": [], "chapters": [:], "localFiles": [:]] as [String: Any],
+            "websiteVariables": [:], "preferences": [:], "fonts": [:],
+            "settings": ["userAgent": "", "proxy": "", "hosts": "", "timeoutSeconds": 0, "concurrentSources": 8,
+                         "chapterCacheMB": 128, "prefetchChapters": 2, "recordLog": false,
+                         "ignoreCertificateErrors": false] as [String: Any]
+        ]
+        for key in ["bookSources", "websiteSources", "bookmarks", "readingHistory", "websiteFavorites",
+                    "websiteHistory", "searchHistory", "sourceVariables", "speechEngines", "keyboardAssists",
+                    "subscriptions", "replaceRules"] { backup[key] = [Any]() }
+        try JSONSerialization.data(withJSONObject: backup).write(to: file)
+        let app = launch(["-uiDemoTab", "settings", "-uiAutomationImportURL", file.absoluteString])
+        let preview = app.navigationBars["恢复喵阅备份"]
+        XCTAssertTrue(preview.waitForExistence(timeout: 10))
+        XCTAssertTrue(app.buttons["恢复此备份"].exists)
+        preview.buttons["取消"].tap()
+        XCTAssertTrue(app.buttons["profile.about"].waitForExistence(timeout: 5))
+    }
+
+    func testBackupSettingsOpensSystemExporter() {
+        continueAfterFailure = false
+        let app = launch(["-uiDemoTab", "settings"])
+        let row = app.buttons["profile.externaldrive"]
+        let scroll = app.scrollViews["profile.scroll"]
+        XCTAssertTrue(scroll.waitForExistence(timeout: 10))
+        for _ in 0..<5 where !row.isHittable { scroll.swipeUp() }
+        row.tap()
+        XCTAssertTrue(app.buttons["导入 JSON 文件"].waitForExistence(timeout: 5))
+        app.buttons["导出备份 JSON"].tap()
+        let save = app.buttons.matching(NSPredicate(format: "label IN %@", ["Save", "存储", "保存"])).firstMatch
+        XCTAssertTrue(save.waitForExistence(timeout: 12))
+    }
+
+    func testProfileAndAboutShowCurrentAppName() {
+        let app = launch(["-uiDemoTab", "settings", "-themeMode", "1"])
+        let card = app.buttons["profile.about"]
+        XCTAssertTrue(card.waitForExistence(timeout: 10))
+        XCTAssertTrue(card.label.contains("喵阅"))
+        attach(app, name: "MiaoYue profile")
+        card.tap()
+        XCTAssertTrue(app.staticTexts["喵阅"].waitForExistence(timeout: 5))
+        attach(app, name: "MiaoYue about")
+    }
+
+    func testExploreCategoryStaysVisibleAndRowPaddingOpensBook() {
+        continueAfterFailure = false
+        let app = launch(["-uiDemoTab", "explore"])
+        let source = app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "经典文学馆")).firstMatch
+        XCTAssertTrue(source.waitForExistence(timeout: 10))
+        source.tap()
+        // A short viewport lets the six demo books scroll on iPhone.
+        let originalOrientation = XCUIDevice.shared.orientation
+        defer { XCUIDevice.shared.orientation = originalOrientation }
+        XCUIDevice.shared.orientation = .landscapeLeft
+
+        let category = app.buttons["热门连载"]
+        let firstBook = app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "潮汐来信")).firstMatch
+        XCTAssertTrue(category.waitForExistence(timeout: 5))
+        XCTAssertTrue(firstBook.isHittable)
+        let categoryY = category.frame.midY
+        let firstBookY = firstBook.frame.midY
+        let list = app.scrollViews["explore.books"]
+        let start = list.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.75))
+        let end = list.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.15))
+        start.press(forDuration: 0.1, thenDragTo: end)
+        let scrolled = NSPredicate { _, _ in
+            !firstBook.exists || firstBook.frame.midY < firstBookY - 40
+        }
+        XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: scrolled, object: nil)], timeout: 5), .completed)
+        XCTAssertTrue(category.isHittable)
+        XCTAssertEqual(category.frame.midY, categoryY, accuracy: 1)
+
+        category.tap()
+        XCTAssertTrue(category.isSelected)
+        XCTAssertEqual(firstBook.frame.midY, firstBookY, accuracy: 1)
+        firstBook.coordinate(withNormalizedOffset: CGVector(dx: 0.85, dy: 0.08)).tap()
+        XCTAssertTrue(app.navigationBars["书籍详情"].waitForExistence(timeout: 5))
+    }
+
+    func testStorageMaintenanceShowsResultsInTheTappedRow() {
+        continueAfterFailure = false
+        XCUIDevice.shared.orientation = .portrait
+        let app = launch(["-uiDemoTab", "settings", "-uiDemoOtherSettings"])
+        let database = app.buttons["整理数据库"]
+        scrollTo(database, in: app)
+        database.tap()
+        let compacted = expectation(for: NSPredicate(format: "value == %@", "已整理"), evaluatedWith: database)
+        wait(for: [compacted], timeout: 10)
+        XCTAssertFalse(app.alerts.firstMatch.exists)
+        attach(app, name: "其他设置 · 整理完成")
+
+        let cache = app.buttons["清理网页缓存"]
+        cache.tap()
+        let confirmation = app.alerts["清理网页缓存？"]
+        confirmation.buttons["取消"].tap()
+        XCTAssertNotEqual(cache.value as? String, "已清理")
+        cache.tap()
+        confirmation.buttons["清理"].tap()
+        let cleared = expectation(for: NSPredicate(format: "value == %@", "已清理"), evaluatedWith: cache)
+        wait(for: [cleared], timeout: 15)
+        XCTAssertEqual(database.value as? String, "已整理")
+    }
+
+    func testLegacyProfileScrollsBetweenHeaderAndSettings() {
         continueAfterFailure = false
         let app = launch(["-uiDemoTab", "settings", "-themeMode", "2", "-uiLegacyCompatibility"])
         let scroll = app.scrollViews["profile.scroll"]
@@ -12,7 +119,9 @@ final class DarkModeUITests: XCTestCase {
         if #available(iOS 26.0, *) { metrics.append(XCTHitchMetric(application: app)) }
         measure(metrics: metrics) {
             scroll.swipeUp(velocity: .fast)
-            XCTAssertTrue(app.buttons["profile.info.circle"].isHittable)
+            XCTAssertTrue(app.buttons["profile.gearshape"].isHittable)
+            XCTAssertFalse(app.buttons["profile.info.circle"].exists)
+            XCTAssertFalse(app.staticTexts["项目与支持"].exists)
             scroll.swipeDown(velocity: .fast)
             XCTAssertTrue(app.buttons["profile.about"].isHittable)
         }
@@ -66,16 +175,12 @@ final class DarkModeUITests: XCTestCase {
         let app = launch(["-themeMode", "2"])
         XCTAssertTrue(app.tabBars.buttons["书架"].waitForExistence(timeout: 20))
         for (tab, heading) in [("书架", "阅读，让时间有了形状"), ("发现", "下一本好书，在这里遇见"),
-                               ("统计", "每一页，都算数"), ("我的", "按照你的方式阅读")] {
+                               ("网站", "在喜欢的网站，读点新鲜事"), ("我的", "按照你的方式阅读")] {
             app.tabBars.buttons[tab].tap()
             XCTAssertTrue(app.staticTexts[heading].waitForExistence(timeout: 5))
-            if tab == "统计" {
-                let today = app.otherElements["statistics.todayCard"]
-                XCTAssertTrue(today.waitForExistence(timeout: 5))
-                try assertReadableDarkFill(today, in: app)
-            }
             attach(app, name: "Dark tab \(tab)")
         }
+        scrollTo(app.buttons["profile.globe"], in: app)
         app.buttons["profile.globe"].tap()
         XCTAssertTrue(app.navigationBars["书源"].waitForExistence(timeout: 10))
         attach(app, name: "Dark source library")
@@ -114,20 +219,45 @@ final class DarkModeUITests: XCTestCase {
         wait(for: [dismissed], timeout: 5)
     }
 
+    func testRetiredStatisticsStartupPreferenceOpensBookshelfAndStatisticsIsReachableFromProfile() throws {
+        continueAfterFailure = false
+        let app = launch(["-defaultHomePage", "statistics", "-themeMode", "2"])
+        let shelf = app.tabBars.buttons["书架"]
+        XCTAssertTrue(shelf.waitForExistence(timeout: 10))
+        XCTAssertTrue(shelf.isSelected)
+        app.tabBars.buttons["我的"].tap()
+        let settings = app.buttons["profile.gearshape"]
+        scrollTo(settings, in: app)
+        settings.tap()
+        let picker = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "启动页面")).firstMatch
+        XCTAssertTrue(picker.label.contains("书架") || picker.value as? String == "书架")
+        picker.tap()
+        XCTAssertFalse(app.buttons["阅读统计"].exists)
+        app.navigationBars["其他设置"].coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        app.navigationBars["其他设置"].buttons.element(boundBy: 0).tap()
+        let statistics = app.buttons["profile.chart.bar"]
+        scrollTo(statistics, in: app)
+        statistics.tap()
+        let today = app.otherElements["statistics.todayCard"]
+        XCTAssertTrue(today.waitForExistence(timeout: 5))
+        try assertReadableDarkFill(today, in: app)
+        attach(app, name: "Dark reading statistics")
+    }
+
     func testDarkSettingsRulesAndManagementPages() throws {
         continueAfterFailure = false
         let app = launch(["-uiDemoTab", "settings", "-themeMode", "2"])
+        XCTAssertFalse(app.buttons["profile.textformat.size"].exists)
+        XCTAssertFalse(app.buttons["profile.clock"].exists)
         let routes: [(String, String, String?)] = [
-            ("textformat.size", "阅读设置", nil),
-            ("waveform", "在线朗读引擎", "新建"),
+            ("about", "关于", nil),
+            ("waveform", "离线语音包", nil),
             ("bookmark", "书签", nil),
-            ("clock", "阅读记录", nil),
             ("link", "规则订阅", "新建"),
             ("text.badge.checkmark", "净化规则", "新建规则"),
             ("list.bullet.rectangle", "TXT目录规则", "新建"),
             ("folder", "文件管理", nil),
-            ("gearshape", "其他设置", nil),
-            ("info.circle", "关于", nil)
+            ("gearshape", "其他设置", nil)
         ]
         for (icon, title, create) in routes {
             let entry = app.buttons["profile.\(icon)"]
@@ -200,15 +330,37 @@ final class DarkModeUITests: XCTestCase {
     func testDarkRSSAndBlackPhotoViewerInLightAppearance() throws {
         continueAfterFailure = false
         let app = launch(["-uiDemoTab", "rss", "-themeMode", "2"])
-        XCTAssertTrue(app.navigationBars["RSS"].waitForExistence(timeout: 10))
-        for tab in ["订阅", "收藏", "记录"] {
-            app.segmentedControls.buttons[tab].tap()
-            try captureDarkPage(app, name: "RSS \(tab)")
-        }
-        app.segmentedControls.buttons["订阅"].tap()
-        app.buttons["RSS操作"].tap()
-        app.buttons["新建RSS源"].tap()
-        XCTAssertTrue(app.navigationBars["新建RSS源"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["websites.favorites"].waitForExistence(timeout: 10))
+        XCTAssertFalse(app.buttons["websites.search"].exists)
+        XCTAssertFalse(app.segmentedControls.buttons["站点"].exists)
+        XCTAssertFalse(app.buttons["websites.testMirror"].exists)
+        XCTAssertFalse(app.buttons["websites.openMirror"].exists)
+        app.tabBars.buttons["发现"].tap()
+        let bookManager = app.buttons["explore.manageSources"]
+        XCTAssertTrue(app.buttons["explore.search"].isHittable && bookManager.isHittable)
+        attach(app, name: "Explore header")
+        bookManager.tap()
+        XCTAssertTrue(app.navigationBars["书源"].waitForExistence(timeout: 5))
+        app.tabBars.buttons["网站"].tap()
+        let count = app.buttons["websites.sourceCount"]
+        XCTAssertTrue(count.isHittable)
+        count.tap()
+        let managementBar = app.navigationBars["网站源管理"]
+        XCTAssertTrue(managementBar.waitForExistence(timeout: 5))
+        managementBar.buttons.element(boundBy: 0).tap()
+        XCTAssertTrue(app.buttons["网站源管理"].isHittable)
+        try captureDarkPage(app, name: "网站首页")
+        app.buttons["websites.history"].tap()
+        XCTAssertTrue(app.navigationBars["网站阅读记录"].waitForExistence(timeout: 5))
+        app.tabBars.buttons["我的"].tap()
+        let management = app.buttons["profile.network"]
+        scrollTo(management, in: app)
+        XCTAssertTrue(app.buttons["profile.globe"].exists)
+        management.tap()
+        XCTAssertTrue(app.navigationBars["网站源管理"].waitForExistence(timeout: 5))
+        app.buttons["网站源操作"].tap()
+        app.buttons["新建网站源"].tap()
+        XCTAssertTrue(app.navigationBars["新建网站源"].waitForExistence(timeout: 5))
         try captureDarkPage(app, name: "RSS source editor")
         app.terminate()
 
@@ -219,9 +371,9 @@ final class DarkModeUITests: XCTestCase {
         let error = app.staticTexts["图片加载失败"]
         XCTAssertTrue(error.waitForExistence(timeout: 5))
         try assertReadableDarkFill(error, in: app)
-        let done = app.navigationBars.buttons["完成"]
+        let done = app.buttons["关闭图片预览"]
         XCTAssertTrue(done.exists && done.isEnabled)
-        attach(app, name: "Photo viewer navigation and content")
+        attach(app, name: "Photo viewer floating controls")
         let toolbar = try luminances(done, in: app)
         XCTAssertGreaterThanOrEqual((toolbar[toolbar.count * 98 / 100] + 0.05) / (toolbar[toolbar.count * 2 / 100] + 0.05), 4.5)
         attach(app, name: "Readable photo error on black canvas")

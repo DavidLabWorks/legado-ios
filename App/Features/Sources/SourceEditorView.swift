@@ -119,7 +119,8 @@ struct SourceEditorView: View {
             .alert("无法完成操作", isPresented: Binding(get: { errorMessage != nil }, set: { if !$0 { errorMessage = nil } })) {
                 Button("好", role: .cancel) {}
             } message: { Text(errorMessage ?? "") }
-            .confirmationDialog("放弃未保存的修改？", isPresented: $showsDiscard, titleVisibility: .visible) {
+            .alert("放弃未保存的修改？", isPresented: $showsDiscard) {
+                Button("继续编辑", role: .cancel) {}
                 Button("放弃修改", role: .destructive) { dismiss() }
             }
         }

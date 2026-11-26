@@ -4,6 +4,223 @@ import Vision
 
 @MainActor
 final class ReaderScrollGestureTests: XCTestCase {
+    func testSelectedBodyTextBecomesAReplacementRuleInBothReadingModes() throws {
+        continueAfterFailure = false
+        XCUIDevice.shared.orientation = .portrait
+        for mode in ["0", "3"] {
+            let app = XCUIApplication()
+            app.launchArguments = ["-uiDemo", "-uiDemoReader", "-pageAnim", mode, "-themeMode", "1", "-screenOrientation", "1"]
+            app.launch()
+            let reader = mode == "3" ? app.collectionViews["reader.continuous"] : app.textViews["reader.text"]
+            XCTAssertTrue(reader.waitForExistence(timeout: 15))
+            let image = try XCTUnwrap(reader.screenshot().image.cgImage)
+            let recognition = VNRecognizeTextRequest()
+            recognition.recognitionLanguages = ["zh-Hans"]
+            try VNImageRequestHandler(cgImage: image).perform([recognition])
+            let line = try XCTUnwrap(recognition.results?.first {
+                ($0.topCandidates(1).first?.string.count ?? 0) >= 8
+            })
+            let point = reader.coordinate(withNormalizedOffset: CGVector(dx: line.boundingBox.midX, dy: 1 - line.boundingBox.midY))
+            point.press(forDuration: 0.8)
+            let add = app.buttons["添加过滤规则"]
+            XCTAssertTrue(add.waitForExistence(timeout: 5))
+            XCTAssertTrue(add.isEnabled)
+            add.tap()
+            let name = app.textFields["名称"]
+            XCTAssertTrue(name.waitForExistence(timeout: 5))
+            let pattern = try XCTUnwrap(name.value as? String)
+            XCTAssertFalse(pattern.isEmpty)
+            XCTAssertEqual(app.switches["使用正则表达式"].value as? String, "0")
+            let replacement = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "替换为")).firstMatch
+            if !replacement.isHittable { app.swipeUp() }
+            replacement.tap()
+            let editor = app.textViews["syntaxCodeEditor"]
+            editor.tap()
+            editor.typeText("REPLACED")
+            app.navigationBars.buttons.element(boundBy: 0).tap()
+            app.buttons["保存"].tap()
+            if mode == "3" {
+                XCTAssertTrue(reader.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "REPLACED")).firstMatch.waitForExistence(timeout: 8))
+            } else {
+                let replaced = NSPredicate(format: "value CONTAINS %@", "REPLACED")
+                wait(for: [expectation(for: replaced, evaluatedWith: reader)], timeout: 8)
+            }
+            app.terminate()
+        }
+    }
+
+    func testBottomMenuControlsAutoReadingAndDayNightMode() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["-uiDemo", "-uiDemoReader", "-uiDemoReaderMenu", "-pageAnim", "0", "-themeMode", "1"]
+        app.launch()
+        let autoRead = app.buttons["自动阅读"]
+        XCTAssertTrue(autoRead.waitForExistence(timeout: 20))
+        XCTAssertEqual(autoRead.frame.midY, app.buttons["听书"].frame.midY, accuracy: 1)
+        attachScreenshot(app)
+
+        let isNight = app.buttons["日间"].exists
+        app.buttons[isNight ? "日间" : "夜间"].tap()
+        app.buttons[isNight ? "夜间" : "日间"].tap()
+        autoRead.tap()
+        app.buttons["开始自动阅读"].tap()
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        let stop = app.buttons["停止翻页"]
+        XCTAssertTrue(stop.waitForExistence(timeout: 5))
+        stop.tap()
+        XCTAssertTrue(autoRead.waitForExistence(timeout: 5))
+
+        app.buttons["更多"].tap()
+        XCTAssertTrue(app.buttons["书籍信息"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["切换为日间"].exists)
+        XCTAssertFalse(app.buttons["切换为夜间"].exists)
+    }
+
+    func testListeningSetupCanBeCancelledWithoutStarting() {
+        let app = XCUIApplication()
+        app.launchArguments = ["-uiDemo", "-uiDemoReader", "-uiDemoReaderMenu", "-pageAnim", "0",
+                               "-offlineVoicePack.v1", "none"]
+        app.launch()
+        let listen = app.buttons["听书"]
+        XCTAssertTrue(listen.waitForExistence(timeout: 15))
+        listen.tap()
+        XCTAssertTrue(app.navigationBars["听书设置"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.staticTexts["高质量"].exists)
+        XCTAssertFalse(app.staticTexts["中等"].exists)
+        XCTAssertFalse(app.staticTexts["精简"].exists)
+        if app.buttons["从文件导入"].exists {
+            XCTAssertFalse(app.buttons["开始听书"].isEnabled)
+            XCTAssertFalse(app.buttons["试听"].exists)
+            attachScreenshot(app)
+        } else {
+            XCTAssertTrue(app.buttons["试听"].exists)
+            XCTAssertTrue(app.buttons["开始听书"].isEnabled)
+        }
+        XCTAssertTrue(app.switches["listening.byPage"].exists)
+        app.navigationBars.buttons["取消"].tap()
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        XCTAssertTrue(listen.waitForExistence(timeout: 5))
+        XCTAssertTrue(listen.isEnabled)
+        XCTAssertFalse(app.buttons["关闭播放器"].exists)
+    }
+
+    func testListeningButtonStaysDisabledUntilPlayerCloses() throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["-uiDemo", "-uiDemoReader", "-uiDemoReaderMenu", "-pageAnim", "0",
+                               "-offlineVoicePack.v1", "zipvoice", "-ttsTimer", "0"]
+        app.launch()
+        let listen = app.buttons["听书"]
+        XCTAssertTrue(listen.waitForExistence(timeout: 15))
+        listen.tap()
+        let start = app.buttons["开始听书"]
+        XCTAssertTrue(start.waitForExistence(timeout: 5))
+        try XCTSkipUnless(start.isEnabled, "此端到端播放用例需要预先安装 ZipVoice 模型。")
+        let male = app.buttons["Uncle_Fu（离线男声）"]
+        let female = app.buttons["Serena（离线女声）"]
+        female.tap()
+        XCTAssertTrue(female.isSelected)
+        male.tap()
+        XCTAssertTrue(male.isSelected)
+        attachScreenshot(app)
+        let preview = app.buttons["试听"]
+        preview.tap()
+        XCTAssertTrue(app.buttons["停止试听"].waitForExistence(timeout: 3))
+        app.buttons["停止试听"].tap()
+        let more = app.descendants(matching: .any).matching(NSPredicate(format: "label == %@", "更多播放设置")).firstMatch
+        more.tap()
+        XCTAssertTrue(app.switches["朗读时保持亮屏"].exists)
+        more.tap()
+        XCTAssertFalse(app.switches["朗读时保持亮屏"].exists)
+        XCTAssertTrue(app.switches["listening.byPage"].exists)
+        start.tap()
+        let close = app.buttons["关闭播放器"]
+        XCTAssertTrue(close.waitForExistence(timeout: 15))
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        XCTAssertTrue(listen.waitForExistence(timeout: 5))
+        XCTAssertFalse(listen.isEnabled)
+        app.buttons["暂停播放"].tap()
+        XCTAssertTrue(app.buttons["继续播放"].waitForExistence(timeout: 5))
+        XCTAssertFalse(listen.isEnabled)
+        close.tap()
+        XCTAssertTrue(listen.isEnabled)
+        listen.tap()
+        XCTAssertTrue(start.waitForExistence(timeout: 5))
+    }
+
+    func testListeningPlayerDragsAndDocksWithCloseButtonFacingInward() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["-uiDemo", "-uiDemoReader", "-uiDemoReaderMenu", "-pageAnim", "0",
+                               "-offlineVoicePack.v1", "zipvoice", "-ttsTimer", "0"]
+        app.launch()
+        let listen = app.buttons["听书"]
+        XCTAssertTrue(listen.waitForExistence(timeout: 15))
+        listen.tap()
+        let start = app.buttons["开始听书"]
+        XCTAssertTrue(start.waitForExistence(timeout: 5))
+        try XCTSkipUnless(start.isEnabled, "此用例需要预先安装 ZipVoice 模型。")
+        start.tap()
+        let pause = app.buttons["暂停播放"]
+        XCTAssertTrue(pause.waitForExistence(timeout: 15))
+        pause.tap()
+        let play = app.buttons["继续播放"]
+        XCTAssertTrue(play.waitForExistence(timeout: 5))
+        let close = app.buttons["关闭播放器"]
+        let leftClose = close.frame
+        let leftPlay = play.frame
+        XCTAssertGreaterThan(leftClose.midX, leftPlay.midX)
+
+        let middle = CGVector(dx: 0.5, dy: 0.5)
+        let readerCenter = app.coordinate(withNormalizedOffset: middle)
+        readerCenter.tap()
+        XCTAssertTrue(listen.waitForExistence(timeout: 5))
+        XCTAssertLessThan(close.frame.maxY, listen.frame.minY)
+        XCTAssertLessThan(close.frame.midY, leftClose.midY)
+        readerCenter.tap()
+        let restored = NSPredicate { _, _ in abs(close.frame.midY - leftClose.midY) <= 1 }
+        wait(for: [expectation(for: restored, evaluatedWith: nil)], timeout: 3)
+
+        let fromClose = close.coordinate(withNormalizedOffset: middle)
+        fromClose.press(forDuration: 0.1, thenDragTo: fromClose.withOffset(
+            CGVector(dx: app.frame.width * 0.48, dy: -100)))
+        XCTAssertEqual(close.frame.midX, app.frame.maxX - leftClose.midX, accuracy: 2)
+        XCTAssertEqual(play.frame.midX, app.frame.maxX - leftPlay.midX, accuracy: 2)
+        XCTAssertEqual(close.frame.midY, leftClose.midY - 100, accuracy: 4)
+
+        let fromPlay = play.coordinate(withNormalizedOffset: middle)
+        let lift = app.frame.height * 0.25
+        fromPlay.press(forDuration: 0.1, thenDragTo: fromPlay.withOffset(
+            CGVector(dx: -app.frame.width * 0.48, dy: -lift)))
+        XCTAssertTrue(play.exists)
+        XCTAssertEqual(close.frame.midX, leftClose.midX, accuracy: 2)
+        XCTAssertEqual(close.frame.midY, leftClose.midY - 100 - lift, accuracy: 4)
+        let restingFrame = close.frame
+        readerCenter.tap()
+        XCTAssertTrue(listen.waitForExistence(timeout: 5))
+        XCTAssertEqual(close.frame.midY, restingFrame.midY, accuracy: 1)
+        XCTAssertEqual(close.frame.midX, restingFrame.midX, accuracy: 1)
+        attachScreenshot(app)
+        let coverEdge = app.coordinate(withNormalizedOffset: .zero)
+            .withOffset(CGVector(dx: 24, dy: close.frame.midY))
+        coverEdge.press(forDuration: 0.1, thenDragTo: coverEdge.withOffset(
+            CGVector(dx: app.frame.width * 0.48, dy: 0)))
+        XCTAssertEqual(close.frame.midX, app.frame.maxX - leftClose.midX, accuracy: 2)
+        XCTAssertTrue(listen.isHittable)
+        close.tap()
+        XCTAssertFalse(close.exists)
+    }
+
+    func testMoreMenuOpensChapterInEmbeddedBrowser() {
+        let app = XCUIApplication()
+        app.launchArguments = ["-uiDemo", "-uiDemoReader", "-uiDemoReaderMenu", "-uiComicRegression"]
+        app.launch()
+        let more = app.buttons["更多"]
+        XCTAssertTrue(more.waitForExistence(timeout: 10))
+        more.tap()
+        app.buttons["打开原网页"].tap()
+        XCTAssertTrue(app.webViews.firstMatch.waitForExistence(timeout: 10))
+    }
+
     func testComicImagesLoadInOrderAndFailedImageCanRetry() throws {
         continueAfterFailure = false
         let app = XCUIApplication()
@@ -247,18 +464,19 @@ final class ReaderScrollGestureTests: XCTestCase {
         book.tap()
         XCTAssertTrue(app.textViews["reader.text"].waitForExistence(timeout: 20))
         app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
-        let bookmark = app.buttons["书签"]
+        app.buttons["更多"].tap()
+        let bookmark = app.buttons["reader.addBookmark"]
         XCTAssertTrue(bookmark.waitForExistence(timeout: 5))
-        XCTAssertEqual(bookmark.value as? String, "添加当前位置")
+        XCTAssertEqual(bookmark.label, "添加书签")
         bookmark.tap()
         app.buttons["返回"].tap()
         XCTAssertTrue(book.waitForExistence(timeout: 10))
         book.tap()
         XCTAssertTrue(app.textViews["reader.text"].waitForExistence(timeout: 10))
         app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
-        XCTAssertTrue(bookmark.waitForExistence(timeout: 5))
-        XCTAssertEqual(bookmark.value as? String, "已添加")
         app.buttons["更多"].tap()
+        XCTAssertTrue(bookmark.waitForExistence(timeout: 5))
+        XCTAssertEqual(bookmark.label, "已添加书签")
         app.buttons["书签列表"].tap()
         XCTAssertTrue(app.navigationBars["书签"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.staticTexts["第一章 · 雨夜"].firstMatch.exists)
@@ -496,6 +714,31 @@ final class ReaderScrollGestureTests: XCTestCase {
         XCTAssertFalse(app.navigationBars["书籍详情"].exists)
     }
 
+    func testOnlineDirectoryUsesSourceChapterHeadingAndShowsCacheAction() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["-uiDemo", "-uiDemoReader", "-uiReaderFailure", "-pageAnim", "0", "-themeMode", "1"]
+        app.launch()
+        let menu = app.buttons["reader.failureMenu"]
+        XCTAssertTrue(menu.waitForExistence(timeout: 20))
+        menu.tap()
+        app.buttons["目录"].tap()
+
+        let cache = app.buttons["reader.toc.cache"]
+        XCTAssertTrue(cache.waitForExistence(timeout: 5))
+        XCTAssertTrue(cache.isHittable)
+        let first = app.buttons["reader.toc.0"]
+        XCTAssertTrue(first.label.contains("第一章"))
+        XCTAssertTrue(first.label.contains("雨夜"))
+        XCTAssertFalse(first.label.contains("01"))
+        attachScreenshot(app)
+
+        app.buttons["搜索章节"].tap()
+        app.textFields["搜索章节"].typeText("2")
+        XCTAssertTrue(app.buttons["reader.toc.1"].label.contains("灯塔"))
+        XCTAssertFalse(first.exists)
+    }
+
     func testDirectoryKeepsCurrentPageAndSliderJumpsToLastChapter() throws {
         continueAfterFailure = false
         let app = XCUIApplication()
@@ -579,10 +822,11 @@ final class ReaderScrollGestureTests: XCTestCase {
         showMenu()
         app.buttons["目录"].tap()
         XCTAssertTrue(app.navigationBars["目录"].waitForExistence(timeout: 5))
-        let chapterSearch = app.searchFields["搜索章节"]
-        chapterSearch.tap()
+        let chapterSearch = app.textFields["搜索章节"]
+        XCTAssertFalse(chapterSearch.exists)
+        app.buttons["搜索章节"].tap()
         chapterSearch.typeText("天明")
-        app.staticTexts["第五章 · 天明"].tap()
+        app.buttons["reader.toc.4"].tap()
         waitForChapter("第五章 · 天明")
         showMenu()
         XCTAssertFalse(app.buttons["下一章"].isEnabled)
@@ -599,7 +843,8 @@ final class ReaderScrollGestureTests: XCTestCase {
         XCTAssertFalse(app.navigationBars["正文搜索"].exists)
 
         showMenu()
-        app.buttons["书签"].tap()
+        app.buttons["更多"].tap()
+        app.buttons["reader.addBookmark"].tap()
         app.buttons["更多"].tap()
         app.buttons["书签列表"].tap()
         XCTAssertTrue(app.navigationBars["书签"].waitForExistence(timeout: 5))
@@ -635,8 +880,14 @@ final class ReaderScrollGestureTests: XCTestCase {
         let origin = try value("position", in: reader)
         XCTAssertGreaterThan(origin, 0)
         app.buttons["目录"].tap()
-        let search = app.searchFields["搜索章节"]
-        search.tap()
+        let search = app.textFields["搜索章节"]
+        XCTAssertFalse(search.exists)
+        app.buttons["搜索章节"].tap()
+        search.typeText("9999")
+        app.buttons["取消"].tap()
+        XCTAssertFalse(search.exists)
+        XCTAssertTrue(app.buttons["reader.toc.20"].isHittable)
+        app.buttons["搜索章节"].tap()
         search.typeText("70")
         let target = app.buttons["reader.toc.69"]
         XCTAssertTrue(target.waitForExistence(timeout: 5))

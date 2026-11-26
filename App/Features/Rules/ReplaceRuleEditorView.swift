@@ -16,8 +16,15 @@ struct ReplaceRuleEditorView: View {
     @State private var isSaving = false
     @State private var showsDiscard = false
     private let original: ReplaceRule
+    private let readingBook: Book?
 
-    init(rule: ReplaceRule, startsWithTest: Bool = false) {
+    init(rule: ReplaceRule, startsWithTest: Bool = false, readingBook: Book? = nil) {
+        self.readingBook = readingBook
+        if let readingBook {
+            _testBook = State(initialValue: readingBook.name)
+            _testSource = State(initialValue: readingBook.origin)
+            _testContent = State(initialValue: rule.pattern)
+        }
         original = rule
         _rule = State(initialValue: rule)
         _mode = State(initialValue: startsWithTest ? 1 : 0)
@@ -70,7 +77,8 @@ struct ReplaceRuleEditorView: View {
             .alert("规则提示", isPresented: Binding(get: { errorMessage != nil }, set: { if !$0 { errorMessage = nil } })) {
                 Button("好", role: .cancel) {}
             } message: { Text(errorMessage ?? "") }
-            .confirmationDialog("放弃未保存的修改？", isPresented: $showsDiscard, titleVisibility: .visible) {
+            .alert("放弃未保存的修改？", isPresented: $showsDiscard) {
+                Button("继续编辑", role: .cancel) {}
                 Button("放弃修改", role: .destructive) { dismiss() }
             }
             .onChange(of: rule) { _ in testResult = nil }
@@ -85,6 +93,10 @@ struct ReplaceRuleEditorView: View {
                 TextField("名称", text: $rule.name)
                 TextField("分组", text: optional(\.group))
                 Toggle("启用", isOn: $rule.isEnabled)
+                if readingBook?.readConfig?.useReplaceRule == false {
+                    Text("本书已关闭正文替换，启用后规则才会生效。")
+                        .font(.footnote).foregroundStyle(.secondary)
+                }
             }
             Section("匹配与替换") {
                 Toggle("使用正则表达式", isOn: $rule.isRegex)

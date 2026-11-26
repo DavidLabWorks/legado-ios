@@ -34,9 +34,18 @@ final class ReplaceRuleLibraryModel: ObservableObject {
         ReplaceRuleLibraryModel(repository: InMemoryReplaceRuleRepository())
     }
 
+    func waitForPendingSave() async throws {
+        if let saveTask { try await saveTask.value.get() }
+    }
+
     func load() async {
         do { rules = try await repository.load(); persistedRules = rules }
         catch { notice = .init(kind: .error, title: "净化规则读取失败", detail: error.localizedDescription) }
+    }
+
+    func importRules(_ incoming: [ReplaceRule]) async throws {
+        if rules.isEmpty { rules = try await repository.load() }
+        try await saveRules(importer.merge(incoming, into: rules))
     }
 
     func importFiles(_ urls: [URL]) async {
@@ -71,8 +80,7 @@ final class ReplaceRuleLibraryModel: ObservableObject {
                 data = body
             }
             let incoming = try importer.decode(data)
-            let updated = importer.merge(incoming, into: rules)
-            try await saveRules(updated)
+            try await importRules(incoming)
             notice = .init(kind: .success, title: "净化规则已导入", detail: "本次读取 \(incoming.count) 条，当前共 \(rules.count) 条。")
         } catch { notice = .init(kind: .error, title: "净化规则导入失败", detail: error.localizedDescription) }
     }

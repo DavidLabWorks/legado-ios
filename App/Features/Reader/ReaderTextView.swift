@@ -89,6 +89,112 @@ private final class ReaderLayoutTextView: UITextView {
     }
 }
 
+/// A chapter snapshot keeps selection independent of page turns and recycled scroll cells.
+@MainActor
+struct ReaderTextSelection {
+    let rendered: NSAttributedString
+    let body: String
+    let bodyStart: Int
+    let character: Int
+    let insets: UIEdgeInsets
+    let viewportOffset: CGFloat
+
+    init?(manager: NSLayoutManager, container: NSTextContainer, at point: CGPoint, body: String,
+          bodyStart: Int, insets: UIEdgeInsets, viewportOffset: CGFloat) {
+        guard let storage = manager.textStorage, manager.numberOfGlyphs > 0 else { return nil }
+        let glyph = manager.glyphIndex(for: point, in: container)
+        guard glyph < manager.numberOfGlyphs else { return nil }
+        let rect = manager.boundingRect(forGlyphRange: NSRange(location: glyph, length: 1), in: container)
+        let character = manager.characterIndexForGlyph(at: glyph)
+        guard rect.contains(point), NSLocationInRange(character, NSRange(location: bodyStart, length: body.utf16.count)) else { return nil }
+        self.rendered = NSAttributedString(attributedString: storage)
+        self.body = body
+        self.bodyStart = bodyStart
+        self.character = character
+        self.insets = insets
+        self.viewportOffset = viewportOffset
+    }
+
+    func originalText(in range: NSRange) -> String? {
+        guard range.length > 0, range.location >= bodyStart,
+              NSMaxRange(range) <= bodyStart + body.utf16.count else { return nil }
+        return (body as NSString).substring(with: NSRange(location: range.location - bodyStart, length: range.length))
+    }
+}
+
+struct ReaderSelectionView: UIViewRepresentable {
+    let selection: ReaderTextSelection
+    let onSelection: (String?) -> Void
+
+    func makeCoordinator() -> Coordinator { Coordinator(parent: self) }
+
+    func makeUIView(context: Context) -> UITextView {
+        let view: ReaderLayoutTextView
+        if #available(iOS 16.0, *) {
+            view = ReaderLayoutTextView(usingTextLayoutManager: false)
+        } else {
+            view = ReaderLayoutTextView(frame: .zero)
+        }
+        view.backgroundColor = .clear
+        view.isEditable = false
+        view.isSelectable = true
+        view.accessibilityIdentifier = "reader.selection"
+        view.contentInsetAdjustmentBehavior = .never
+        view.textContainer.lineFragmentPadding = 0
+        view.textContainerInset = selection.insets
+        view.attributedText = selection.rendered
+        view.delegate = context.coordinator
+        view.onLayout = { [selection, weak view] _ in
+            guard let view else { return }
+            view.onLayout = nil
+            guard let position = view.position(from: view.beginningOfDocument, offset: selection.character) else { return }
+            let word = view.tokenizer.rangeEnclosingPosition(position, with: .word,
+                inDirection: UITextDirection.storage(.forward))
+            let fallback = (selection.rendered.string as NSString).rangeOfComposedCharacterSequence(at: selection.character)
+            view.becomeFirstResponder()
+            if let word { view.selectedTextRange = word } else { view.selectedRange = fallback }
+            // A short chapter can begin halfway down the continuous viewport.
+            let selectionBottom = view.selectedTextRange.map { view.firstRect(for: $0).maxY } ?? 0
+            let offset = max(selection.viewportOffset, selectionBottom - view.bounds.height)
+            view.contentInset.top = max(0, -offset)
+            view.contentInset.bottom = max(0, offset + view.bounds.height - view.contentSize.height)
+            view.setContentOffset(CGPoint(x: 0, y: offset), animated: false)
+        }
+        return view
+    }
+
+    func updateUIView(_ view: UITextView, context: Context) {}
+
+    final class Coordinator: NSObject, UITextViewDelegate {
+        let parent: ReaderSelectionView
+        init(parent: ReaderSelectionView) { self.parent = parent }
+        func textViewDidChangeSelection(_ textView: UITextView) {
+            parent.onSelection(parent.selection.originalText(in: textView.selectedRange))
+        }
+    }
+}
+
+struct ReaderSpeechHighlight {
+    private var range: NSRange?
+    private var color: UIColor?
+
+    mutating func apply(to storage: NSTextStorage, bodyStart: Int, bodyLength: Int, sentence: NSRange?, tint: UIColor) -> Bool {
+        let next = sentence.flatMap { value -> NSRange? in
+            guard value.location >= 0, value.length > 0, NSMaxRange(value) <= bodyLength,
+                  bodyStart + NSMaxRange(value) <= storage.length else { return nil }
+            return NSRange(location: bodyStart + value.location, length: value.length)
+        }
+        guard next != range || (next != nil && tint != color) else { return false }
+        storage.beginEditing()
+        if let range, NSMaxRange(range) <= storage.length { storage.removeAttribute(.backgroundColor, range: range) }
+        if let next { storage.addAttribute(.backgroundColor, value: tint, range: next) }
+        storage.endEditing()
+        range = next
+        color = tint
+        return true
+    }
+}
+
 struct ReaderTextView: UIViewRepresentable {
     var simplifiedChinese = false
     let adjacentPagePreview: (Int) -> (title: String, text: String?)?
@@ -120,13 +226,16 @@ struct ReaderTextView: UIViewRepresentable {
     let titleTopSpacing: Double
     let titleBottomSpacing: Double
     let underlineMode: Int
-    let isSelectable: Bool
+    var onSelectText: ((ReaderTextSelection) -> Void)?
     let fullJustify: Bool
     let pageAnimation: Int
     let isEInkMode: Bool
     let clickActions: [Int]
     let backgroundColor: UIColor
     let foregroundColor: UIColor
+    var spokenRange: NSRange?
+    var spokenPosition: Int?
+    var speechColor: UIColor = .clear
     let requestedPosition: Int
     let jumpPosition: Int?
     let renderRevision: Int
@@ -211,7 +320,6 @@ struct ReaderTextView: UIViewRepresentable {
         context.coordinator.updateInteractionMode(on: view, isScrollMode: effectivePageAnimation == 3)
         view.backgroundColor = backgroundColor
         view.isOpaque = backgroundColor != .clear
-        view.isSelectable = false
         view.resignFirstResponder()
         view.textContainerInset = .init(
             top: CGFloat(paddingTop + headerInset),
@@ -228,7 +336,7 @@ struct ReaderTextView: UIViewRepresentable {
         let showsPrevious = showsContinuation && isPreviousReady && previousTitle != nil
         let adjacentContentKey = "\(showsPrevious)|\(previousTitle ?? "")|\(previousText)|\(showsContinuation)|\(continuationTitle ?? "")|\(continuationText)".hashValue
         let displaysTitle = titleMode != 2 || isVolume
-        let styleKey = "\(simplifiedChinese)|\(contentKey)|\(adjacentContentKey)|\(title)|\(isVolume)|\(fontSize)|\(fontPath)|\(fontRevision)|\(letterSpacing)|\(lineSpacing)|\(paragraphSpacing)|\(paragraphIndent)|\(paddingLeft)|\(paddingRight)|\(paddingTop)|\(paddingBottom)|\(headerInset)|\(footerInset)|\(fontWeight)|\(titleMode)|\(titleSize)|\(titleTopSpacing)|\(titleBottomSpacing)|\(underlineMode)|\(isSelectable)|\(fullJustify)|\(effectivePageAnimation)|\(foregroundColor.hash)"
+        let styleKey = "\(simplifiedChinese)|\(contentKey)|\(adjacentContentKey)|\(title)|\(isVolume)|\(fontSize)|\(fontPath)|\(fontRevision)|\(letterSpacing)|\(lineSpacing)|\(paragraphSpacing)|\(paragraphIndent)|\(paddingLeft)|\(paddingRight)|\(paddingTop)|\(paddingBottom)|\(headerInset)|\(footerInset)|\(fontWeight)|\(titleMode)|\(titleSize)|\(titleTopSpacing)|\(titleBottomSpacing)|\(underlineMode)|\(fullJustify)|\(effectivePageAnimation)|\(foregroundColor.hash)"
         if chapterChanged || context.coordinator.styleKey != styleKey {
             if context.coordinator.shouldDeferRender(in: view) {
                 context.coordinator.needsDeferredRender = true
@@ -241,6 +349,7 @@ struct ReaderTextView: UIViewRepresentable {
             context.coordinator.resetPageRangeRetry()
             context.coordinator.contentKey = contentKey
             context.coordinator.primaryContentKey = primaryContentKey
+            context.coordinator.highlight = ReaderSpeechHighlight()
             context.coordinator.styleKey = styleKey
             let typography = ReaderTypography(configuration: self)
             let bodyAttributes = typography.bodyAttributes
@@ -298,6 +407,7 @@ struct ReaderTextView: UIViewRepresentable {
                 coordinator?.reportPageRanges(in: view)
             }
         }
+        context.coordinator.highlightSpeech(in: view)
         if let jumpPosition, context.coordinator.lastJumpPosition != jumpPosition {
             context.coordinator.lastJumpPosition = jumpPosition
             context.coordinator.scroll(to: jumpPosition, in: view)
@@ -327,6 +437,14 @@ struct ReaderTextView: UIViewRepresentable {
         var contentKey = 0
         var primaryContentKey = 0
         var styleKey = ""
+        var highlight = ReaderSpeechHighlight()
+        func highlightSpeech(in view: UITextView) {
+            if highlight.apply(to: view.textStorage, bodyStart: renderedPrefixLength, bodyLength: currentBodyEnd - renderedPrefixLength,
+                               sentence: parent.spokenRange, tint: parent.speechColor) {
+                dragImages.removeAll()
+            }
+        }
+
         var renderedPrefixLength = 0
         var currentSectionStart = 0
         var currentBodyEnd = 0
@@ -398,6 +516,9 @@ struct ReaderTextView: UIViewRepresentable {
             tap.delegate = self
             view.addGestureRecognizer(tap)
             readerTap = tap
+            let press = UILongPressGestureRecognizer(target: self, action: #selector(selectText(_:)))
+            view.addGestureRecognizer(press)
+            tap.require(toFail: press)
             let pan = UIPanGestureRecognizer(target: self, action: #selector(panned(_:)))
             pan.maximumNumberOfTouches = 1
             pan.delegate = self
@@ -916,6 +1037,18 @@ struct ReaderTextView: UIViewRepresentable {
                 UIImpactFeedbackGenerator(style: .light).impactOccurred()
                 parent.onReachedStart(contentCharacter(at: view.contentOffset, in: view))
             }
+        }
+
+        @objc private func selectText(_ gesture: UILongPressGestureRecognizer) {
+            guard gesture.state == .began, let view = textView, let onSelect = parent.onSelectText else { return }
+            let inset = view.textContainerInset
+            let point = gesture.location(in: view)
+            let padding = view.textContainer.lineFragmentPadding
+            let selection = ReaderTextSelection(manager: view.layoutManager, container: view.textContainer,
+                at: CGPoint(x: point.x - inset.left, y: point.y - inset.top), body: parent.text,
+                bodyStart: renderedPrefixLength, insets: UIEdgeInsets(top: inset.top, left: inset.left + padding,
+                    bottom: inset.bottom, right: inset.right + padding), viewportOffset: view.contentOffset.y)
+            if let selection { onSelect(selection) }
         }
 
         @objc private func tapped(_ gesture: UITapGestureRecognizer) {

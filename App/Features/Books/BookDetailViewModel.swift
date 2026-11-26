@@ -5,7 +5,7 @@ import LegadoCore
 
 @MainActor
 final class BookDetailViewModel: ObservableObject {
-    enum State: Equatable { case idle, loading, findingSource, ready, failed }
+    enum State: Equatable { case idle, loadingDetails, loading, findingSource, ready, failed }
     typealias SourceSwitchCommit = @MainActor (BookSourceSwitchReport) async -> Bool
     typealias PreparedUpdateCommit = @MainActor (BookUpdateReport) async -> Bool
 
@@ -17,7 +17,6 @@ final class BookDetailViewModel: ObservableObject {
     private var searchBook: SearchBook?
     private let service: NetworkBookService
     private let updateCoordinator: BookUpdateCoordinator
-    private let contentCoordinator: ChapterContentCoordinator
     private let sourceSwitchService: BookSourceSwitchService
     private var loadGeneration = 0
     private var directoryTask: Task<Void, Never>?
@@ -36,7 +35,6 @@ final class BookDetailViewModel: ObservableObject {
         self.service = service
         let chapters = chapterRepository
         updateCoordinator = BookUpdateCoordinator(repository: chapters, loader: service)
-        contentCoordinator = ChapterContentCoordinator(loader: service)
         self.sourceSwitchService = sourceSwitchService ?? BookSourceSwitchService(
             detailLoader: service,
             chapterLoader: service,
@@ -63,7 +61,6 @@ final class BookDetailViewModel: ObservableObject {
         self.chapters = chapters
         if !chapters.isEmpty { state = .ready }
         updateCoordinator = BookUpdateCoordinator(repository: AppBookChapterRepository.live(), loader: service)
-        contentCoordinator = ChapterContentCoordinator(loader: service)
         sourceSwitchService = BookSourceSwitchService(
             detailLoader: service,
             chapterLoader: service,
@@ -77,7 +74,6 @@ final class BookDetailViewModel: ObservableObject {
         self.source = source
         service = .init()
         updateCoordinator = .init()
-        contentCoordinator = .init()
         sourceSwitchService = .init()
         self.chapters = chapters
         state = .ready
@@ -90,7 +86,7 @@ final class BookDetailViewModel: ObservableObject {
         directoryTask?.cancel()
         loadGeneration &+= 1
         let generation = loadGeneration
-        state = .loading
+        state = searchBook == nil ? .loading : .loadingDetails
         usedStoredDirectory = false
         let work = Task {
             await loadDirectory(generation: generation, sources: sources, persistDirectory: persistDirectory,
@@ -100,7 +96,7 @@ final class BookDetailViewModel: ObservableObject {
         directoryTask = work
         let timeout: Task<Void, Never>? = browserDirectoryURL == nil ? nil : Task {
             do { try await Task.sleep(nanoseconds: 15_000_000_000) } catch { return }
-            guard generation == loadGeneration, chapters.isEmpty, state == .loading else { return }
+            guard generation == loadGeneration, chapters.isEmpty, state == .loading || state == .loadingDetails else { return }
             diagnostics.append(.init(severity: .error, code: "toc.timeout",
                                      message: "等待目录超过 15 秒。", rule: book.bookUrl))
             stopWaitingForDirectory()
@@ -131,9 +127,11 @@ final class BookDetailViewModel: ObservableObject {
                 }
             }
         }
+        var loadedDetail: BookDetailReport?
         if let searchBook {
             let detail = await service.loadDetail(searchBook: searchBook, source: source)
             guard acceptsLoad(generation) else { return }
+            loadedDetail = detail
             let details = detail.book
             book.name = details.name
             book.author = details.author
@@ -150,9 +148,10 @@ final class BookDetailViewModel: ObservableObject {
             book.variable = details.variable ?? book.variable
             diagnostics += detail.diagnostics
         }
+        if chapters.isEmpty { state = .loading }
         let oldBookURL = book.bookUrl
         let toc = await updateCoordinator.refresh(book: book, source: source, persistDirectory: persistDirectory,
-                                                  runPreUpdateScript: runPreUpdateScript ?? (searchBook == nil), isFromBookInfo: searchBook != nil)
+                                                  runPreUpdateScript: runPreUpdateScript ?? (searchBook == nil), isFromBookInfo: searchBook != nil, detail: loadedDetail)
         guard acceptsLoad(generation) else { return }
         if toc.refreshed, toc.book.bookUrl != oldBookURL, let commitPreparedUpdate,
            !(await commitPreparedUpdate(toc)) {
@@ -172,7 +171,7 @@ final class BookDetailViewModel: ObservableObject {
             return
         }
 
-        if browserDirectoryURL != nil {
+        if browserDirectoryURL != nil || qidianCatalogURL != nil {
             state = .failed
             return
         }
@@ -190,6 +189,13 @@ final class BookDetailViewModel: ObservableObject {
             guard acceptsLoad(generation) else { return }
             state = .failed
         }
+    }
+
+    var qidianCatalogURL: URL? {
+        guard URL(string: source.id)?.host == "www.qidian.com",
+              let page = originalWebPageURL, page.scheme == "https", page.host == "www.qidian.com",
+              page.path.range(of: #"^/book/[0-9]+/?$"#, options: .regularExpression) != nil else { return nil }
+        return URL(string: "https://www.qidian.com/book/\(page.lastPathComponent)/catalog/")
     }
 
     var originalWebPageURL: URL? { book.originalWebPageURL(sourceURL: source.id) }
@@ -301,24 +307,24 @@ final class BookDetailViewModel: ObservableObject {
         return await load(sources: sources, persistDirectory: persistDirectory, runPreUpdateScript: true, forceRefresh: true,
                    commitSourceSwitch: commitSourceSwitch, commitPreparedUpdate: commitPreparedUpdate)
     }
+}
 
-    func startCaching(limit: Int?, using queue: ChapterBatchCache) {
-        let jobs = ChapterCachePlanner.plan(chapters: chapters, startIndex: book.durChapterIndex, limit: limit)
-        queue.start(book: book, source: source, jobs: jobs, coordinator: contentCoordinator)
+extension URL {
+    static func originalWebPage(from rule: String, relativeTo base: String) -> URL? {
+        // An imported address can include Legado request options after the URL.
+        let end = rule.range(of: #",\s*(?=\{)"#, options: .regularExpression)?.lowerBound ?? rule.endIndex
+        let address = rule[..<end].trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !address.isEmpty, !address.hasPrefix("<"), !address.lowercased().hasPrefix("@js:"), !address.contains("{{"),
+              let url = URL(string: address, relativeTo: URL(string: base))?.absoluteURL,
+              let scheme = url.scheme?.lowercased(), ["http", "https"].contains(scheme),
+              let host = url.host, !host.isEmpty else { return nil }
+        return url
     }
 }
 
 extension Book {
     func originalWebPageURL(sourceURL: String) -> URL? {
-        let rule = bookUrl
-        // An imported address can include Legado request options after the URL.
-        let end = rule.range(of: #",\s*(?=\{)"#, options: .regularExpression)?.lowerBound ?? rule.endIndex
-        let address = rule[..<end].trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !address.isEmpty, !address.hasPrefix("<"), !address.lowercased().hasPrefix("@js:"), !address.contains("{{"),
-              let url = URL(string: address, relativeTo: URL(string: sourceURL))?.absoluteURL,
-              let scheme = url.scheme?.lowercased(), ["http", "https"].contains(scheme),
-              let host = url.host, !host.isEmpty else { return nil }
-        return url
+        URL.originalWebPage(from: bookUrl, relativeTo: sourceURL)
     }
 
     var browserDirectoryURL: URL? {

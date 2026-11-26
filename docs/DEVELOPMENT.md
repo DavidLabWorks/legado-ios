@@ -5,6 +5,7 @@
 - macOS；支持 Swift 6 的 Xcode，当前开发环境为 Xcode 26.1。
 - App 最低 iOS 15.0；核心包也可在 macOS 14+ 测试。
 - Swift Package Manager 依赖由 `Package.resolved` 锁定，初次解析需要网络。
+- KSPlayer 需要 Metal 编译器。若 Xcode 26 提示缺少 Metal Toolchain，可运行 `xcodebuild -downloadComponent MetalToolchain` 安装。
 - 运行脚本需 Python 3 和 `rg`（ripgrep）。
 
 在独立仓库根目录打开 `Legado.xcodeproj`，选择 `Legado` Scheme。真机运行需要自行设置签名团队；请勿将证书或描述文件提交到仓库。
@@ -115,7 +116,7 @@ python3 scripts/export-open-source.py /tmp/legado-ios-open-source
 `docs/altstore.json` 是 AltStore Classic、SideStore 和 LiveContainer 共用的应用源，固定地址为：
 
 ```text
-https://raw.githubusercontent.com/Aminark/legado-ios/main/docs/altstore.json
+https://raw.githubusercontent.com/DavidLabWorks/legado-ios/main/docs/altstore.json
 ```
 
 源仅列出最新正式版，同时提供 `versions` 和旧客户端使用的顶层版本字段。版本号、构建号、最低 iOS 版本和隐私权限从实际 IPA 的 `Info.plist` 读取，下载地址、发布日期和更新说明来自 GitHub Release。目前由维护者在发布正式版后手动运行生成脚本并提交源文件。
@@ -128,9 +129,9 @@ https://raw.githubusercontent.com/Aminark/legado-ios/main/docs/altstore.json
 
 ```sh
 source_update_dir=$(mktemp -d)
-gh api repos/Aminark/legado-ios/releases/latest > "$source_update_dir/release.json"
+gh api repos/DavidLabWorks/legado-ios/releases/latest > "$source_update_dir/release.json"
 source_release_tag=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["tag_name"])' "$source_update_dir/release.json")
-gh release download "$source_release_tag" --repo Aminark/legado-ios \
+gh release download "$source_release_tag" --repo DavidLabWorks/legado-ios \
   --pattern '*.ipa' --dir "$source_update_dir"
 python3 scripts/update-altstore-source.py \
   --ipa "$source_update_dir/legado-ios-v0.1.15-build21-unsigned.ipa" \

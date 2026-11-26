@@ -20,6 +20,20 @@ public enum LocalBookError: Error, LocalizedError, Sendable {
     }
 }
 
+/// Identifies the file whose byte offsets are stored in the TXT directory.
+public struct LocalTXTRevision: Codable, Hashable, Sendable {
+    let size: Int
+    let modified: Date
+
+    public init?(url: URL) {
+        guard url.isFileURL, url.pathExtension.lowercased() == "txt",
+              let values = try? URL(fileURLWithPath: url.path).resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey]),
+              let size = values.fileSize, let modified = values.contentModificationDate else { return nil }
+        self.size = size
+        self.modified = modified
+    }
+}
+
 public struct LocalBookImportReport: Sendable {
     public var book: Book
     public var chapters: [BookChapter]
@@ -197,6 +211,7 @@ public struct LocalBookService: Sendable {
 
         let name = sourceURL.deletingPathExtension().lastPathComponent
         var book = Book(bookUrl: destination.absoluteString, name: name, origin: "local")
+        book.localTXTRevision = LocalTXTRevision(url: destination)
         book.originName = sourceURL.lastPathComponent
         book.charset = decoded.charset
         book.canUpdate = false
@@ -269,6 +284,7 @@ public struct LocalBookService: Sendable {
         let decoded = try read(book)
         guard decoded.data.count > decoded.bomLength else { throw LocalBookError.emptyFile }
         var updated = book
+        updated.localTXTRevision = LocalTXTRevision(url: url)
         updated.charset = decoded.charset
         if updated.readConfig == nil { updated.readConfig = BookReadConfig() }
         updated.readConfig?.splitLongChapter = splitLongChapter

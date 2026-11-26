@@ -17,17 +17,19 @@ public enum LegadoDatabaseError: Error, LocalizedError, Sendable {
 }
 
 public actor LegadoDatabase {
-    public static let schemaVersion: Int32 = 8
+    public static let schemaVersion: Int32 = 9
 
     // SQLite is opened with FULLMUTEX and every operational access remains
     // actor-isolated. `nonisolated(unsafe)` only permits closing the handle
     // from Swift 6's nonisolated actor deinitializer.
     nonisolated(unsafe) private let handle: OpaquePointer
+    private let directory: URL
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
     private var lastDirectory: (bookURL: String, version: Int32, chapters: [BookChapter])?
 
     public init(url: URL) throws {
+        directory = url.deletingLastPathComponent()
         try FileManager.default.createDirectory(
             at: url.deletingLastPathComponent(),
             withIntermediateDirectories: true
@@ -56,6 +58,154 @@ public actor LegadoDatabase {
     public static func defaultURL() -> URL {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Legado/legado.sqlite3")
+    }
+
+    public func makeBackup(defaultsSuite: String? = nil) throws -> LibraryBackup {
+        try Self.execute(handle, "BEGIN IMMEDIATE")
+        defer { try? Self.execute(handle, "ROLLBACK") } // End the read snapshot.
+        let defaults = defaultsSuite.flatMap(UserDefaults.init(suiteName:)) ?? .standard
+        try importLegacyJSON(bookSourcesURL: directory.appendingPathComponent("book-sources.json"),
+                             booksURL: directory.appendingPathComponent("books.json"),
+                             chaptersDirectory: directory.appendingPathComponent("Chapters"),
+                             bookGroupsURL: directory.appendingPathComponent("book-groups.json"),
+                             bookmarksURL: directory.appendingPathComponent("bookmarks.json"),
+                             readRecordsURL: directory.appendingPathComponent("read-records.json"))
+        try importLegacySearchKeywords(defaults.stringArray(forKey: "bookSearchHistory") ?? [])
+        let files = BackupFileChanges(root: directory)
+        let books = try loadBooks()
+        var localFiles: [String: Data] = [:]
+        for url in try files.regularFiles(in: "LocalBooks", extensions: ["txt", "epub"]) {
+            localFiles[url.lastPathComponent] = try Data(contentsOf: url, options: .mappedIfSafe)
+        }
+        var fonts: [String: Data] = [:]
+        for url in try files.regularFiles(in: "fonts", extensions: ["ttf", "otf", "ttc", "otc"]) {
+            fonts[url.lastPathComponent] = try Data(contentsOf: url, options: .mappedIfSafe)
+        }
+        let pending = try defaults.data(forKey: "pendingBookReadingProgress").map { try decoder.decode([String: BookProgress].self, from: $0) } ?? [:]
+        let migration = try LibraryBackup.Migration(pendingProgress: pending, servers: loadServers())
+        let rules = try files.read("replace-rules.json").map { try decoder.decode([ReplaceRule].self, from: $0) } ?? []
+        let grouped = try load("SELECT payload FROM chapters ORDER BY book_url, chapter_index", as: BookChapter.self)
+        let initialized = try Self.scalarInt32(handle, "SELECT COUNT(*) FROM legacy_imports WHERE key = 'txtTocRules.defaults'") > 0
+        let tocRules = try loadTxtTocRules()
+        let backup = try LibraryBackup(type: LibraryBackup.identifier, version: 2, createdAt: Date(),
+            shelf: .init(books: books, groups: loadBookGroups(), chapters: Dictionary(grouping: grouped, by: \.bookUrl), localFiles: localFiles),
+            bookSources: loadBookSources(), websiteSources: loadRssSources(), bookmarks: loadBookmarks(),
+            readingHistory: loadReadRecords(), websiteFavorites: loadRssStars(), websiteHistory: loadRssReadRecords(),
+            searchHistory: loadSearchKeywords(order: .lastUseTime), sourceVariables: backupSourceVariables(),
+            websiteVariables: files.websiteVariables(), speechEngines: loadHttpTTS(), keyboardAssists: loadKeyboardAssists(),
+            subscriptions: loadRuleSubs(), tocRules: initialized || !tocRules.isEmpty ? tocRules : nil,
+            replaceRules: rules, settings: ApplicationSettingsStore(defaults: defaults).settings,
+            preferences: BackupPreferences.read(defaults), fonts: fonts, background: files.read("reader-background.jpg"), migration: migration)
+        try backup.validate()
+        return backup
+    }
+
+    private func backupSourceVariables() throws -> [LegadoCache] {
+        let query = try prepare("SELECT key, value, deadline FROM caches WHERE key GLOB 'sourceVariable_*' OR (key GLOB 'v_*' AND key NOT GLOB '*_loginInfo')")
+        defer { sqlite3_finalize(query) }
+        var result: [LegadoCache] = []
+        while true {
+            switch sqlite3_step(query) {
+            case SQLITE_DONE: return result
+            case SQLITE_ROW:
+                result.append(.init(key: columnString(query, at: 0), value: sqlite3_column_type(query, 1) == SQLITE_NULL ? nil : columnString(query, at: 1),
+                                    deadline: sqlite3_column_int64(query, 2)))
+            default: throw databaseError(.execute)
+            }
+        }
+    }
+
+    public func restoreBackup(_ backup: LibraryBackup, defaultsSuite: String? = nil) throws {
+        try backup.validate()
+        let defaults = defaultsSuite.flatMap(UserDefaults.init(suiteName:)) ?? .standard
+        let settingsData = try encoder.encode(backup.settings.validated())
+        let rulesData = try encoder.encode(backup.replaceRules)
+        var files = BackupFileChanges(root: directory)
+        var books = backup.shelf.books
+        var chapters = backup.shelf.chapters
+        for i in books.indices where books[i].origin == "local" {
+            let old = books[i].bookUrl
+            guard let name = URL(string: old)?.lastPathComponent else { throw LocalFileError.invalidName }
+            let new = try files.checked("LocalBooks/" + name).absoluteString
+            books[i].bookUrl = new
+            if books[i].tocUrl == old { books[i].tocUrl = new }
+            if let rows = chapters.removeValue(forKey: old) {
+                chapters[new] = rows.map { row in
+                    var row = row
+                    row.bookUrl = new
+                    if row.baseUrl == old { row.baseUrl = new }
+                    return row
+                }
+            }
+        }
+        let paths = BackupFileChanges(root: directory)
+        func migratedURL(_ key: String) throws -> String {
+            guard let url = URL(string: key), LocalBookService.supports(url), backup.shelf.localFiles[url.lastPathComponent] != nil else { return key }
+            return try paths.checked("LocalBooks/" + url.lastPathComponent).absoluteString
+        }
+        var progress: [String: BookProgress] = [:]
+        for (key, value) in backup.migration?.pendingProgress ?? [:] { progress[try migratedURL(key)] = value }
+        let progressData = progress.isEmpty ? nil : try encoder.encode(progress)
+        do {
+            try transaction {
+                try Self.execute(handle, "DELETE FROM books; DELETE FROM book_sources; DELETE FROM rssArticles; DELETE FROM rssFeedPages; DELETE FROM searchBooks")
+                try writeBooks(books)
+                for (url, rows) in chapters { try writeChapters(rows, bookURL: url) }
+                try replaceBookSources(backup.bookSources)
+                try replaceBookGroups(backup.shelf.groups)
+                try replaceBookmarks(backup.bookmarks)
+                try replaceReadRecords(backup.readingHistory)
+                try replaceRssSources(backup.websiteSources)
+                if let migration = backup.migration {
+                    try replaceServers(migration.servers)
+                }
+                try replaceRssStars(backup.websiteFavorites)
+                try clearRssReadRecords()
+                try appendRssReadRecords(backup.websiteHistory)
+                try replaceHttpTTS(backup.speechEngines)
+                try replaceKeyboardAssists(backup.keyboardAssists)
+                try replaceRuleSubs(backup.subscriptions)
+                try replaceTxtTocRules(backup.tocRules ?? [])
+                if backup.tocRules == nil { try Self.execute(handle, "DELETE FROM legacy_imports WHERE key = 'txtTocRules.defaults'") }
+                try deleteAllSearchKeywords()
+                let keyword = try prepare("INSERT INTO search_keywords(word, usage, last_use_time) VALUES(?, ?, ?)")
+                defer { sqlite3_finalize(keyword) }
+                for item in backup.searchHistory {
+                    sqlite3_reset(keyword)
+                    try bind(item.word, to: keyword, at: 1)
+                    sqlite3_bind_int64(keyword, 2, Int64(item.usage))
+                    sqlite3_bind_int64(keyword, 3, item.lastUseTime)
+                    try stepDone(keyword)
+                }
+                try Self.execute(handle, "DELETE FROM caches WHERE key GLOB 'sourceVariable_*' OR (key GLOB 'v_*' AND key NOT GLOB '*_loginInfo')")
+                for item in backup.sourceVariables {
+                    try putCache(item)
+                }
+                for (name, data) in backup.shelf.localFiles { try files.write(data, to: "LocalBooks/" + name) }
+                for (name, data) in backup.fonts { try files.write(data, to: "fonts/" + name) }
+                try files.write(backup.background, to: "reader-background.jpg")
+                let previousVariables = try files.websiteVariables()
+                for key in Set(previousVariables.keys).union(backup.websiteVariables.keys)
+                    where previousVariables[key] != backup.websiteVariables[key] {
+                    let data = try backup.websiteVariables[key].map { try encoder.encode($0) }
+                    try files.write(data, to: "ruleData/rss/" + key)
+                }
+                try files.write(rulesData, to: "replace-rules.json")
+                try Self.execute(handle, "INSERT OR IGNORE INTO legacy_imports(key) VALUES('libraryBackup.restored'), ('chapters')")
+            }
+        } catch {
+            lastDirectory = nil
+            try files.rollback()
+            throw error
+        }
+        lastDirectory = nil
+        if directory.standardizedFileURL == Self.defaultURL().deletingLastPathComponent().standardizedFileURL {
+            BookSourceRuntimeStore.shared.reloadPersistentValues()
+        }
+        defaults.set(settingsData, forKey: ApplicationSettingsStore.key)
+        BackupPreferences.apply(backup.preferences, to: defaults)
+        defaults.set(progressData, forKey: "pendingBookReadingProgress")
+        defaults.removeObject(forKey: "bookSearchHistory")
     }
 
     public func compact() throws {
@@ -319,7 +469,8 @@ public actor LegadoDatabase {
     public func deleteAllSearchKeywords() throws { try Self.execute(handle, "DELETE FROM search_keywords") }
 
     public func importLegacySearchKeywords(_ words: [String]) throws {
-        guard try count("search_keywords") == 0, !words.isEmpty else { return }
+        guard !words.isEmpty, try count("search_keywords") == 0,
+              try Self.scalarInt32(handle, "SELECT COUNT(*) FROM legacy_imports WHERE key = 'libraryBackup.restored'") == 0 else { return }
         let now: Int64 = 0
         try transaction {
             let statement = try prepare(
@@ -574,6 +725,12 @@ public actor LegadoDatabase {
         try load("SELECT payload FROM rssSources ORDER BY custom_order", as: RssSource.self)
     }
 
+    public func mergeImportedRssSources(_ incoming: [RssSource]) throws -> [RssSource] {
+        let merged = try RSSSourceImporter().merge(incoming, into: loadRssSources())
+        try replaceRssSources(merged)
+        return try loadRssSources()
+    }
+
     public func replaceRssSources(_ values: [RssSource]) throws {
         try replaceAll(
             deleteSQL: "DELETE FROM rssSources",
@@ -643,11 +800,50 @@ public actor LegadoDatabase {
         return try decodeFirst(statement, as: RssArticle.self)
     }
 
+    public func cachedRssFeed(origin: String, sort: String) throws -> (articles: [RssArticle], page: Int?, nextURL: String?)? {
+        let values = try loadRssArticles(origin: origin, sort: sort)
+        let statement = try prepare("SELECT page, next_url FROM rssFeedPages WHERE origin = ? AND sort = ?")
+        defer { sqlite3_finalize(statement) }
+        try bind(origin, to: statement, at: 1)
+        try bind(sort, to: statement, at: 2)
+        switch sqlite3_step(statement) {
+        case SQLITE_ROW:
+            return (values, Int(sqlite3_column_int64(statement, 0)), sqlite3_column_text(statement, 1).map { String(cString: $0) })
+        case SQLITE_DONE:
+            // Older installs already have the articles but have no saved pagination cursor.
+            return values.isEmpty ? nil : (values, nil, nil)
+        default: throw databaseError(.execute)
+        }
+    }
+
+    public func saveRssFeedPage(_ values: [RssArticle], origin: String, sort: String, page: Int, nextURL: String?, replaceFeed: Bool) throws -> [RssArticle] {
+        try transaction {
+            if replaceFeed {
+                try deleteRssFeedArticles(origin: origin, sort: sort)
+            }
+            try insertRssArticles(values, conflict: page == 1 ? "REPLACE" : "IGNORE")
+            let cursor = try prepare("INSERT OR REPLACE INTO rssFeedPages(origin, sort, page, next_url) VALUES(?, ?, ?, ?)")
+            defer { sqlite3_finalize(cursor) }
+            try bind(origin, to: cursor, at: 1)
+            try bind(sort, to: cursor, at: 2)
+            sqlite3_bind_int64(cursor, 3, Int64(page))
+            if let nextURL { try bind(nextURL, to: cursor, at: 4) }
+            try stepDone(cursor)
+        }
+        return try loadRssArticles(origin: origin, sort: sort)
+    }
+
+    private func deleteRssFeedArticles(origin: String, sort: String) throws {
+        let delete = try prepare("DELETE FROM rssArticles WHERE origin = ? AND sort = ?")
+        defer { sqlite3_finalize(delete) }
+        try bind(origin, to: delete, at: 1)
+        try bind(sort, to: delete, at: 2)
+        try stepDone(delete)
+    }
+
     public func replaceRssArticles(_ values: [RssArticle], origin: String, sort: String) throws {
         try transaction {
-            let delete = try prepare("DELETE FROM rssArticles WHERE origin = ? AND sort = ?")
-            defer { sqlite3_finalize(delete) }
-            try bind(origin, to: delete, at: 1); try bind(sort, to: delete, at: 2); try stepDone(delete)
+            try deleteRssFeedArticles(origin: origin, sort: sort)
             try insertRssArticles(values, conflict: "REPLACE")
         }
     }
@@ -680,6 +876,8 @@ public actor LegadoDatabase {
         var values = try decodeRows(statement, as: RssArticle.self)
         values.indices.forEach { values[$0].origin = origin }
         try transaction {
+            // A changed origin may have different next-page URLs.
+            try executeBound("DELETE FROM rssFeedPages WHERE origin = ?", text: oldOrigin)
             let update = try prepare("UPDATE rssArticles SET origin = ?, payload = ? WHERE origin = ? AND link = ? AND sort = ?")
             defer { sqlite3_finalize(update) }
             for value in values {
@@ -699,6 +897,7 @@ public actor LegadoDatabase {
     }
 
     public func removeRssArticles(origin: String) throws {
+        try executeBound("DELETE FROM rssFeedPages WHERE origin = ?", text: origin)
         try executeBound("DELETE FROM rssArticles WHERE origin = ?", text: origin)
     }
 
@@ -830,6 +1029,7 @@ public actor LegadoDatabase {
         bookmarksURL: URL? = nil,
         readRecordsURL: URL? = nil
     ) throws {
+        if try Self.scalarInt32(handle, "SELECT COUNT(*) FROM legacy_imports WHERE key = 'libraryBackup.restored'") > 0 { return }
         if let bookSourcesURL, try count("book_sources") == 0,
            FileManager.default.fileExists(atPath: bookSourcesURL.path) {
             try replaceBookSources(decoder.decode([BookSource].self, from: Data(contentsOf: bookSourcesURL)))
@@ -1132,6 +1332,15 @@ public actor LegadoDatabase {
                 throw error
             }
         }
+        if version < 9 {
+            try execute(database, """
+                BEGIN IMMEDIATE;
+                CREATE TABLE rssFeedPages(origin TEXT NOT NULL, sort TEXT NOT NULL, page INTEGER NOT NULL,
+                    next_url TEXT, PRIMARY KEY(origin, sort));
+                PRAGMA user_version = 9;
+                COMMIT;
+                """)
+        }
     }
 
     private func legacyChaptersImported() -> Bool {
@@ -1193,6 +1402,8 @@ public actor LegadoDatabase {
     }
 
     private func transaction(_ operation: () throws -> Void) throws {
+        // The outer restore transaction owns commit and rollback for all repositories.
+        if sqlite3_get_autocommit(handle) == 0 { return try operation() }
         try Self.execute(handle, "BEGIN IMMEDIATE")
         do {
             try operation()

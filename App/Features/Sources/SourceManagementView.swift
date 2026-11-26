@@ -82,13 +82,7 @@ struct SourceManagementView: View {
             } else {
                 List {
                     Section {
-                        Picker("分组", selection: $selectedGroup) {
-                            Text("全部").tag(String?.none)
-                            Text("未分组").tag(String?.some(""))
-                            ForEach(library.groups, id: \.self) { group in
-                                Text(group).tag(String?.some(group))
-                            }
-                        }
+                        SourceGroupPicker(groups: library.groups, selection: $selectedGroup)
                     }
                     Section {
                         ForEach(filteredSources) { source in
@@ -362,35 +356,8 @@ private struct SourceRow: View {
     let onEnabledChanged: @MainActor @Sendable (Bool) -> Void
 
     var body: some View {
-        HStack(spacing: 12) {
-            Image(systemName: source.enabled ? "network" : "network.slash")
-                .font(.system(size: 20))
-                .frame(width: 28)
-                .foregroundStyle(.secondary)
-                .accessibilityHidden(true)
-            VStack(alignment: .leading, spacing: 4) {
-                Text(source.bookSourceName)
-                    .font(.body)
-                    .foregroundStyle(source.enabled ? Color.primary : .secondary)
-                Text(source.groups.isEmpty ? (URL(string: source.bookSourceUrl)?.host ?? source.bookSourceUrl) : source.groups.joined(separator: " · "))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-            }
-            Spacer()
-            if showsToggle {
-                Toggle("启用", isOn: Binding(
-                    get: { source.enabled },
-                    set: { enabled in
-                        Task { @MainActor in onEnabledChanged(enabled) }
-                    }
-                ))
-                .labelsHidden()
-                .tint(.green)
-                .accessibilityLabel("启用\(source.bookSourceName)")
-            }
-        }
-        .padding(.vertical, 5)
+        SourceManagementRow(name: source.bookSourceName, url: source.bookSourceUrl, groups: source.groups,
+                            enabled: source.enabled, showsToggle: showsToggle, onEnabledChanged: onEnabledChanged)
     }
 }
 
@@ -616,6 +583,51 @@ private struct SourceDetailView: View {
         }
         .sheet(isPresented: $showsEditor) {
             SourceEditorView(source: current) { editedSourceID = $0.id }.environmentObject(library)
+        }
+    }
+}
+
+struct DetectedRuleImportView: View {
+    let rules: SourceLibraryModel.DetectedRules
+    @EnvironmentObject private var library: SourceLibraryModel
+    @EnvironmentObject private var websites: RSSLibraryModel
+    @EnvironmentObject private var replacements: ReplaceRuleLibraryModel
+    @State private var saving = false
+    @State private var failure: String?
+
+    var body: some View {
+        ReadingNavigationStack {
+            List {
+                Section("共 \(rules.names.count) 项") {
+                    ForEach(Array(rules.names.enumerated()), id: \.offset) { _, name in Text(name) }
+                }
+                if let failure { Text(failure).foregroundStyle(.red) }
+            }
+            .navigationTitle("导入" + rules.title)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("取消") { library.cancelPendingImport() }.disabled(saving)
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("导入") {
+                        saving = true
+                        Task {
+                            defer { saving = false }
+                            do {
+                                switch rules {
+                                case .websites(let sources): try await websites.importSources(sources)
+                                case .replacements(let items): try await replacements.importRules(items)
+                                case .contents(let items): try await TxtTocRuleManagementModel().importRules(items)
+                                }
+                                library.notice = .init(kind: .success, title: rules.title + "已导入", detail: "已处理 \(rules.names.count) 项。")
+                                library.cancelPendingImport()
+                            } catch { failure = error.localizedDescription }
+                        }
+                    }.disabled(saving)
+                }
+            }
+            .interactiveDismissDisabled(saving)
         }
     }
 }

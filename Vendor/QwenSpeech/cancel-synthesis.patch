@@ -1,0 +1,36 @@
+--- a/src/qwen3_tts.cpp
++++ b/src/qwen3_tts.cpp
+@@ -661,6 +661,7 @@
+ } // namespace
+ 
+ struct qwen3_tts_context {
++    bool (*should_cancel)() = nullptr;
+     qwen3_tts_context_params params{};
+     int n_threads = 4;
+ 
+@@ -7759,6 +7760,10 @@
+     return true;
+ }
+ 
++extern "C" void legado_qwen_set_cancel_check(qwen3_tts_context* ctx, bool (*check)()) {
++    ctx->should_cancel = check;
++}
++
+ extern "C" int32_t* qwen3_tts_synthesize_codes(struct qwen3_tts_context* ctx, const char* text, int* out_n_codes) {
+     if (out_n_codes) {
+         *out_n_codes = 0;
+@@ -7768,8 +7773,12 @@
+     }
+     std::vector<int32_t> all_codes;
+     int frames = 0;
+-    // No-op per-frame hook: collect the whole clip, then return the codes.
+-    if (!qwen3_tts_generate_codes_ar(ctx, text, all_codes, &frames, [](int) { return true; })) {
++    bool cancelled = false;
++    auto keep_frame = [&](int) {
++        cancelled = ctx->should_cancel && ctx->should_cancel();
++        return !cancelled;
++    };
++    if (!qwen3_tts_generate_codes_ar(ctx, text, all_codes, &frames, keep_frame) || cancelled) {
+         return nullptr;
+     }
+     if (out_n_codes) {

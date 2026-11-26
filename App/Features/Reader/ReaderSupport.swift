@@ -368,112 +368,159 @@ struct ReaderTableOfContents: View {
     let onSelect: (Int) -> Void
     @Environment(\.dismiss) private var dismiss
     @State private var search = ""
+    @State private var showsSearch = false
+    @FocusState private var searchFocused: Bool
 
     var body: some View {
         ReadingNavigationStack {
             ScrollViewReader { proxy in
                 let rows = directory.rows(matching: search, descending: descending, simplified: simplifiedChinese)
                 List {
-                    Section {
-                        ForEach(rows) { row in
-                            chapterRow(row).id(row.id)
-                        }
-                    } header: {
-                        HStack {
-                            Text(bookTitle).lineLimit(1)
-                            Spacer()
-                            Text("共 \(directory.readableIndices.count) 章")
-                        }
-                        .textCase(nil)
+                    ForEach(rows) { row in
+                        chapterRow(row).id(row.id)
                     }
                 }
                 .listStyle(.plain)
-                .safeAreaInset(edge: .top, spacing: 0) {
-                    if sourceID != nil, let progress = batchCache.progress[bookURL] {
-                        HStack {
-                            Text(progress.title)
-                            Text("\(progress.processed)/\(progress.total)").monospacedDigit()
-                            Spacer()
-                            if progress.isActive {
-                                Button("停止缓存") { batchCache.cancel(bookURL: bookURL) }
-                            }
-                        }
-                        .font(.footnote)
-                        .padding(.horizontal)
-                        .padding(.vertical, 8)
-                        .background(.bar)
-                    }
-                }
+                .id(descending)
                 .overlay {
                     if rows.isEmpty && !search.isEmpty { ReadingUnavailableView.search(text: search) }
                 }
-                .onAppear {
-                    if !descending { DispatchQueue.main.async { proxy.scrollTo(currentIndex, anchor: .center) } }
-                }
-                .onChange(of: descending) { _ in
-                    if let first = rows.first { proxy.scrollTo(first.id, anchor: .top) }
+                .safeAreaInset(edge: .top, spacing: 0) {
+                    VStack(spacing: 0) {
+                        if showsSearch { searchBar } else { directoryHeader }
+                        if sourceID != nil, let progress = batchCache.progress[bookURL] {
+                            HStack {
+                                Text(progress.title)
+                                Text("\(progress.processed)/\(progress.total)").monospacedDigit()
+                                Spacer()
+                                if progress.isActive {
+                                    Button("停止缓存") { batchCache.cancel(bookURL: bookURL) }
+                                }
+                            }
+                            .font(.footnote)
+                            .padding(.horizontal)
+                            .padding(.vertical, 8)
+                            .background(.bar)
+                        }
+                    }
                 }
                 .onChange(of: search) { query in
                     if query.isEmpty { proxy.scrollTo(currentIndex, anchor: .center) }
                 }
                 .toolbar {
-                    ToolbarItem(placement: .cancellationAction) { Button("关闭") { dismiss() } }
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button { dismiss() } label: { Label("关闭", systemImage: "xmark") }
+                    }
                     ToolbarItemGroup(placement: .topBarTrailing) {
-                        if sourceID != nil {
-                            Button(action: onCache) { Image(systemName: "arrow.down.circle") }
-                                .disabled(directory.readableIndices.isEmpty || batchCache.progress[bookURL]?.isActive == true)
-                                .accessibilityLabel("缓存全书章节")
-                                .accessibilityIdentifier("reader.toc.cache")
+                        if !showsSearch {
+                            Button { showsSearch = true } label: { Label("搜索章节", systemImage: "magnifyingglass") }
                         }
                         Button {
                             if search.isEmpty { proxy.scrollTo(currentIndex, anchor: .center) }
-                            else { search = "" }
+                            closeSearch()
                         } label: { Image(systemName: "scope") }
                         .accessibilityLabel("定位当前章节")
-                        Button(descending ? "正序" : "倒序") { descending.toggle() }
                     }
+                }
+                .onAppear {
+                    if !descending { DispatchQueue.main.async { proxy.scrollTo(currentIndex, anchor: .center) } }
                 }
             }
             .navigationTitle("目录")
             .navigationBarTitleDisplayMode(.inline)
-            .searchable(text: $search, placement: .navigationBarDrawer(displayMode: .always), prompt: "搜索章节")
         }
+    }
+
+    private var searchBar: some View {
+        HStack(spacing: 10) {
+            HStack(spacing: 8) {
+                Image(systemName: "magnifyingglass").foregroundStyle(.secondary).accessibilityHidden(true)
+                TextField("搜索章节", text: $search)
+                    .focused($searchFocused)
+                    .textInputAutocapitalization(.never)
+                    .disableAutocorrection(true)
+                    .submitLabel(.search)
+                if !search.isEmpty {
+                    Button { search = "" } label: { Image(systemName: "xmark.circle.fill") }
+                        .foregroundStyle(.secondary)
+                        .accessibilityLabel("清除搜索")
+                }
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 7)
+            .background(ReadingTheme.groupedCanvas, in: RoundedRectangle(cornerRadius: 9))
+            Button("取消", action: closeSearch)
+                .frame(minHeight: 44)
+        }
+        .padding(.horizontal, 16)
+        .background(ReadingTheme.surface)
+        .onAppear { searchFocused = true }
+    }
+
+    private func closeSearch() {
+        searchFocused = false
+        search = ""
+        showsSearch = false
+    }
+
+    private var directoryHeader: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text(bookTitle)
+                .font(.title3.bold())
+                .fixedSize(horizontal: false, vertical: true)
+                .accessibilityAddTraits(.isHeader)
+            HStack(spacing: 16) {
+                Text("共 \(directory.readableIndices.count) 章")
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
+                Spacer(minLength: 0)
+                if sourceID != nil {
+                    Button(action: onCache) {
+                        Label("缓存", systemImage: "arrow.down.circle")
+                            .frame(minHeight: 44)
+                    }
+                    .disabled(directory.readableIndices.isEmpty || batchCache.progress[bookURL]?.isActive == true)
+                    .accessibilityLabel("缓存全书章节")
+                    .accessibilityIdentifier("reader.toc.cache")
+                }
+                Button { descending.toggle() } label: {
+                    Label(descending ? "正序" : "倒序", systemImage: "arrow.up.arrow.down")
+                        .frame(minHeight: 44)
+                }
+            }
+            .font(.footnote.weight(.medium))
+            .buttonStyle(.plain)
+        }
+        .padding(.top, 8)
+        .padding(.horizontal, 20)
+        .background(ReadingTheme.surface)
+        .overlay(alignment: .bottom) { Divider() }
     }
 
     @ViewBuilder private func chapterRow(_ row: ReaderChapterDirectory.Row) -> some View {
         if let number = row.number {
             let current = row.id == currentIndex
             Button { onSelect(row.id) } label: {
-                HStack(spacing: 12) {
-                    Text("\(number)")
-                        .font(.caption.monospacedDigit())
-                        .foregroundStyle(current ? ReadingTheme.accent : .secondary)
-                        .frame(minWidth: 28, alignment: .trailing)
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(row.title.readerText(simplified: simplifiedChinese)).lineLimit(2)
-                        if current {
-                            Text("正在阅读")
-                                .font(.caption)
-                                .foregroundStyle(ReadingTheme.accent)
-                        }
-                    }
-                    Spacer(minLength: 0)
+                HStack(alignment: .firstTextBaseline, spacing: 12) {
+                    ChapterDirectoryLabel(number: number, count: directory.readableIndices.count,
+                                          title: row.title.readerText(simplified: simplifiedChinese), isCurrent: current)
                     if let sourceID {
                         ChapterAvailabilityIcon(bookURL: bookURL, chapterURL: row.chapterURL, sourceID: sourceID, cache: cache)
                     }
                 }
-                .frame(minHeight: 40)
+                .padding(.vertical, 6)
+                .frame(minHeight: 44)
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .accessibilityAddTraits(current ? .isSelected : [])
             .accessibilityIdentifier("reader.toc.\(row.id)")
-            .listRowBackground(current ? ReadingTheme.accent.opacity(0.08) : Color.clear)
+            .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 0, trailing: 20))
+            .listRowSeparatorTint(ReadingTheme.separator.opacity(0.65))
         } else {
-            Label(row.title.readerText(simplified: simplifiedChinese), systemImage: "books.vertical")
-                .font(.headline)
-                .foregroundStyle(.secondary)
-                .padding(.vertical, 4)
+            ChapterVolumeLabel(title: row.title.readerText(simplified: simplifiedChinese))
+                .listRowInsets(EdgeInsets(top: 2, leading: 20, bottom: 2, trailing: 20))
+                .listRowSeparator(.hidden)
         }
     }
 }
@@ -488,7 +535,7 @@ struct ChapterAvailabilityIcon: View {
     var body: some View {
         ZStack {
             if isCached == false {
-                Image(systemName: "icloud")
+                Image(systemName: "arrow.down.circle.fill")
                     .font(.body)
                     .foregroundStyle(.secondary)
                     .accessibilityLabel("未下载")
@@ -506,8 +553,9 @@ struct ChapterAvailabilityIcon: View {
     }
 }
 
-struct ReaderChapterLoadingOverlay: View {
+struct ReaderLoadingOverlay: View {
     let title: String
+    var heading = "正在打开本章"
     @State private var showsIndicator = false
 
     var body: some View {
@@ -518,7 +566,7 @@ struct ReaderChapterLoadingOverlay: View {
                         .tint(.white)
                         .accessibilityHidden(true)
                     VStack(alignment: .leading, spacing: 5) {
-                        Text("正在打开本章").font(.headline)
+                        Text(heading).font(.headline)
                         Text(title)
                             .font(.subheadline)
                             .foregroundStyle(.white.opacity(0.85))

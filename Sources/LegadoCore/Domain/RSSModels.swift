@@ -104,8 +104,6 @@ public struct RssSource: Codable, Hashable, Identifiable, Sendable {
     public var displayNameGroup: String {
         groups.isEmpty ? sourceName : "\(sourceName) (\(sourceGroup ?? ""))"
     }
-    public static func == (lhs: Self, rhs: Self) -> Bool { lhs.sourceUrl == rhs.sourceUrl }
-    public func hash(into hasher: inout Hasher) { hasher.combine(sourceUrl) }
 
     public mutating func addGroups(_ value: String) {
         var merged = Set(groups)
