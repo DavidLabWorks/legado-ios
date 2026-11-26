@@ -36,20 +36,20 @@
       ],
       "versions": [
         {
-          "version": "0.0.3",
-          "buildVersion": "3",
-          "date": "2026-11-26T12:55:42Z",
-          "localizedDescription": "网站源文章列表右上角新增三点菜单，可编辑网站源或清空该源的文章缓存。列表为空时显示布偶猫插画，支持下拉重新加载。",
-          "downloadURL": "https://raw.githubusercontent.com/DavidLabWorks/legado-ios/06fc858d47eecacc556a6b464c95e26303b57f0f/release/MiaoYue-0.0.3-build3-unsigned.ipa",
-          "size": 35157547,
+          "version": "0.0.4",
+          "buildVersion": "4",
+          "date": "2026-11-26T13:42:28Z",
+          "localizedDescription": "阅读页选中文字后，可复制、过滤、查找或翻译。统一了两端的拖动标记，优化了首行菜单位置和跨行高亮，过滤整段文字后会自动收起空行。",
+          "downloadURL": "https://raw.githubusercontent.com/DavidLabWorks/legado-ios/c211a5ef5d0e4e41363586433b91896ad3ceaa32/release/MiaoYue-0.0.4-build4-unsigned.ipa",
+          "size": 35166314,
           "minOSVersion": "15.0"
         }
       ],
-      "version": "0.0.3",
-      "versionDate": "2026-11-26T12:55:42Z",
-      "versionDescription": "网站源文章列表右上角新增三点菜单，可编辑网站源或清空该源的文章缓存。列表为空时显示布偶猫插画，支持下拉重新加载。",
-      "downloadURL": "https://raw.githubusercontent.com/DavidLabWorks/legado-ios/06fc858d47eecacc556a6b464c95e26303b57f0f/release/MiaoYue-0.0.3-build3-unsigned.ipa",
-      "size": 35157547,
+      "version": "0.0.4",
+      "versionDate": "2026-11-26T13:42:28Z",
+      "versionDescription": "阅读页选中文字后，可复制、过滤、查找或翻译。统一了两端的拖动标记，优化了首行菜单位置和跨行高亮，过滤整段文字后会自动收起空行。",
+      "downloadURL": "https://raw.githubusercontent.com/DavidLabWorks/legado-ios/c211a5ef5d0e4e41363586433b91896ad3ceaa32/release/MiaoYue-0.0.4-build4-unsigned.ipa",
+      "size": 35166314,
       "appPermissions": {
         "entitlements": [],
         "privacy": {
