@@ -36,20 +36,20 @@
       ],
       "versions": [
         {
-          "version": "0.0.6",
-          "buildVersion": "6",
-          "date": "2026-11-26T16:49:19Z",
-          "localizedDescription": "文章视频支持悬浮半屏播放，正文保持原位。双击迷你播放器可回到半屏并保留播放进度。",
-          "downloadURL": "https://raw.githubusercontent.com/DavidLabWorks/legado-ios/a7eea4aa4479802df7a4b5bb58f6267972661922/release/MiaoYue-0.0.6-build6-unsigned.ipa",
-          "size": 28739395,
+          "version": "0.0.7",
+          "buildVersion": "7",
+          "date": "2026-11-26T17:43:09Z",
+          "localizedDescription": "阅读器半屏设置面板统一为日间白底、夜间深色底。「字体与间距」移入「外观」的「更多」，返回时面板平滑收回。",
+          "downloadURL": "https://raw.githubusercontent.com/DavidLabWorks/legado-ios/c550570550bbafe54f8725a8939622c456838917/release/MiaoYue-0.0.7-build7-unsigned.ipa",
+          "size": 29041521,
           "minOSVersion": "15.0"
         }
       ],
-      "version": "0.0.6",
-      "versionDate": "2026-11-26T16:49:19Z",
-      "versionDescription": "文章视频支持悬浮半屏播放，正文保持原位。双击迷你播放器可回到半屏并保留播放进度。",
-      "downloadURL": "https://raw.githubusercontent.com/DavidLabWorks/legado-ios/a7eea4aa4479802df7a4b5bb58f6267972661922/release/MiaoYue-0.0.6-build6-unsigned.ipa",
-      "size": 28739395,
+      "version": "0.0.7",
+      "versionDate": "2026-11-26T17:43:09Z",
+      "versionDescription": "阅读器半屏设置面板统一为日间白底、夜间深色底。「字体与间距」移入「外观」的「更多」，返回时面板平滑收回。",
+      "downloadURL": "https://raw.githubusercontent.com/DavidLabWorks/legado-ios/c550570550bbafe54f8725a8939622c456838917/release/MiaoYue-0.0.7-build7-unsigned.ipa",
+      "size": 29041521,
       "appPermissions": {
         "entitlements": [],
         "privacy": {
