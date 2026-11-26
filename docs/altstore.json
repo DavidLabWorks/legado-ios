@@ -36,20 +36,20 @@
       ],
       "versions": [
         {
-          "version": "0.0.1",
-          "buildVersion": "1",
-          "date": "2026-11-26T11:30:10Z",
-          "localizedDescription": "喵阅启用新包名。迁移时，先在旧版导出 JSON 备份，再用新版打开备份，恢复书架、本地图书、源和设置。",
-          "downloadURL": "https://raw.githubusercontent.com/DavidLabWorks/legado-ios/836beb4807596e8ba3aa2d3fa1690ea676ad160e/release/MiaoYue-0.0.1-build1-unsigned.ipa",
-          "size": 34652518,
+          "version": "0.0.2",
+          "buildVersion": "2",
+          "date": "2026-11-26T11:52:22Z",
+          "localizedDescription": "重新设计书架分组管理。默认排序下，新导入的本地文件排在书架首位并保留未读状态。书架布局简化为宫格和列表两种。",
+          "downloadURL": "https://raw.githubusercontent.com/DavidLabWorks/legado-ios/ba9a1bffe15e5ca6e6df5b2c5b693f9e1c5d0014/release/MiaoYue-0.0.2-build2-unsigned.ipa",
+          "size": 34661726,
           "minOSVersion": "15.0"
         }
       ],
-      "version": "0.0.1",
-      "versionDate": "2026-11-26T11:30:10Z",
-      "versionDescription": "喵阅启用新包名。迁移时，先在旧版导出 JSON 备份，再用新版打开备份，恢复书架、本地图书、源和设置。",
-      "downloadURL": "https://raw.githubusercontent.com/DavidLabWorks/legado-ios/836beb4807596e8ba3aa2d3fa1690ea676ad160e/release/MiaoYue-0.0.1-build1-unsigned.ipa",
-      "size": 34652518,
+      "version": "0.0.2",
+      "versionDate": "2026-11-26T11:52:22Z",
+      "versionDescription": "重新设计书架分组管理。默认排序下，新导入的本地文件排在书架首位并保留未读状态。书架布局简化为宫格和列表两种。",
+      "downloadURL": "https://raw.githubusercontent.com/DavidLabWorks/legado-ios/ba9a1bffe15e5ca6e6df5b2c5b693f9e1c5d0014/release/MiaoYue-0.0.2-build2-unsigned.ipa",
+      "size": 34661726,
       "appPermissions": {
         "entitlements": [],
         "privacy": {
