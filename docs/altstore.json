@@ -40,7 +40,7 @@
           "buildVersion": "1",
           "date": "2026-11-26T11:30:10Z",
           "localizedDescription": "喵阅启用新包名。迁移时，先在旧版导出 JSON 备份，再用新版打开备份，恢复书架、本地图书、源和设置。",
-          "downloadURL": "https://raw.githubusercontent.com/DavidLabWorks/legado-ios/main/release/MiaoYue-0.0.1-build1-unsigned.ipa",
+          "downloadURL": "https://raw.githubusercontent.com/DavidLabWorks/legado-ios/836beb4807596e8ba3aa2d3fa1690ea676ad160e/release/MiaoYue-0.0.1-build1-unsigned.ipa",
           "size": 34652518,
           "minOSVersion": "15.0"
         }
@@ -48,7 +48,7 @@
       "version": "0.0.1",
       "versionDate": "2026-11-26T11:30:10Z",
       "versionDescription": "喵阅启用新包名。迁移时，先在旧版导出 JSON 备份，再用新版打开备份，恢复书架、本地图书、源和设置。",
-      "downloadURL": "https://raw.githubusercontent.com/DavidLabWorks/legado-ios/main/release/MiaoYue-0.0.1-build1-unsigned.ipa",
+      "downloadURL": "https://raw.githubusercontent.com/DavidLabWorks/legado-ios/836beb4807596e8ba3aa2d3fa1690ea676ad160e/release/MiaoYue-0.0.1-build1-unsigned.ipa",
       "size": 34652518,
       "appPermissions": {
         "entitlements": [],
