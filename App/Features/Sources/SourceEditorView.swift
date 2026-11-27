@@ -1,5 +1,6 @@
 import SwiftUI
 import UIKit
+import UniformTypeIdentifiers
 
 struct SourceEditorView: View {
     @Environment(\.dismiss) private var dismiss
@@ -17,6 +18,7 @@ struct SourceEditorView: View {
     @State private var validation: [BookSourceIssue] = []
     @State private var debugSource: BookSource?
     @State private var isSaving = false
+    @State private var showsExport = false
     @State private var showsDiscard = false
     private let initialJSON: String
 
@@ -53,7 +55,7 @@ struct SourceEditorView: View {
                                 .readingChoiceButtonStyle(isSelected: sectionID == "options")
                         }.padding(.horizontal)
                     }.padding(.vertical, 6)
-                    Form {
+                    ReadingSheetForm {
                         if sectionID == "options" { options }
                         else {
                             if currentSection.id == "basic" {
@@ -93,6 +95,9 @@ struct SourceEditorView: View {
                         Button("校验配置", systemImage: "checkmark.shield") { check() }
                         Button("调试当前草稿", systemImage: "stethoscope") { perform { try synchronize(); debugSource = try document.source() } }
                         Button("复制 JSON", systemImage: "doc.on.doc") { perform { try synchronize(); UIPasteboard.general.string = try document.json() } }
+                        Button("导出书源", systemImage: "square.and.arrow.up") {
+                            perform { try synchronize(); showsExport = true }
+                        }
                         Button("粘贴 JSON", systemImage: "doc.on.clipboard") {
                             perform {
                                 guard let value = UIPasteboard.general.string else { return }
@@ -108,6 +113,10 @@ struct SourceEditorView: View {
                     Button("取消") { if isDirty { showsDiscard = true } else { dismiss() } }
                     ReadingSheetActionButton(isWorking: isSaving, action: save)
                 }
+            }
+            .fileExporter(isPresented: $showsExport, document: SourceExportDocument(sources: [document.fields]), contentType: .json,
+                          defaultFilename: sourceExportFilename(document.value(at: "bookSourceName")?.stringValue, fallback: "书源")) { result in
+                if case .failure(let error) = result { errorMessage = error.localizedDescription }
             }
             .readingNavigationDestination(isPresented: Binding(
                 get: { fullScreenField != nil },

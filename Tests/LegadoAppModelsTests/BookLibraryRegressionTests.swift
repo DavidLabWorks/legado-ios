@@ -7,6 +7,33 @@ import LegadoCore
 struct BookLibraryRegressionTests {
     private let source = BookSource(bookSourceUrl: "https://source.test", bookSourceName: "测试源")
 
+    @Test func unlockSharesTheInFlightShelfPreload() async {
+        let book = fixture().0
+        let repository = DelayedReloadBookRepository(books: [book], suspendOnLoad: 1)
+        let model = BookLibraryModel(repository: repository)
+        async let preload: Void = model.loadInitialShelf()
+        await repository.waitForReload()
+        async let unlock: Void = model.loadInitialShelf()
+        await repository.finishReload()
+        _ = await (preload, unlock)
+        await model.loadInitialShelf()
+        #expect(await repository.loads == 1)
+        #expect(model.books == [book])
+    }
+
+    @Test(arguments: [false, true])
+    func initialShelfBecomesReadyEvenWhenEmptyOrUnreadable(corrupt: Bool) async throws {
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: file) }
+        try Data((corrupt ? "invalid" : "[]").utf8).write(to: file)
+        let model = BookLibraryModel(repository: FileBookRepository(fileURL: file))
+        #expect(!model.hasLoadedShelf)
+        await model.load()
+        #expect(model.hasLoadedShelf)
+        #expect(model.books.isEmpty)
+        #expect((model.errorMessage != nil) == corrupt)
+    }
+
     @Test func savingGroupDraftRemovesOnlyDeletedMembershipsAndRejectsStaleDraft() async throws {
         let db = try LegadoDatabase(url: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString))
         let groups = SQLiteBookGroupRepository(database: db)
@@ -843,13 +870,17 @@ private actor FailingSourceSwitchRestoreRepository: BookChapterRepository {
 
 private actor DelayedReloadBookRepository: BookRepository {
     private var books: [Book]
-    private var loads = 0
+    private(set) var loads = 0
+    private let suspendOnLoad: Int
     private var pending: CheckedContinuation<Void, Never>?
-    init(books: [Book]) { self.books = books }
+    init(books: [Book], suspendOnLoad: Int = 2) {
+        self.books = books
+        self.suspendOnLoad = suspendOnLoad
+    }
     func load() async -> [Book] {
         loads += 1
         let snapshot = books
-        if loads == 2 { await withCheckedContinuation { pending = $0 } }
+        if loads == suspendOnLoad { await withCheckedContinuation { pending = $0 } }
         return snapshot
     }
     func save(_ books: [Book]) { self.books = books }

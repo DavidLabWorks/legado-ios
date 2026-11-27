@@ -2,49 +2,12 @@ import Foundation
 
 struct SpokenPassage {
     let text: String
+    // A shared slice of the paragraph also supports starting playback at a later marker.
+    let synthesisText: Substring
     let sentence: NSRange
     let position: Int
     let paragraph: Int
-
-    private static let numeral = try! NSRegularExpression(
-        pattern: #"([0-9０-９]+(?:,[0-9０-９]{3}(?![0-9０-９]))*)(?:[.．]([0-9０-９]+))?([%％年]?)"#
-    )
-    private static let chineseNumbers: NumberFormatter = {
-        let formatter = NumberFormatter()
-        formatter.locale = Locale(identifier: "zh_CN")
-        formatter.numberStyle = .spellOut
-        return formatter
-    }()
-
-    // ZipVoice skips digit strings during lexicon lookup. Keep all reader offsets in the source text.
-    static func zipVoiceText(for text: String) -> String {
-        let source = text as NSString
-        let matches = numeral.matches(in: text, range: NSRange(location: 0, length: source.length))
-        guard !matches.isEmpty else { return text }
-        let digits = Array("零一二三四五六七八九")
-        let result = NSMutableString(string: text)
-        for match in matches.reversed() {
-            let integer = source.substring(with: match.range(at: 1)).compactMap(\.wholeNumberValue)
-            let fraction = match.range(at: 2)
-            let suffix = source.substring(with: match.range(at: 3))
-            let isYear = suffix == "年" && fraction.location == NSNotFound && integer.count == 4
-            var words: String
-            // Preserve leading zeros and spell long digit sequences without rounding.
-            if !isYear, integer.first != 0, integer.count <= 15,
-               let cardinal = chineseNumbers.string(from: NSNumber(value: integer.reduce(Int64(0)) { $0 * 10 + Int64($1) })) {
-                words = cardinal.replacingOccurrences(of: "〇", with: "零")
-            } else {
-                words = String(integer.map { digits[$0] })
-            }
-            if fraction.location != NSNotFound {
-                words += "点" + String(source.substring(with: fraction).compactMap(\.wholeNumberValue).map { digits[$0] })
-            }
-            if suffix == "年" { words += suffix }
-            if suffix == "%" || suffix == "％" { words = "百分之" + words }
-            result.replaceCharacters(in: match.range, with: words)
-        }
-        return result as String
-    }
+    var isChapterTitle = false
 
     static func passages(in text: String, reading range: NSRange?) -> [Self] {
         let source = text as NSString
@@ -52,6 +15,9 @@ struct SpokenPassage {
         var result: [Self] = []
         var paragraph = 0
         text.enumerateSubstrings(in: text.startIndex..<text.endIndex, options: .byParagraphs) { _, paragraphRange, _, _ in
+            let selected = NSIntersectionRange(requested, NSRange(paragraphRange, in: text))
+            guard selected.length > 0 else { return }
+            let paragraphText = source.substring(with: selected)
             let countBeforeParagraph = result.count
             text.enumerateSubstrings(in: paragraphRange, options: .bySentences) { _, span, _, _ in
                 let raw = NSRange(span, in: text)
@@ -64,7 +30,7 @@ struct SpokenPassage {
                 var cursor = excerpt.startIndex
                 while cursor < excerpt.endIndex {
                     var end = excerpt.index(cursor, offsetBy: 72, limitedBy: excerpt.endIndex) ?? excerpt.endIndex
-                    // Split unusually long sentences at a clause boundary to limit cold-start time.
+                    // Keep playback positions within long sentences for page following and seeking.
                     if let limit = excerpt.index(cursor, offsetBy: 44, limitedBy: excerpt.endIndex), limit < excerpt.endIndex {
                         let middle = excerpt.index(cursor, offsetBy: 20)
                         if let split = excerpt[middle..<limit].firstIndex(where: { "，,；;：:、".contains($0) }) {
@@ -75,7 +41,11 @@ struct SpokenPassage {
                     }
                     let chunk = String(excerpt[cursor..<end])
                     if chunk.rangeOfCharacter(from: .alphanumerics) != nil {
-                        result.append(Self(text: chunk, sentence: sentence, position: overlap.location + cursor.utf16Offset(in: excerpt), paragraph: paragraph))
+                        let position = overlap.location + cursor.utf16Offset(in: excerpt)
+                        let offset = result.count == countBeforeParagraph ? 0 : position - selected.location
+                        let start = String.Index(utf16Offset: offset, in: paragraphText)
+                        result.append(Self(text: chunk, synthesisText: paragraphText[start...],
+                                           sentence: sentence, position: position, paragraph: paragraph))
                     }
                     cursor = end
                 }
@@ -85,18 +55,28 @@ struct SpokenPassage {
         return result
     }
 
-    // Send adjacent sentences from the same paragraph through one synthesis pass.
-    // A clipped page or an already split long sentence keeps its own playback marker.
-    static func groupEnd(in passages: [Self], from start: Int, characterLimit: Int) -> Int {
-        let first = passages[start]
+    static func chapterPassages(in text: String, reading range: NSRange?, title: String) -> [Self] {
+        let body = passages(in: text, reading: range)
+        let title = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let first = body.first, !title.isEmpty else { return body }
+
+        let source = text as NSString
+        let openingLine = source.paragraphRange(for: NSRange(location: first.position, length: 0))
+        if source.substring(with: openingLine).trimmingCharacters(in: .whitespacesAndNewlines) == title {
+            return body
+        }
+
+        // The announcement has no range in the book. Anchor it to the listening start.
+        let announcement = passages(in: title, reading: nil).map {
+            Self(text: $0.text, synthesisText: $0.synthesisText, sentence: NSRange(location: first.position, length: 0),
+                 position: first.position, paragraph: -1 - $0.paragraph, isChapterTitle: true)
+        }
+        return announcement + body
+    }
+
+    static func groupEnd(in passages: [Self], from start: Int) -> Int {
         var end = start + 1
-        var characters = first.text.count
-        guard first.text.utf16.count == first.sentence.length else { return end }
-        while end < passages.count && end - start < 4 {
-            let next = passages[end]
-            guard next.paragraph == first.paragraph, next.text.utf16.count == next.sentence.length,
-                  characters + next.text.count <= characterLimit else { break }
-            characters += next.text.count
+        while end < passages.count && passages[end].paragraph == passages[start].paragraph {
             end += 1
         }
         return end
@@ -107,15 +87,15 @@ struct SpokenPassage {
         in passages: [Self], from start: Int,
         synthesisPerCharacter: Double, playbackPerCharacter: Double, recovering: Bool
     ) -> TimeInterval {
-        guard start < passages.count else { return 0 }
-        var index = start
+        let limit = recovering ? 36.0 : 16.0
         var preparation = 0.0
         var playback = 0.0
-        let limit = recovering ? 36.0 : 16.0
-        var reserve = 6.0
+        guard start < passages.count else { return 0 }
+        var reserve = recovering ? 6.0 : 0.75
+        var index = start
         while index < passages.count && playback < 60 && reserve < limit {
-            let end = groupEnd(in: passages, from: index, characterLimit: 60)
-            let characters = Double(passages[index..<end].reduce(0) { $0 + $1.text.count })
+            let end = groupEnd(in: passages, from: index)
+            let characters = Double(passages[index].synthesisText.count)
             preparation += characters * synthesisPerCharacter
             reserve = max(reserve, preparation * 1.15 - playback)
             playback += characters * playbackPerCharacter
@@ -169,12 +149,12 @@ struct SpokenPassage {
         return result
     }
 
-    static func finishParagraph(_ audio: inout Data) {
+    static func paragraphPaddingFrames(in audio: Data) -> Int {
         // Top up existing trailing quiet to 400 ms; punctuation often supplies it already.
         let target = 9_600
         let quiet = audio.withUnsafeBytes { bytes in
             bytes.bindMemory(to: Float.self).suffix(target).reversed().prefix { abs($0) < 0.004 }.count
         }
-        audio.append(Data(count: (target - quiet) * MemoryLayout<Float>.size))
+        return target - quiet
     }
 }

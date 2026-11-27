@@ -18,6 +18,9 @@ class Fixture(http.server.BaseHTTPRequestHandler):
 
     def do_GET(self):
         parsed = urllib.parse.urlsplit(self.path)
+        if parsed.path == "/favicon.ico":
+            self.send_error(404)
+            return
         query = urllib.parse.parse_qs(parsed.query)
         key = query.get("key", [""])[0]
         page = query.get("page", ["1"])[0]
@@ -61,7 +64,8 @@ class Fixture(http.server.BaseHTTPRequestHandler):
                 time.sleep(2)
             cards = "".join(f'<div class="post grid"><h3><a href="/articles/{title}">{title}</a></h3></div>' for title in titles)
             more = f'<div class="pagination"><li class="next-page"><a href="{root}page/2/">下一頁</a></li></div>' if len(titles) > 1 else ""
-            body = f'<html><body><div id="posts">{cards}</div>{more}</body></html>'.encode()
+            headline = f'<a target="_blank" href="{root}page/2/?from=paper">打开新闻报道</a>' if len(titles) > 1 else ""
+            body = f'<html><body>{headline}<div id="posts">{cards}</div>{more}</body></html>'.encode()
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Cache-Control", "no-store")

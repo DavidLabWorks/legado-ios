@@ -43,7 +43,7 @@ struct ReplaceRuleEditorView: View {
                 if let readingBook {
                     filterSummary(book: readingBook)
                 } else {
-                    editor
+                    editor.readingSheetTitle("净化规则")
                 }
             }
             .alert("规则提示", isPresented: Binding(get: { errorMessage != nil }, set: { if !$0 { errorMessage = nil } })) {
@@ -70,7 +70,7 @@ struct ReplaceRuleEditorView: View {
             .pickerStyle(.segmented)
             .padding(.horizontal, 20)
             .padding(.vertical, 8)
-            Form {
+            ReadingSheetForm {
                 if mode == 0 {
                     configuration
                 } else {
@@ -78,8 +78,7 @@ struct ReplaceRuleEditorView: View {
                 }
             }
         }
-        .background(Color(uiColor: .systemGroupedBackground))
-        .readingSheetTitle(readingBook == nil ? "净化规则" : "更多设置")
+        .background(ReadingTheme.sheetBackground)
         .toolbar { editorActions(showCancel: readingBook == nil) }
     }
 
@@ -129,7 +128,7 @@ struct ReplaceRuleEditorView: View {
                         .frame(minHeight: 46)
                     Divider()
                     NavigationLink {
-                        editor
+                        editor.readingPageTitle("更多设置")
                     } label: {
                         summaryRow("更多设置", value: "名称、分组、测试")
                     }
@@ -147,7 +146,6 @@ struct ReplaceRuleEditorView: View {
             .padding(.top, 10)
             .padding(.bottom, 16)
         }
-        .readingSheetSurface()
         .readingSheetTitle("过滤文本")
         .toolbar { editorActions(showCancel: true) }
         .onAppear { expandedFilter = false }

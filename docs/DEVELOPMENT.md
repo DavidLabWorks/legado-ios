@@ -23,6 +23,18 @@
 | `App/Resources/` | 默认 TXT 目录规则、HTTP TTS 配置和第三方许可证 |
 | `scripts/` | 自检与源码导出 |
 
+## 页面与弹窗配色
+
+从首页推入的二级页面与首页共用 `ReadingTheme.canvas`，浅色和深色外观都遵循同一规则。普通内容卡片沿用「阅读统计」的配色，浅色用白卡配浅灰底，深色用炭灰卡配深底。自绘卡片复用 `ReadingCardBackground`，原生分组用 `ReadingTheme.surface` 作为行背景。原生列表需隐藏系统滚动背景，让列表边缘和底部留白露出页面底色。
+
+应用内弹窗和半屏面板共用一套配色。浅色外观下，标题栏、内容区和底部安全区使用白色，分组卡片使用浅灰色。深色外观下，这两层随系统外观切换，卡片比面板稍亮。选中、警告和删除等状态保留各自的提示色。
+
+- 弹窗标题使用 `readingSheetTitle`，它同时应用 `ReadingTheme.sheetBackground`。同一页面兼有导航和弹窗入口时，使用 `readingRouteHeader` 匹配打开方式。
+- 阅读器自绘面板跟随阅读外观，底板和卡片使用与系统弹窗相同的浮层颜色（`UIUserInterfaceLevel.elevated`）。
+- 分组列表使用 `ReadingSheetList`，输入表单使用 `ReadingSheetForm`。自定义卡片使用 `readingSheetGroup()`。需要保留特定形状或原生列表行行为时，直接使用 `ReadingTheme.sheetCard`。连续的普通列表行可用透明背景和分隔线。
+- 听书设置由入口指定配色。设置页传入 `ListeningSettingsPalette.settings`，阅读器弹窗传入 `.sheet` 和开始播放动作。两处复用声音选择、语速和定时设置。
+- 验收时分别打开浅色和深色外观，检查标题栏、列表边缘和底部留白的底色是否一致，并核对卡片和选中态是否清晰。
+
 ## 本章评论
 
 在书源编辑器的「评论」里填写当前章的评论地址和解析规则。下例适用于评论接口返回 `{"comments":[{"id":"c1","author":"读者","body":"留言"}],"next":"/comments?p=2"}` 的书源。
@@ -93,7 +105,7 @@ RSS 界面回归还验证正文的手动刷新确实重新请求网络。核心�
 
 ## 演示与公开截图
 
-模拟器启动参数 `-uiDemo` 使用演示书架；`-uiDemoReader` 打开演示阅读页，`-uiDemoTab settings` 打开「我的」，`-uiDemoAbout` 打开关于页。部分演示入口仍保留 `settings` 参数名以兼容测试脚本。
+模拟器启动参数 `-uiDemo` 使用演示书架；`-uiDemoReader` 打开演示阅读页，`-uiDemoTab settings` 打开「设置」，`-uiDemoAbout` 打开关于页。
 
 提交截图前确认没有真实账号、个人书架或第三方付费正文。公开截图放在 `docs/images/`；`artifacts/`、构建缓存和原始测试日志仅供本地验证，已加入忽略清单。
 

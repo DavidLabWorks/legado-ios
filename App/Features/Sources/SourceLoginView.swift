@@ -73,8 +73,9 @@ private struct SourceLoginWebView: UIViewRepresentable {
         configuration.websiteDataStore = .default()
         let webView = ReadingWebView(frame: .zero, configuration: configuration)
         webView.isOpaque = false
-        webView.backgroundColor = UIColor(ReadingTheme.canvas)
-        webView.scrollView.backgroundColor = UIColor(ReadingTheme.canvas)
+        let background = UIColor(context.environment.isReadingSheet ? ReadingTheme.sheetBackground : ReadingTheme.canvas)
+        webView.backgroundColor = background
+        webView.scrollView.backgroundColor = background
         webView.navigationDelegate = context.coordinator
         context.coordinator.installExistingCookies(in: webView) { webView.load(request) }
         return webView
@@ -508,9 +509,12 @@ struct BrowserBookPageView: View {
     init(url: URL, action: BrowserBookPageAction) {
         self.url = url
         self.action = action
-        let manual: Bool
-        if case .search(let page, _) = action { manual = page.manualVerification != nil } else { manual = false }
-        _browser = StateObject(wrappedValue: BrowserBookDocument(manualVerification: manual))
+        if case .search(let page, _) = action {
+            _browser = StateObject(wrappedValue: BrowserBookDocument(manualVerification: page.manualVerification != nil,
+                                                                     searchURL: page.url))
+        } else {
+            _browser = StateObject(wrappedValue: BrowserBookDocument(manualVerification: false))
+        }
     }
 
     private var searchPage: BrowserSearchPage? {
@@ -528,6 +532,7 @@ struct BrowserBookPageView: View {
                     : "如果网站要求验证，请在下方完成。看到书籍后，点“使用此页结果”。"
     }
     @State private var importing = false
+    @State private var searchImportError: String?
 
     var body: some View {
         ReadingNavigationStack {
@@ -542,8 +547,12 @@ struct BrowserBookPageView: View {
                             .buttonStyle(.bordered).padding(10)
                     }
                 } else {
-                    Button("使用此页结果") {
+                    Button(importing ? "正在导入…" : "使用此页结果") {
                         guard case .search(let page, let useResults) = action else { return }
+                        guard browser.ready else {
+                            searchImportError = browser.problem ?? "搜索结果页还没加载完成。请等书籍列表出现后再试。"
+                            return
+                        }
                         importing = true
                         Task { @MainActor in
                             defer { importing = false }
@@ -552,11 +561,13 @@ struct BrowserBookPageView: View {
                                     ? browser.bookLinks(at: url) : browser.verifiedResults(at: url)
                                 try await useResults(html)
                                 dismiss()
-                            } catch { message = error.localizedDescription }
+                            } catch {
+                                searchImportError = error.localizedDescription
+                            }
                         }
                     }
                     .buttonStyle(.borderedProminent)
-                    .disabled(!browser.ready || importing)
+                    .disabled(importing)
                     .padding(10)
                 }
             }
@@ -584,21 +595,26 @@ struct BrowserBookPageView: View {
             } catch { message = error.localizedDescription }
         }
         .interactiveDismissDisabled(importing)
+        .alert("未能导入搜索结果", isPresented: Binding(get: { searchImportError != nil }, set: { if !$0 { searchImportError = nil } })) {
+            Button("好") { searchImportError = nil }
+        } message: { Text(searchImportError ?? "") }
     }
 }
 
 @MainActor
-private final class BrowserBookDocument: NSObject, ObservableObject, WKNavigationDelegate {
+final class BrowserBookDocument: NSObject, ObservableObject, WKNavigationDelegate {
     let webView: WKWebView
     @Published var ready = false
     @Published var problem: String?
     @Published private(set) var documentID = UUID()
     private var status: Int?
+    private let searchURL: URL?
 
     // The two user-visible pages share their own in-memory browser session.
     private static let websiteDataStore = WKWebsiteDataStore.nonPersistent()
 
-    init(manualVerification: Bool) {
+    init(manualVerification: Bool, searchURL: URL? = nil) {
+        self.searchURL = searchURL
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = manualVerification ? .nonPersistent() : Self.websiteDataStore
         if manualVerification { configuration.defaultWebpagePreferences.preferredContentMode = .mobile }
@@ -616,7 +632,13 @@ private final class BrowserBookDocument: NSObject, ObservableObject, WKNavigatio
 
     func webView(_ webView: WKWebView, decidePolicyFor response: WKNavigationResponse,
                  decisionHandler: @escaping @MainActor @Sendable (WKNavigationResponsePolicy) -> Void) {
-        if response.isForMainFrame { status = (response.response as? HTTPURLResponse)?.statusCode }
+        if response.isForMainFrame {
+            status = (response.response as? HTTPURLResponse)?.statusCode
+            if let searchURL, response.response.url == searchURL, let status {
+                DiagnosticLog.shared.record(status >= 400 ? .error : .info, category: "网页搜索",
+                    message: "内置浏览器 · \(DiagnosticLog.safeURL(searchURL)) · HTTP \(status)")
+            }
+        }
         decisionHandler(.allow)
     }
 
@@ -631,7 +653,9 @@ private final class BrowserBookDocument: NSObject, ObservableObject, WKNavigatio
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation?) {
-        ready = status.map { (200..<300).contains($0) } ?? false
+        // A completed search navigation can have no main-frame response callback.
+        // Its visible results still go through the page and book-link checks.
+        ready = status.map { (200..<300).contains($0) } ?? (searchURL != nil && webView.url == searchURL)
         if !ready, let status { problem = "网站返回 HTTP \(status)。如有验证提示，请按网页提示操作。" }
     }
 
@@ -793,19 +817,22 @@ private final class BrowserBookDocument: NSObject, ObservableObject, WKNavigatio
 
     func bookLinks(at url: URL) async throws -> String {
         // Only copy visible book titles and links from the requested results page.
+        let document = documentID
         let script = #"""
         const target = new URL(expected);
         if (location.origin !== target.origin || decodeURI(location.pathname) !== decodeURI(target.pathname)
-            || location.search !== target.search) return "";
+            || location.search !== target.search) return null;
         const list = document.createElement("div");
-        for (const link of document.links) {
-            const u = new URL(link.href);
-            if (u.origin !== target.origin || u.username || u.password || !/^\/book\/\d+\.html$/.test(u.pathname)) continue;
+        for (const link of document.querySelectorAll("a[href]")) {
+            if (!(link instanceof HTMLAnchorElement) || link.origin !== target.origin || link.username || link.password
+                || !/^\/book\/\d+\.html$/.test(link.pathname)) continue;
             if (!link.getClientRects().length || getComputedStyle(link).visibility !== "visible") continue;
-            const title = link.innerText.trim();
+            const cover = Array.from(link.querySelectorAll("img[alt]")).find(img =>
+                img.getClientRects().length && getComputedStyle(img).visibility === "visible" && img.alt.trim());
+            const title = link.innerText.trim() || cover?.alt.trim() || link.title.trim();
             if (!title) continue;
             const a = document.createElement("a");
-            a.href = u.origin + u.pathname;
+            a.href = link.origin + link.pathname;
             a.textContent = title;
             list.append(a);
         }
@@ -813,8 +840,11 @@ private final class BrowserBookDocument: NSObject, ObservableObject, WKNavigatio
         """#
         guard ready, let html = try await webView.callAsyncJavaScript(script, arguments: ["expected": url.absoluteString],
                                                                       in: nil, contentWorld: .defaultClient) as? String,
-              !html.isEmpty else {
-            throw NSError(domain: "BrowserSearch", code: 2, userInfo: [NSLocalizedDescriptionKey: "请回到本次搜索结果页，确认网页已显示书籍。"])
+              documentID == document else {
+            throw NSError(domain: "BrowserSearch", code: 2, userInfo: [NSLocalizedDescriptionKey: "请点“重新打开”回到本次搜索结果页，再导入书籍。"])
+        }
+        guard !html.isEmpty else {
+            throw NSError(domain: "BrowserSearch", code: 3, userInfo: [NSLocalizedDescriptionKey: "当前网页里没有找到可导入的书籍链接。请确认网页上已显示搜索结果。"])
         }
         return html
     }

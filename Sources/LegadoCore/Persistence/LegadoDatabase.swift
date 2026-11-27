@@ -17,7 +17,7 @@ public enum LegadoDatabaseError: Error, LocalizedError, Sendable {
 }
 
 public actor LegadoDatabase {
-    public static let schemaVersion: Int32 = 9
+    public static let schemaVersion: Int32 = 10
 
     // SQLite is opened with FULLMUTEX and every operational access remains
     // actor-isolated. `nonisolated(unsafe)` only permits closing the handle
@@ -89,7 +89,7 @@ public actor LegadoDatabase {
         let tocRules = try loadTxtTocRules()
         let backup = try LibraryBackup(type: LibraryBackup.identifier, version: 2, createdAt: Date(),
             shelf: .init(books: books, groups: loadBookGroups(), chapters: Dictionary(grouping: grouped, by: \.bookUrl), localFiles: localFiles),
-            bookSources: loadBookSources(), websiteSources: loadRssSources(), bookmarks: loadBookmarks(),
+            bookSources: loadBookSources(), websiteSources: loadRssSources(), websiteSourceGroups: loadRssSourceGroups(), bookmarks: loadBookmarks(),
             readingHistory: loadReadRecords(), websiteFavorites: loadRssStars(), websiteHistory: loadRssReadRecords(),
             searchHistory: loadSearchKeywords(order: .lastUseTime), sourceVariables: backupSourceVariables(),
             websiteVariables: files.websiteVariables(), speechEngines: loadHttpTTS(), keyboardAssists: loadKeyboardAssists(),
@@ -155,7 +155,9 @@ public actor LegadoDatabase {
                 try replaceBookGroups(backup.shelf.groups)
                 try replaceBookmarks(backup.bookmarks)
                 try replaceReadRecords(backup.readingHistory)
-                try replaceRssSources(backup.websiteSources)
+                try writeRssSources(backup.websiteSources)
+                try Self.execute(handle, "DELETE FROM rssSourceGroups")
+                try rememberRssGroups(backup.websiteSourceGroups ?? [])
                 if let migration = backup.migration {
                     try replaceServers(migration.servers)
                 }
@@ -732,6 +734,123 @@ public actor LegadoDatabase {
         try load("SELECT payload FROM rssSources ORDER BY custom_order", as: RssSource.self)
     }
 
+    public func reorderRssSources(_ orderedIDs: [String]) throws -> [RssSource] {
+        var sources: [RssSource] = []
+        try transaction {
+            sources = try loadRssSources()
+            let members = Set(orderedIDs)
+            let slots = sources.indices.filter { members.contains(sources[$0].id) }
+            guard slots.count == orderedIDs.count, members.count == orderedIDs.count else {
+                throw LegadoDatabaseError.execute("网站列表已变化，请重新排序")
+            }
+            let byID = Dictionary(uniqueKeysWithValues: slots.map { (sources[$0].id, sources[$0]) })
+            for (slot, id) in zip(slots, orderedIDs) {
+                if let source = byID[id] { sources[slot] = source }
+            }
+            for index in sources.indices { sources[index].customOrder = index }
+            try writeRssSources(sources)
+        }
+        return sources
+    }
+
+    public func loadRssSourceGroups() throws -> [String] {
+        let statement = try prepare("""
+            SELECT name FROM rssSourceGroups
+            UNION SELECT source_group FROM rssSources WHERE source_group IS NOT NULL
+            """)
+        defer { sqlite3_finalize(statement) }
+        var names = Set<String>()
+        while true {
+            switch sqlite3_step(statement) {
+            case SQLITE_ROW: names.formUnion(BookSource.parseGroups(columnString(statement, at: 0)))
+            case SQLITE_DONE: return names.sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+            default: throw databaseError(.execute)
+            }
+        }
+    }
+
+    private func rememberRssGroups(_ names: [String]) throws {
+        for name in names {
+            try executeBound("INSERT OR IGNORE INTO rssSourceGroups(name) VALUES(?)", text: name)
+        }
+    }
+
+    public func changeRssSourceGroup(from old: String?, to new: String?) throws {
+        try transaction {
+            let groups = try loadRssSourceGroups()
+            if let old, !groups.contains(old) { throw LegadoDatabaseError.execute("分组已不存在") }
+            if let new {
+                guard BookSource.parseGroups(new) == [new], !groups.contains(new) else {
+                    throw LegadoDatabaseError.execute("请输入有效且未使用的分组名称")
+                }
+                try rememberRssGroups([new])
+            }
+            if let old {
+                let members = try loadRssSources().filter { $0.groups.contains(old) }
+                try updateRssMemberships(of: members) { source in
+                    BookSource.joinGroups(source.groups.compactMap { $0 == old ? new : $0 })
+                }
+                try executeBound("DELETE FROM rssSourceGroups WHERE name = ?", text: old)
+            }
+        }
+    }
+
+    public func moveRssSources(_ ids: Set<String>, toGroup group: String?) throws {
+        guard !ids.isEmpty else { return }
+        if let group, BookSource.parseGroups(group) != [group] {
+            throw LegadoDatabaseError.execute("分组名称无效")
+        }
+        try transaction {
+            let selected = try loadRssSources().filter { ids.contains($0.id) }
+            guard selected.count == ids.count else { throw LegadoDatabaseError.execute("所选网站源已发生变化，请重新选择") }
+            try rememberRssGroups(Array(Set(selected.flatMap(\.groups))))
+            try updateRssMemberships(of: selected) { _ in group }
+        }
+    }
+
+    private func updateRssMemberships(of sources: [RssSource], groupValue: (RssSource) -> String?) throws {
+        let update = try prepare("UPDATE rssSources SET source_group = ?, payload = ? WHERE source_url = ?")
+        defer { sqlite3_finalize(update) }
+        let editTime = Int64(Date().timeIntervalSince1970 * 1_000)
+        for var source in sources {
+            let group = groupValue(source)
+            guard source.sourceGroup != group else { continue }
+            source.sourceGroup = group
+            source.lastUpdateTime = editTime
+            sqlite3_reset(update)
+            if let group { try bind(group, to: update, at: 1) }
+            else { sqlite3_bind_null(update, 1) }
+            try bind(encoder.encode(source), to: update, at: 2)
+            try bind(source.sourceUrl, to: update, at: 3)
+            try stepDone(update)
+        }
+    }
+
+    public func deleteRssSourceGroupAndMembers(_ group: String) throws -> Set<String> {
+        try deleteRssSourceGroups([group], includingSources: true)
+    }
+
+    public func deleteRssSourceGroups(_ groups: Set<String>, includingSources: Bool) throws -> Set<String> {
+        guard !groups.isEmpty else { return [] }
+        var removed = Set<String>()
+        try transaction {
+            let members = try loadRssSources().filter { !groups.isDisjoint(with: $0.groups) }
+            if includingSources {
+                removed = Set(members.map(\.id))
+                try removeRssSources(sourceURLs: removed)
+            } else {
+                try updateRssMemberships(of: members) { source in
+                    BookSource.joinGroups(source.groups.filter { !groups.contains($0) })
+                }
+            }
+            // Source removal preserves group names, so delete the selected groups last.
+            for group in groups {
+                try executeBound("DELETE FROM rssSourceGroups WHERE name = ?", text: group)
+            }
+        }
+        return removed
+    }
+
     public func mergeImportedRssSources(_ incoming: [RssSource]) throws -> [RssSource] {
         let merged = try RSSSourceImporter().merge(incoming, into: loadRssSources())
         try replaceRssSources(merged)
@@ -739,6 +858,14 @@ public actor LegadoDatabase {
     }
 
     public func replaceRssSources(_ values: [RssSource]) throws {
+        try transaction {
+            // Keep a group selectable when its last source moves out of it.
+            try rememberRssGroups(loadRssSourceGroups())
+            try writeRssSources(values)
+        }
+    }
+
+    private func writeRssSources(_ values: [RssSource]) throws {
         try replaceAll(
             deleteSQL: "DELETE FROM rssSources",
             insertSQL: "INSERT INTO rssSources(source_url, source_name, source_group, source_comment, enabled, custom_order, login_url, payload) VALUES(?, ?, ?, ?, ?, ?, ?, ?)",
@@ -771,8 +898,16 @@ public actor LegadoDatabase {
         }
     }
 
+    public func removeRssSources(sourceURLs: Set<String>) throws {
+        try transaction {
+            for url in sourceURLs { try removeRssSource(sourceURL: url) }
+        }
+    }
+
     public func removeRssSource(sourceURL: String) throws {
         try transaction {
+            let source = try load("SELECT payload FROM rssSources WHERE source_url = ?", as: RssSource.self, bindings: [sourceURL]).first
+            try rememberRssGroups(source?.groups ?? [])
             try executeBound("DELETE FROM rssSources WHERE source_url = ?", text: sourceURL)
             try removeRssArticles(origin: sourceURL)
             try deleteSourceVariables(sourceURL)
@@ -1349,6 +1484,14 @@ public actor LegadoDatabase {
                 CREATE TABLE rssFeedPages(origin TEXT NOT NULL, sort TEXT NOT NULL, page INTEGER NOT NULL,
                     next_url TEXT, PRIMARY KEY(origin, sort));
                 PRAGMA user_version = 9;
+                COMMIT;
+                """)
+        }
+        if version < 10 {
+            try execute(database, """
+                BEGIN IMMEDIATE;
+                CREATE TABLE rssSourceGroups(name TEXT PRIMARY KEY NOT NULL);
+                PRAGMA user_version = 10;
                 COMMIT;
                 """)
         }

@@ -261,20 +261,6 @@ private final class ReaderSelectionTextView: ReaderLayoutTextView {
         var result: [UITextSelectionRect] = []
         let manager = layoutManager
         let glyphs = manager.glyphRange(forCharacterRange: characters, actualCharacterRange: nil)
-        func fontBand(at glyph: Int) -> CGRect {
-            var lineGlyphs = NSRange()
-            let used = manager.lineFragmentUsedRect(forGlyphAt: glyph, effectiveRange: &lineGlyphs)
-            let first = lineGlyphs.location
-            let character = manager.characterIndexForGlyph(at: first)
-            guard let font = textStorage.attribute(.font, at: character, effectiveRange: nil) as? UIFont else {
-                return used.offsetBy(dx: textContainerInset.left, dy: textContainerInset.top)
-            }
-            let baseline = manager.lineFragmentRect(forGlyphAt: first, effectiveRange: nil).minY
-                + manager.location(forGlyphAt: first).y + textContainerInset.top
-            return CGRect(x: used.minX + textContainerInset.left, y: baseline - font.ascender,
-                          width: used.width, height: font.ascender - font.descender)
-        }
-
         manager.enumerateLineFragments(forGlyphRange: glyphs) { _, _, _, lineGlyphs, _ in
             let line = NSIntersectionRange(characters, manager.characterRange(forGlyphRange: lineGlyphs, actualGlyphRange: nil))
             guard line.length > 0,
@@ -282,19 +268,8 @@ private final class ReaderSelectionTextView: ReaderLayoutTextView {
                   let end = self.position(from: start, offset: line.length),
                   let part = self.textRange(from: start, to: end) else { return }
 
-            let band = fontBand(at: lineGlyphs.location)
-            var top = band.minY - 2
-            var bottom = band.maxY + 2
-            // Share the space between lines, leaving a two-point gap even with tight leading.
-            if lineGlyphs.location > 0 {
-                let previous = fontBand(at: lineGlyphs.location - 1)
-                top = max(top, (previous.maxY + band.minY) / 2 + 1)
-            }
-            if NSMaxRange(lineGlyphs) < manager.numberOfGlyphs {
-                let next = fontBand(at: NSMaxRange(lineGlyphs))
-                bottom = min(bottom, (band.maxY + next.minY) / 2 - 1)
-            }
-            guard bottom > top else { return }
+            let band = manager.selectionBand(for: lineGlyphs)
+                .offsetBy(dx: self.textContainerInset.left, dy: self.textContainerInset.top)
             let intersecting = super.selectionRects(for: part).filter { !$0.rect.intersection(band).isNull }
             let visible = intersecting.filter { $0.rect.intersection(band).width > 0 }
             let segments = visible.isEmpty ? intersecting : visible
@@ -303,7 +278,7 @@ private final class ReaderSelectionTextView: ReaderLayoutTextView {
             let last = segments.last(where: { $0.containsEnd }) ?? segments.last
             for segment in segments {
                 let overlap = segment.rect.intersection(band)
-                let rect = CGRect(x: overlap.minX, y: top, width: overlap.width, height: bottom - top)
+                let rect = CGRect(x: overlap.minX, y: band.minY, width: overlap.width, height: band.height)
                 result.append(ReaderSelectionRect(segment, rect: rect,
                     containsStart: line.location == characters.location && segment === first,
                     containsEnd: NSMaxRange(line) == NSMaxRange(characters) && segment === last))
@@ -525,24 +500,78 @@ struct ReaderSelectionView: UIViewRepresentable {
     }
 }
 
-struct ReaderSpeechHighlight {
-    private var range: NSRange?
-    private var color: UIColor?
-
-    mutating func apply(to storage: NSTextStorage, bodyStart: Int, bodyLength: Int, sentence: NSRange?, tint: UIColor) -> Bool {
-        let next = sentence.flatMap { value -> NSRange? in
-            guard value.location >= 0, value.length > 0, NSMaxRange(value) <= bodyLength,
-                  bodyStart + NSMaxRange(value) <= storage.length else { return nil }
-            return NSRange(location: bodyStart + value.location, length: value.length)
+private extension NSLayoutManager {
+    func selectionBand(for line: NSRange) -> CGRect {
+        func fontBand(at glyph: Int) -> CGRect {
+            var glyphs = NSRange()
+            let used = lineFragmentUsedRect(forGlyphAt: glyph, effectiveRange: &glyphs)
+            let first = glyphs.location
+            let character = characterIndexForGlyph(at: first)
+            guard let font = textStorage?.attribute(.font, at: character, effectiveRange: nil) as? UIFont else { return used }
+            let baseline = lineFragmentRect(forGlyphAt: first, effectiveRange: nil).minY + location(forGlyphAt: first).y
+            return CGRect(x: used.minX, y: baseline - font.ascender, width: used.width, height: font.ascender - font.descender)
         }
-        guard next != range || (next != nil && tint != color) else { return false }
-        storage.beginEditing()
-        if let range, NSMaxRange(range) <= storage.length { storage.removeAttribute(.backgroundColor, range: range) }
-        if let next { storage.addAttribute(.backgroundColor, value: tint, range: next) }
-        storage.endEditing()
-        range = next
-        color = tint
+
+        let band = fontBand(at: line.location)
+        var top = band.minY - 2
+        var bottom = band.maxY + 2
+        // Leave two points between adjacent selections, even with tight leading.
+        if line.location > 0 {
+            top = max(top, (fontBand(at: line.location - 1).maxY + band.minY) / 2 + 1)
+        }
+        if NSMaxRange(line) < numberOfGlyphs {
+            bottom = min(bottom, (band.maxY + fontBand(at: NSMaxRange(line)).minY) / 2 - 1)
+        }
+        return CGRect(x: band.minX, y: top, width: band.width, height: max(0, bottom - top))
+    }
+}
+
+final class ReaderLayoutManager: NSLayoutManager {
+    private var speechRange: NSRange?
+    private var speechColor = UIColor.clear
+
+    func highlight(_ target: ReaderSpokenText?, sectionStart: Int, bodyStart: Int, bodyEnd: Int, tint: UIColor) -> Bool {
+        let next: NSRange?
+        switch target {
+        case .chapterTitle where bodyStart > sectionStart + 1:
+            // The rendered heading ends with a newline before the body.
+            next = NSRange(location: sectionStart, length: bodyStart - sectionStart - 1)
+        case .body(let range) where range.length > 0 && range.location >= 0 && NSMaxRange(range) <= bodyEnd - bodyStart:
+            next = NSRange(location: bodyStart + range.location, length: range.length)
+        default:
+            next = nil
+        }
+        guard next != speechRange || (next != nil && tint != speechColor) else { return false }
+        let previous = speechRange
+        speechRange = next
+        speechColor = tint
+        for range in [previous, next].compactMap({ $0 }) {
+            let valid = NSIntersectionRange(range, NSRange(location: 0, length: textStorage?.length ?? 0))
+            if valid.length > 0 { invalidateDisplay(forCharacterRange: valid) }
+        }
         return true
+    }
+
+    override func drawBackground(forGlyphRange glyphsToShow: NSRange, at origin: CGPoint) {
+        super.drawBackground(forGlyphRange: glyphsToShow, at: origin)
+        guard let speechRange, NSMaxRange(speechRange) <= (textStorage?.length ?? 0),
+              let context = UIGraphicsGetCurrentContext() else { return }
+        let selected = glyphRange(forCharacterRange: speechRange, actualCharacterRange: nil)
+        let visible = NSIntersectionRange(selected, glyphsToShow)
+        guard visible.length > 0 else { return }
+        context.saveGState()
+        context.setFillColor(speechColor.cgColor)
+        enumerateLineFragments(forGlyphRange: visible) { _, _, container, line, _ in
+            let band = self.selectionBand(for: line)
+            let part = NSIntersectionRange(visible, line)
+            self.enumerateEnclosingRects(forGlyphRange: part, withinSelectedGlyphRange: selected, in: container) { rect, _ in
+                let overlap = rect.intersection(band)
+                guard overlap.width > 0 else { return }
+                context.fill(CGRect(x: overlap.minX + origin.x, y: band.minY + origin.y,
+                                    width: overlap.width, height: band.height))
+            }
+        }
+        context.restoreGState()
     }
 }
 
@@ -583,11 +612,12 @@ struct ReaderTextView: UIViewRepresentable {
     let isEInkMode: Bool
     let backgroundColor: UIColor
     let foregroundColor: UIColor
-    var spokenRange: NSRange?
+    var spokenText: ReaderSpokenText?
     var spokenPosition: Int?
     var speechColor: UIColor = .clear
     let requestedPosition: Int
     let jumpPosition: Int?
+    var jumpRevision = 0
     let renderRevision: Int
     @Binding var readerPosition: Int
     @Binding var pageRanges: [NSRange]
@@ -611,14 +641,13 @@ struct ReaderTextView: UIViewRepresentable {
     func makeCoordinator() -> Coordinator { Coordinator(parent: self) }
 
     func makeUIView(context: Context) -> UITextView {
-        // Pagination uses NSLayoutManager. Start in TextKit 1 rather than
-        // switching a TextKit 2 view after its content size has been computed.
-        let view: ReaderLayoutTextView
-        if #available(iOS 16.0, *) {
-            view = ReaderLayoutTextView(usingTextLayoutManager: false)
-        } else {
-            view = ReaderLayoutTextView(frame: .zero)
-        }
+        let container = NSTextContainer(size: CGSize(width: 0, height: CGFloat.greatestFiniteMagnitude))
+        container.widthTracksTextView = true
+        let manager = ReaderLayoutManager()
+        let storage = NSTextStorage()
+        storage.addLayoutManager(manager)
+        manager.addTextContainer(container)
+        let view = ReaderLayoutTextView(frame: .zero, textContainer: container)
         view.onLayout = { [weak coordinator = context.coordinator] view in
             guard let coordinator, !coordinator.parent.holdsDisplayedPage, !coordinator.isApplyingContent else { return }
             coordinator.restorePendingPage(in: view)
@@ -699,7 +728,6 @@ struct ReaderTextView: UIViewRepresentable {
             context.coordinator.resetPageRangeRetry()
             context.coordinator.contentKey = contentKey
             context.coordinator.primaryContentKey = primaryContentKey
-            context.coordinator.highlight = ReaderSpeechHighlight()
             context.coordinator.styleKey = styleKey
             let typography = ReaderTypography(configuration: self)
             let bodyAttributes = typography.bodyAttributes
@@ -759,7 +787,8 @@ struct ReaderTextView: UIViewRepresentable {
             }
         }
         context.coordinator.highlightSpeech(in: view)
-        if let jumpPosition, context.coordinator.lastJumpPosition != jumpPosition {
+        if let jumpPosition, context.coordinator.lastJumpPosition != jumpPosition || context.coordinator.lastJumpRevision != jumpRevision {
+            context.coordinator.lastJumpRevision = jumpRevision
             context.coordinator.lastJumpPosition = jumpPosition
             context.coordinator.scroll(to: jumpPosition, in: view)
         } else if jumpPosition == nil {
@@ -788,10 +817,10 @@ struct ReaderTextView: UIViewRepresentable {
         var contentKey = 0
         var primaryContentKey = 0
         var styleKey = ""
-        var highlight = ReaderSpeechHighlight()
         func highlightSpeech(in view: UITextView) {
-            if highlight.apply(to: view.textStorage, bodyStart: renderedPrefixLength, bodyLength: currentBodyEnd - renderedPrefixLength,
-                               sentence: parent.spokenRange, tint: parent.speechColor) {
+            let manager = view.layoutManager as! ReaderLayoutManager
+            if manager.highlight(parent.spokenText, sectionStart: currentSectionStart, bodyStart: renderedPrefixLength,
+                                 bodyEnd: currentBodyEnd, tint: parent.speechColor) {
                 dragImages.removeAll()
             }
         }
@@ -804,6 +833,7 @@ struct ReaderTextView: UIViewRepresentable {
         var continuationSectionStart: Int?
         var continuationBodyStart: Int?
         var lastJumpPosition: Int?
+        var lastJumpRevision = 0
         private(set) var pendingPagePosition: Int?
         private(set) var layoutGeneration = 0
         var lastViewportSize = CGSize.zero

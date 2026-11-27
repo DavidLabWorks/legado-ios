@@ -40,12 +40,11 @@ struct RuleSubscriptionView: View {
                 .readingManagementList()
             }
         }
-        .background(ReadingTheme.managementCanvas)
-        .navigationTitle("规则订阅")
-        .navigationBarTitleDisplayMode(.large)
+        .background(ReadingTheme.settingsCanvas)
+        .readingPageTitle("规则订阅")
         .toolbar {
             ToolbarItem(placement: .primaryAction) { Button("新建", systemImage: "plus") { editing = RuleSub() } }
-            ToolbarItem(placement: .primaryAction) { if !visibleValues.isEmpty { EditButton() } }
+            ToolbarItem(placement: .primaryAction) { if !visibleValues.isEmpty { EditButton().environment(\.locale, Locale(identifier: "zh-Hans")) } }
         }
         .task { await model.load() }
         .sheet(item: $editing) { value in
@@ -108,7 +107,7 @@ private struct RuleSubscriptionEditView: View {
 
     var body: some View {
         ReadingNavigationStack {
-            Form {
+            ReadingSheetForm {
                 Section("订阅类型") {
                     Picker("类型", selection: $value.type) {
                         Text("书源").tag(0)
@@ -116,7 +115,6 @@ private struct RuleSubscriptionEditView: View {
                     }
                     .pickerStyle(.segmented)
                 }
-                .listRowBackground(ReadingTheme.surface)
                 Section("订阅来源") {
                     VStack(alignment: .leading, spacing: 5) {
                         Text("名称").font(.caption).foregroundStyle(.secondary)
@@ -132,7 +130,6 @@ private struct RuleSubscriptionEditView: View {
                             .accessibilityIdentifier("subscription.url")
                     }
                 }
-                .listRowBackground(ReadingTheme.surface)
                 Section("更新方式") {
                     Toggle("自动更新", isOn: $value.autoUpdate)
                     if value.autoUpdate {
@@ -140,10 +137,7 @@ private struct RuleSubscriptionEditView: View {
                         Toggle("静默更新", isOn: $value.silentUpdate)
                     }
                 }
-                .listRowBackground(ReadingTheme.surface)
             }
-            .readingScrollContentBackgroundHidden()
-            .background(ReadingTheme.managementCanvas)
             .readingSheetTitle(isNew ? "新建订阅" : "编辑订阅")
             .toolbar {
                 ReadingSheetActions {

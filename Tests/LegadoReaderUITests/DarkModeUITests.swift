@@ -72,6 +72,129 @@ final class DarkModeUITests: XCTestCase {
         }
     }
 
+    func testWebsiteManagementSelectsAndDeletesOnlyFilteredSources() throws {
+        continueAfterFailure = false
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let app = XCUIApplication()
+        defer { app.terminate(); try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("websites.json")
+        let sources = [["sourceName": "Alpha", "sourceUrl": "https://alpha.invalid"],
+                       ["sourceName": "Beta", "sourceUrl": "https://beta.invalid"],
+                       ["sourceName": "Gamma", "sourceUrl": "https://gamma.invalid", "sourceGroup": "新闻"]]
+        try JSONSerialization.data(withJSONObject: sources).write(to: file)
+        app.launchEnvironment["LEGADO_UI_RSS_DATABASE"] = directory.appendingPathComponent("rss.sqlite3").path
+        app.launchArguments = ["-uiDemo", "-uiDemoTab", "rss", "-uiAutomationImportURL", file.absoluteString]
+        app.launch()
+        app.navigationBars["导入网站源"].buttons["导入"].tap()
+        let notice = app.alerts["网站源已导入"]
+        XCTAssertTrue(notice.waitForExistence(timeout: 8))
+        notice.buttons["好"].tap()
+        app.buttons["网站源管理"].tap()
+
+        let bar = app.navigationBars["网站源管理"]
+        let group = app.buttons["分组"]
+        group.tap()
+        app.buttons["未分组"].tap()
+        bar.buttons["编辑"].tap()
+        XCTAssertFalse(app.buttons["删除"].isEnabled)
+        let move = app.buttons["移动到分组"]
+        XCTAssertFalse(move.isEnabled)
+        app.staticTexts["Alpha"].tap()
+        XCTAssertTrue(app.buttons["删除（1）"].isEnabled)
+        app.staticTexts["Alpha"].tap()
+        XCTAssertFalse(app.buttons["删除"].isEnabled)
+        app.buttons["全选"].tap()
+        let delete = app.buttons["删除（2）"]
+        XCTAssertEqual(app.buttons["取消全选"].value as? String, "已选 2 项")
+        delete.tap()
+        let confirm = app.alerts["删除所选网站源？"]
+        confirm.buttons["取消"].tap()
+        XCTAssertTrue(app.buttons["取消全选"].isHittable)
+        attach(app, name: "网站源批量操作")
+        group.tap()
+        app.buttons["新闻"].tap()
+        XCTAssertFalse(app.buttons["删除"].isEnabled)
+        group.tap()
+        app.buttons["未分组"].tap()
+        app.buttons["全选"].tap()
+        move.tap()
+        let moveBar = app.navigationBars["移动到分组"]
+        XCTAssertFalse(moveBar.buttons["移动"].isEnabled)
+        app.buttons["新闻"].tap()
+        XCTAssertTrue(app.buttons["新闻"].isSelected)
+        attach(app, name: "网站源移动到分组")
+        moveBar.buttons["取消"].tap()
+        XCTAssertTrue(app.buttons["取消全选"].isHittable)
+        move.tap()
+        app.buttons["新建分组"].tap()
+        let name = app.textFields["分组名称"]
+        name.tap()
+        name.typeText("Moved")
+        app.navigationBars["新建分组"].buttons["保存"].tap()
+        XCTAssertTrue(app.buttons["Moved"].isSelected)
+        moveBar.buttons["移动"].tap()
+        XCTAssertTrue(app.staticTexts["此分组暂无网站源"].waitForExistence(timeout: 5))
+        group.tap()
+        app.buttons["Moved"].tap()
+        XCTAssertTrue(app.staticTexts["Alpha"].exists && app.staticTexts["Beta"].exists)
+        XCTAssertFalse(app.staticTexts["Gamma"].exists)
+        bar.buttons["编辑"].tap()
+        app.buttons["全选"].tap()
+        delete.tap()
+        confirm.buttons["删除 2 个"].tap()
+        XCTAssertTrue(bar.buttons["编辑"].waitForExistence(timeout: 5))
+
+        app.terminate()
+        app.launchArguments = ["-uiDemo", "-uiDemoTab", "rss"]
+        app.launch()
+        app.buttons["网站源管理"].tap()
+        XCTAssertTrue(app.staticTexts["Gamma"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.staticTexts["Alpha"].exists)
+        XCTAssertFalse(app.staticTexts["Beta"].exists)
+    }
+
+    func testWebsiteSourceEditorDeletesOriginalSourceAfterConfirmation() throws {
+        continueAfterFailure = false
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let app = XCUIApplication()
+        defer { app.terminate(); try? FileManager.default.removeItem(at: directory) }
+        let name = "Editor Delete Test"
+        app.launchEnvironment["LEGADO_UI_RSS_DATABASE"] = directory.appendingPathComponent("rss.sqlite3").path
+        app.launchArguments = ["-uiDemo", "-uiDemoTab", "rss"]
+        app.launch()
+        app.buttons["网站源管理"].tap()
+        app.buttons["网站源操作"].tap()
+        app.buttons["新建网站源"].tap()
+        let delete = app.buttons["删除网站源"]
+        XCTAssertFalse(delete.exists)
+        let nameField = app.textFields.matching(NSPredicate(format: "placeholderValue == %@", "网站名称")).firstMatch
+        nameField.tap()
+        nameField.typeText(name)
+        let url = app.textFields.matching(NSPredicate(format: "placeholderValue == %@", "https://")).firstMatch
+        url.tap()
+        url.typeText("https://editor.invalid\n")
+        app.navigationBars["新建网站源"].buttons["保存"].tap()
+        app.staticTexts[name].tap()
+
+        url.tap()
+        url.typeText("/draft\n")
+        scrollTo(delete, in: app)
+        delete.tap()
+        let confirmation = app.alerts["删除「\(name)」？"]
+        confirmation.buttons["取消"].tap()
+        XCTAssertTrue(app.navigationBars["编辑网站源"].exists)
+        delete.tap()
+        confirmation.buttons["删除"].tap()
+        XCTAssertTrue(app.staticTexts["还没有网站源"].waitForExistence(timeout: 5))
+
+        app.terminate()
+        app.launch()
+        app.buttons["网站源管理"].tap()
+        XCTAssertTrue(app.staticTexts["还没有网站源"].waitForExistence(timeout: 5))
+    }
+
     func testTocRuleSwitchPersistsIndependentlyOfOpeningTheEditor() {
         continueAfterFailure = false
         let app = launch(["-uiDemoTab", "settings", "-themeMode", "1"])
@@ -232,19 +355,102 @@ final class DarkModeUITests: XCTestCase {
         XCTAssertTrue(app.navigationBars["书籍详情"].waitForExistence(timeout: 5))
     }
 
-    func testStorageMaintenanceShowsResultsInTheTappedRow() {
+    func testStartupScopeAndDirectDiagnostics() throws {
+        continueAfterFailure = false
+        let app = launch(["-uiDemoTab", "settings", "-themeMode", "1"])
+        let entry = app.buttons["profile.power"]
+        scrollTo(entry, in: app)
+        entry.tap()
+        XCTAssertFalse(app.buttons["应用锁"].exists)
+        let pages = app.buttons["settings.startupPage"]
+        let original = try XCTUnwrap(pages.value as? String)
+        let another = original == "发现" ? "书架" : "发现"
+        XCTAssertFalse(app.segmentedControls.firstMatch.exists)
+        pages.tap()
+        attach(app, name: "启动时打开 · 选择菜单")
+        try XCTUnwrap(app.buttons.matching(identifier: another).allElementsBoundByIndex.last(where: \.isHittable)).tap()
+        XCTAssertEqual(pages.value as? String, another)
+        XCTAssertTrue(app.tabBars.buttons["设置"].isSelected)
+        app.launchArguments = ["-uiDemo", "-themeMode", "1"]
+        app.launch()
+        XCTAssertTrue(app.tabBars.buttons[another].isSelected)
+        app.tabBars.buttons["设置"].tap()
+        scrollTo(entry, in: app)
+        entry.tap()
+        XCTAssertEqual(pages.value as? String, another)
+        pages.tap()
+        try XCTUnwrap(app.buttons.matching(identifier: original).allElementsBoundByIndex.last(where: \.isHittable)).tap()
+
+        let toggle = app.switches["启动时更新书架"]
+        let control = toggle.coordinate(withNormalizedOffset: CGVector(dx: 0.92, dy: 0.5))
+        let wasEnabled = toggle.value as? String == "1"
+        if !wasEnabled { control.tap() }
+        let scope = app.buttons["settings.refreshScope"]
+        XCTAssertTrue(scope.waitForExistence(timeout: 5))
+        attach(app, name: "启动管理")
+        let wasLatest = (scope.value as? String ?? scope.label).contains("最新章")
+        let choices = ["全部书籍", "已读到最新章的书"]
+        scope.tap()
+        app.buttons[choices[wasLatest ? 0 : 1]].firstMatch.tap()
+        control.tap()
+        XCTAssertFalse(scope.exists)
+        control.tap()
+        XCTAssertTrue((scope.value as? String ?? scope.label).contains(choices[wasLatest ? 0 : 1]))
+        scope.tap()
+        app.buttons[choices[wasLatest ? 1 : 0]].firstMatch.tap()
+        if !wasEnabled { control.tap() }
+        app.navigationBars["启动管理"].buttons.element(boundBy: 0).tap()
+        let logs = app.buttons["profile.doc.text.magnifyingglass"]
+        scrollTo(logs, in: app)
+        app.scrollViews["profile.scroll"].swipeUp()
+        XCTAssertLessThan(app.staticTexts["日志"].frame.minY, logs.frame.minY)
+        attach(app, name: "设置 · 网络与日志")
+        logs.tap()
+        XCTAssertTrue(app.navigationBars["日志与诊断"].waitForExistence(timeout: 5))
+        let recording = app.switches["记录运行日志"]
+        let recordSwitch = recording.coordinate(withNormalizedOffset: CGVector(dx: 0.92, dy: 0.5))
+        let initial = try XCTUnwrap(recording.value as? String)
+        attach(app, name: "日志与诊断")
+        recordSwitch.tap()
+        app.navigationBars["日志与诊断"].buttons.element(boundBy: 0).tap()
+        logs.tap()
+        XCTAssertNotEqual(recording.value as? String, initial)
+        recordSwitch.tap()
+        XCTAssertEqual(recording.value as? String, initial)
+    }
+
+    func testDatabaseMaintenanceRunsFromItsOwnPage() {
         continueAfterFailure = false
         XCUIDevice.shared.orientation = .portrait
-        let app = launch(["-uiDemoTab", "settings", "-uiDemoOtherSettings"])
-        let database = app.buttons["整理数据库"]
-        scrollTo(database, in: app)
+        let app = launch(["-uiDemoTab", "settings", "-themeMode", "1"])
+        let entry = app.buttons["profile.cylinder"]
+        scrollTo(entry, in: app)
+        entry.tap()
+        XCTAssertTrue(app.navigationBars["整理数据库"].waitForExistence(timeout: 5))
+        let database = app.buttons["开始整理"]
+        XCTAssertNotEqual(database.value as? String, "已整理")
+        attach(app, name: "整理数据库")
         database.tap()
         let compacted = expectation(for: NSPredicate(format: "value == %@", "已整理"), evaluatedWith: database)
         wait(for: [compacted], timeout: 10)
         XCTAssertFalse(app.alerts.firstMatch.exists)
-        attach(app, name: "其他设置 · 整理完成")
+        attach(app, name: "数据库 · 整理完成")
 
+        XCTAssertFalse(app.buttons["清理网页缓存"].exists)
+    }
+
+    func testWebCacheClearsSeparatelyInCacheManagement() {
+        continueAfterFailure = false
+        let app = launch(["-uiDemoTab", "settings", "-themeMode", "1"])
+        let entry = app.buttons["profile.internaldrive"]
+        scrollTo(entry, in: app)
+        entry.tap()
+        let limit = app.buttons["cache.limit"]
+        let previousLimit = limit.value as? String
+        let chapters = app.buttons["清空章节缓存"]
+        let hadChapters = chapters.isEnabled
         let cache = app.buttons["清理网页缓存"]
+        scrollTo(cache, in: app)
         cache.tap()
         let confirmation = app.alerts["清理网页缓存？"]
         confirmation.buttons["取消"].tap()
@@ -253,7 +459,8 @@ final class DarkModeUITests: XCTestCase {
         confirmation.buttons["清理"].tap()
         let cleared = expectation(for: NSPredicate(format: "value == %@", "已清理"), evaluatedWith: cache)
         wait(for: [cleared], timeout: 15)
-        XCTAssertEqual(database.value as? String, "已整理")
+        XCTAssertEqual(chapters.isEnabled, hadChapters)
+        XCTAssertEqual(limit.value as? String, previousLimit)
     }
 
     func testLegacyProfileScrollsBetweenHeaderAndSettings() {
@@ -264,16 +471,17 @@ final class DarkModeUITests: XCTestCase {
         var metrics: [XCTMetric] = [XCTOSSignpostMetric.scrollingAndDecelerationMetric, XCTCPUMetric(application: app)]
         if #available(iOS 26.0, *) { metrics.append(XCTHitchMetric(application: app)) }
         measure(metrics: metrics) {
-            scroll.swipeUp(velocity: .fast)
-            XCTAssertTrue(app.buttons["profile.gearshape"].isHittable)
+            let logs = app.buttons["profile.doc.text.magnifyingglass"]
+            for _ in 0..<4 where !logs.isHittable { scroll.swipeUp(velocity: .fast) }
+            XCTAssertTrue(logs.isHittable)
             XCTAssertFalse(app.buttons["profile.info.circle"].exists)
             XCTAssertFalse(app.staticTexts["项目与支持"].exists)
-            scroll.swipeDown(velocity: .fast)
-            XCTAssertTrue(app.buttons["profile.about"].isHittable)
+            let about = app.buttons["profile.about"]
+            for _ in 0..<4 where !about.isHittable { scroll.swipeDown(velocity: .fast) }
+            XCTAssertTrue(about.isHittable)
         }
-        scroll.swipeUp(velocity: .fast)
-        app.buttons["profile.gearshape"].tap()
-        XCTAssertTrue(app.navigationBars["其他设置"].waitForExistence(timeout: 5))
+        app.buttons["profile.power"].tap()
+        XCTAssertTrue(app.navigationBars["启动管理"].waitForExistence(timeout: 5))
         app.navigationBars.firstMatch.buttons.element(boundBy: 0).tap()
         XCTAssertTrue(scroll.waitForExistence(timeout: 5))
     }
@@ -295,21 +503,264 @@ final class DarkModeUITests: XCTestCase {
             XCTAssertGreaterThan(cancel.frame.midX, app.frame.midX)
             XCTAssertLessThan(cancel.frame.midX, save.frame.midX)
             try assertReadableDarkFill(save, in: app)
+            let row = try XCTUnwrap(app.cells.containing(.staticText, identifier: "全部书源").allElementsBoundByIndex.last)
+            let y = row.frame.midY / app.frame.height
+            let panel = try app.backgroundRGB(x: (bar.frame.minX + 5) / app.frame.width, y: y)
+            let card = try app.backgroundRGB(x: (row.frame.midX + row.frame.width / 4) / app.frame.width, y: y)
+            for (base, fill) in zip(panel, card) {
+                if theme == "1" {
+                    XCTAssertGreaterThanOrEqual(base, 250)
+                    XCTAssertGreaterThan(base, fill)
+                    XCTAssertGreaterThan(fill, 225)
+                } else {
+                    XCTAssertLessThan(base, 45)
+                    XCTAssertGreaterThan(fill, base)
+                    XCTAssertLessThan(fill, 65)
+                }
+            }
             attach(app, name: "搜索范围 · 保存按钮 · \(theme)")
             app.terminate()
         }
     }
 
-    func testCacheEntryOpensCacheControlsOnSmallScreen() {
-        let app = launch(["-uiDemoTab", "settings", "-uiDemoOtherSettings"])
-        let entry = app.buttons["章节缓存管理"]
+    func testReplacementRulesKeepTitleBesideBackAndSearchInContent() {
+        continueAfterFailure = false
+        let app = launch(["-uiDemoTab", "settings"])
+        let entry = app.buttons["profile.text.badge.checkmark"]
         scrollTo(entry, in: app)
         entry.tap()
-        app.buttons["网络与缓存设置"].tap()
-        XCTAssertTrue(app.segmentedControls.buttons["章节缓存"].isSelected)
-        XCTAssertTrue(app.buttons["容量上限"].isHittable)
-        app.segmentedControls.buttons["高级网络"].tap()
-        XCTAssertTrue(app.textFields["全局代理"].exists)
+        app.buttons["新建规则"].tap()
+        let pattern = app.textViews["filter.pattern"]
+        pattern.tap()
+        pattern.typeText("sample")
+        app.buttons["syntaxCodeEditor.done"].tap()
+        app.buttons["保存"].tap()
+        let back = app.navigationBars.firstMatch.buttons.firstMatch
+        back.tap()
+        entry.tap()
+
+        let bar = app.navigationBars["替换净化"]
+        XCTAssertTrue(bar.waitForExistence(timeout: 5))
+        let heading = bar.staticTexts["page.heading"]
+        XCTAssertEqual(heading.label, "替换净化")
+        XCTAssertEqual(heading.frame.midY, back.frame.midY, accuracy: 4)
+        XCTAssertEqual(heading.frame.minX - back.frame.maxX, 12, accuracy: 8)
+        let search = app.textFields["名称、匹配内容或分组"]
+        XCTAssertTrue(search.isHittable)
+        XCTAssertGreaterThanOrEqual(search.frame.midY, bar.frame.maxY)
+        attach(app, name: "替换净化")
+        bar.buttons["编辑"].tap()
+        bar.buttons["完成"].tap()
+        search.tap()
+        search.typeText("unmatched")
+        XCTAssertTrue(app.staticTexts["没有符合筛选条件的规则"].exists)
+        app.buttons["清除搜索"].tap()
+        XCTAssertTrue(app.staticTexts["sample"].exists)
+    }
+
+    func testProfileDetailBackgroundInLightMode() throws {
+        try checkProfileDetailBackground(theme: "1")
+    }
+
+    func testProfileDetailBackgroundInDarkMode() throws {
+        try checkProfileDetailBackground(theme: "2")
+    }
+
+    private func checkProfileDetailBackground(theme: String) throws {
+        continueAfterFailure = false
+        let app = launch(["-uiDemoTab", "settings", "-themeMode", theme])
+        let profile = app.scrollViews["profile.scroll"]
+        XCTAssertTrue(profile.waitForExistence(timeout: 8))
+
+        let canvas = try gutterRGB(in: app)
+        let routes = [
+            ("about", "关于"), ("power", "启动管理"), ("lock", "应用锁"),
+            ("headphones", "听书设置"), ("bookmark", "书签"), ("chart.bar", "阅读统计"),
+            ("globe", "书源管理"), ("network", "网站源管理"), ("link", "规则订阅"),
+            ("text.badge.checkmark", "替换净化"), ("list.bullet.rectangle", "TXT 目录规则"),
+            ("folder", "本地书籍文件"), ("doc.text", "缓存正文导出"), ("externaldrive", "数据备份与恢复"),
+            ("internaldrive", "缓存管理"), ("wifi", "网络连接"), ("slider.horizontal.3", "高级网络"),
+            ("cylinder", "整理数据库"), ("doc.text.magnifyingglass", "日志与诊断")
+        ]
+        for (icon, title) in routes {
+            let entry = app.buttons["profile." + icon]
+            scrollTo(entry, in: app)
+            entry.tap()
+            let nav = app.navigationBars[title]
+            let back = icon == "lock" && app.buttons["取消"].exists ? app.buttons["取消"] : nav.buttons.firstMatch
+            XCTAssertTrue(back.waitForExistence(timeout: 5), title)
+            if nav.exists {
+                let heading = nav.staticTexts["page.heading"]
+                XCTAssertEqual(heading.label, title)
+                XCTAssertEqual(heading.frame.midY, back.frame.midY, accuracy: 4, title)
+                XCTAssertEqual(heading.frame.minX - back.frame.maxX, 12, accuracy: 8, title)
+            }
+            let page = try gutterRGB(in: app)
+            for (actual, expected) in zip(page, canvas) {
+                XCTAssertEqual(actual, expected, accuracy: 2, "\(title) · \(page) / \(canvas)")
+            }
+            attach(app, name: title)
+            back.tap()
+            XCTAssertTrue(profile.waitForExistence(timeout: 5))
+        }
+    }
+
+    func testWebsiteActivityBackgroundMatchesHomeInBothAppearances() throws {
+        continueAfterFailure = false
+        for theme in ["1", "2"] {
+            let app = launch(["-uiDemoTab", "rss", "-themeMode", theme])
+            let favorites = app.buttons["websites.favorites"]
+            XCTAssertTrue(favorites.waitForExistence(timeout: 8))
+            let home = try gutterRGB(in: app)
+            for (entry, title) in [(favorites, "网页收藏"), (app.buttons["websites.history"], "网站阅读记录")] {
+                entry.tap()
+                let nav = app.navigationBars[title]
+                XCTAssertTrue(nav.waitForExistence(timeout: 5))
+                let page = try gutterRGB(in: app)
+                for (actual, expected) in zip(page, home) {
+                    XCTAssertEqual(actual, expected, accuracy: 2, "\(title) · \(page) / \(home)")
+                }
+                nav.buttons.firstMatch.tap()
+                XCTAssertTrue(favorites.waitForExistence(timeout: 5))
+            }
+            app.terminate()
+        }
+    }
+
+    // Average a narrow strip away from the bars so a nearby card shadow cannot dominate.
+    private func gutterRGB(in app: XCUIApplication) throws -> [Int] {
+        let image = try XCTUnwrap(app.screenshot().image.cgImage)
+        let strip = CGRect(x: 1, y: image.height / 4, width: 2, height: image.height / 2)
+        let crop = try XCTUnwrap(image.cropping(to: strip))
+        var rgba = [UInt8](repeating: 0, count: 4)
+        try rgba.withUnsafeMutableBytes { bytes in
+            let context = try XCTUnwrap(CGContext(data: bytes.baseAddress, width: 1, height: 1,
+                bitsPerComponent: 8, bytesPerRow: 4, space: try XCTUnwrap(CGColorSpace(name: CGColorSpace.sRGB)),
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue | CGBitmapInfo.byteOrder32Big.rawValue))
+            context.interpolationQuality = .high
+            context.draw(crop, in: CGRect(x: 0, y: 0, width: 1, height: 1))
+        }
+        return rgba.prefix(3).map(Int.init)
+    }
+
+    func testProfileOpensFileAndNetworkPagesDirectly() {
+        continueAfterFailure = false
+        let app = launch(["-uiDemoTab", "settings", "-themeMode", "1"])
+        let routes = [("folder", "本地书籍文件"), ("doc.text", "缓存正文导出"), ("internaldrive", "缓存管理"),
+                      ("wifi", "网络连接"), ("slider.horizontal.3", "高级网络")]
+        for (icon, title) in routes {
+            let entry = app.buttons["profile." + icon]
+            scrollTo(entry, in: app)
+            if icon == "slider.horizontal.3" { attach(app, name: "设置 · 文件与网络入口") }
+            entry.tap()
+            let bar = app.navigationBars[title]
+            XCTAssertTrue(bar.waitForExistence(timeout: 5))
+            XCTAssertFalse(bar.buttons["保存"].exists)
+            switch icon {
+            case "folder":
+                XCTAssertTrue(app.buttons["导入 TXT / EPUB"].waitForExistence(timeout: 5))
+            case "doc.text":
+                let book = app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "长夜里的灯")).firstMatch
+                XCTAssertTrue(book.waitForExistence(timeout: 5))
+            case "internaldrive":
+                XCTAssertTrue(app.buttons["cache.limit"].waitForExistence(timeout: 5))
+                XCTAssertTrue(app.buttons["清空章节缓存"].exists)
+                XCTAssertTrue(app.buttons["清理网页缓存"].exists)
+            case "wifi":
+                XCTAssertTrue(app.switches["兼容无效证书的书源"].exists)
+            default:
+                XCTAssertTrue(app.textFields["全局代理"].exists)
+                XCTAssertTrue(app.textFields["默认 User-Agent"].exists)
+                XCTAssertTrue(app.textViews["自定义 Hosts"].exists)
+            }
+            attach(app, name: title)
+            bar.buttons.element(boundBy: 0).tap()
+            XCTAssertTrue(app.scrollViews["profile.scroll"].waitForExistence(timeout: 5))
+        }
+    }
+
+    func testNetworkSwitchPersistsWhenLeavingImmediately() throws {
+        continueAfterFailure = false
+        let app = launch(["-uiDemoTab", "settings", "-themeMode", "1"])
+        let entry = app.buttons["profile.wifi"]
+        scrollTo(entry, in: app)
+        entry.tap()
+        let toggle = app.switches["兼容无效证书的书源"]
+        let original = try XCTUnwrap(toggle.value as? String)
+        let switchControl = toggle.coordinate(withNormalizedOffset: CGVector(dx: 0.92, dy: 0.5))
+        switchControl.tap()
+        let bar = app.navigationBars["网络连接"]
+        XCTAssertFalse(bar.buttons["保存"].exists)
+        bar.buttons.element(boundBy: 0).tap()
+        entry.tap()
+        XCTAssertNotEqual(try XCTUnwrap(toggle.value as? String), original)
+        switchControl.tap()
+        XCTAssertEqual(toggle.value as? String, original)
+    }
+
+    func testInvalidInlineProxyPreservesPreviousValue() {
+        continueAfterFailure = false
+        let app = launch(["-uiDemoTab", "settings", "-themeMode", "2"])
+        let entry = app.buttons["profile.slider.horizontal.3"]
+        scrollTo(entry, in: app)
+        entry.tap()
+        let proxy = app.textFields["全局代理"]
+        let original = proxy.value as? String
+        proxy.tap()
+        proxy.typeText("?invalid")
+        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "代理格式应为")).firstMatch.waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["应用"].exists)
+        app.navigationBars["高级网络"].buttons.element(boundBy: 0).tap()
+        entry.tap()
+        XCTAssertEqual(proxy.value as? String, original)
+    }
+
+    func testCachePrefetchTakesEffectWithoutSaving() throws {
+        continueAfterFailure = false
+        let app = launch(["-uiDemoTab", "settings", "-themeMode", "1"])
+        let entry = app.buttons["profile.internaldrive"]
+        scrollTo(entry, in: app)
+        entry.tap()
+        let stepper = app.steppers["cache.prefetch"]
+        let initial = try XCTUnwrap((stepper.value as? String).flatMap(Int.init))
+        let trailing = stepper.coordinate(withNormalizedOffset: CGVector(dx: 1, dy: 0.5))
+        let plus = trailing.withOffset(CGVector(dx: -18, dy: 0))
+        let minus = trailing.withOffset(CGVector(dx: -68, dy: 0))
+        (initial < 20 ? plus : minus).tap()
+        app.navigationBars["缓存管理"].buttons.element(boundBy: 0).tap()
+        entry.tap()
+        XCTAssertEqual(stepper.value as? String, String(initial < 20 ? initial + 1 : initial - 1))
+        (initial < 20 ? minus : plus).tap()
+        XCTAssertEqual(stepper.value as? String, String(initial))
+    }
+
+    func testInlineProxyPersistsOnBackAndKeyboardDone() throws {
+        continueAfterFailure = false
+        let app = launch(["-uiDemoTab", "settings", "-themeMode", "1"])
+        let entry = app.buttons["profile.slider.horizontal.3"]
+        scrollTo(entry, in: app)
+        entry.tap()
+        let field = app.textFields["全局代理"]
+        let original = try XCTUnwrap(field.value as? String)
+        let previous = original == field.placeholderValue ? "" : original
+        let address = previous == "http://127.0.0.1:17891" ? "http://127.0.0.1:17892" : "http://127.0.0.1:17891"
+        func replaceAddress(_ current: String, with value: String) {
+            field.tap()
+            if !current.isEmpty {
+                field.coordinate(withNormalizedOffset: CGVector(dx: 0.94, dy: 0.5)).tap()
+            }
+            field.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: current.count) + value)
+        }
+        let back = app.navigationBars["高级网络"].buttons.element(boundBy: 0)
+        replaceAddress(previous, with: address)
+        back.tap()
+        entry.tap()
+        XCTAssertEqual(field.value as? String, address)
+        replaceAddress(address, with: previous)
+        app.buttons["完成"].firstMatch.tap()
+        back.tap()
+        entry.tap()
+        XCTAssertEqual(field.value as? String, original)
     }
 
     func testPrimaryActionsKeepDarkFillInBothAppearances() throws {
@@ -356,7 +807,7 @@ final class DarkModeUITests: XCTestCase {
         let app = launch(["-themeMode", "2"])
         XCTAssertTrue(app.tabBars.buttons["书架"].waitForExistence(timeout: 20))
         for (tab, heading) in [("书架", "阅读，让时间有了形状"), ("发现", "下一本好书，在这里遇见"),
-                               ("网站", "在喜欢的网站，读点新鲜事"), ("我的", "按照你的方式阅读")] {
+                               ("网站", "在喜欢的网站，读点新鲜事"), ("设置", "按照你的方式阅读")] {
             app.tabBars.buttons[tab].tap()
             XCTAssertTrue(app.staticTexts[heading].waitForExistence(timeout: 5))
             attach(app, name: "Dark tab \(tab)")
@@ -406,16 +857,16 @@ final class DarkModeUITests: XCTestCase {
         let shelf = app.tabBars.buttons["书架"]
         XCTAssertTrue(shelf.waitForExistence(timeout: 10))
         XCTAssertTrue(shelf.isSelected)
-        app.tabBars.buttons["我的"].tap()
-        let settings = app.buttons["profile.gearshape"]
+        app.tabBars.buttons["设置"].tap()
+        let settings = app.buttons["profile.power"]
         scrollTo(settings, in: app)
         settings.tap()
-        let picker = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "启动页面")).firstMatch
-        XCTAssertTrue(picker.label.contains("书架") || picker.value as? String == "书架")
-        picker.tap()
+        let pages = app.buttons["settings.startupPage"]
+        XCTAssertEqual(pages.value as? String, "书架")
+        pages.tap()
         XCTAssertFalse(app.buttons["阅读统计"].exists)
-        app.navigationBars["其他设置"].coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
-        app.navigationBars["其他设置"].buttons.element(boundBy: 0).tap()
+        try XCTUnwrap(app.buttons.matching(identifier: "书架").allElementsBoundByIndex.last(where: \.isHittable)).tap()
+        app.navigationBars["启动管理"].buttons.element(boundBy: 0).tap()
         let statistics = app.buttons["profile.chart.bar"]
         scrollTo(statistics, in: app)
         statistics.tap()
@@ -432,13 +883,14 @@ final class DarkModeUITests: XCTestCase {
         XCTAssertFalse(app.buttons["profile.clock"].exists)
         let routes: [(String, String, String?)] = [
             ("about", "关于", nil),
-            ("waveform", "离线语音包", nil),
+            ("headphones", "听书设置", nil),
             ("bookmark", "书签", nil),
             ("link", "规则订阅", "新建"),
-            ("text.badge.checkmark", "净化规则", "新建规则"),
+            ("text.badge.checkmark", "替换净化", "新建规则"),
             ("list.bullet.rectangle", "TXT 目录规则", "新建"),
-            ("folder", "文件管理", nil),
-            ("gearshape", "其他设置", nil)
+            ("folder", "本地书籍文件", nil),
+            ("power", "启动管理", nil),
+            ("doc.text.magnifyingglass", "日志与诊断", nil)
         ]
         for (icon, title, create) in routes {
             let entry = app.buttons["profile.\(icon)"]
@@ -450,21 +902,11 @@ final class DarkModeUITests: XCTestCase {
                 app.buttons[create].firstMatch.tap()
                 XCTAssertTrue(app.buttons["取消"].waitForExistence(timeout: 5))
                 try captureDarkPage(app, name: "Editor \(title)")
-                if title == "净化规则" {
+                if title == "替换净化" {
                     app.segmentedControls.buttons["测试规则"].tap()
                     try captureDarkPage(app, name: "Rule test form")
                 }
                 app.buttons["取消"].tap()
-            }
-            if title == "其他设置" {
-                for (entry, destination) in [("网络与缓存设置", "网络与缓存"), ("章节缓存管理", "缓存管理"), ("日志与诊断", "日志与诊断")] {
-                    let link = app.buttons[entry]
-                    scrollTo(link, in: app)
-                    link.tap()
-                    XCTAssertTrue(app.navigationBars[destination].waitForExistence(timeout: 5))
-                    try captureDarkPage(app, name: "Settings \(destination)")
-                    app.navigationBars.firstMatch.buttons.element(boundBy: 0).tap()
-                }
             }
             if title == "关于" {
                 let license = app.buttons["开源许可"]
@@ -523,9 +965,9 @@ final class DarkModeUITests: XCTestCase {
         bookManager.tap()
         XCTAssertTrue(app.navigationBars["书源管理"].waitForExistence(timeout: 5))
         app.tabBars.buttons["网站"].tap()
-        let count = app.buttons["websites.sourceCount"]
-        XCTAssertTrue(count.isHittable)
-        count.tap()
+        XCTAssertTrue(app.descendants(matching: .any)["websites.sourceCount"].exists)
+        XCTAssertFalse(app.buttons["websites.sourceCount"].exists)
+        app.buttons["网站源管理"].tap()
         let managementBar = app.navigationBars["网站源管理"]
         XCTAssertTrue(managementBar.waitForExistence(timeout: 5))
         managementBar.buttons.element(boundBy: 0).tap()
@@ -533,7 +975,7 @@ final class DarkModeUITests: XCTestCase {
         try captureDarkPage(app, name: "网站首页")
         app.buttons["websites.history"].tap()
         XCTAssertTrue(app.navigationBars["网站阅读记录"].waitForExistence(timeout: 5))
-        app.tabBars.buttons["我的"].tap()
+        app.tabBars.buttons["设置"].tap()
         let management = app.buttons["profile.network"]
         scrollTo(management, in: app)
         XCTAssertTrue(app.buttons["profile.globe"].exists)
@@ -566,7 +1008,7 @@ final class DarkModeUITests: XCTestCase {
         XCTAssertTrue(app.buttons["目录"].waitForExistence(timeout: 15))
         try captureDarkPage(app, name: "Night reader menu")
         app.buttons["目录"].tap()
-        XCTAssertTrue(app.navigationBars["目录"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["reader.toc.title"].waitForExistence(timeout: 5))
         try captureDarkPage(app, name: "Night table of contents")
         app.buttons["关闭"].tap()
         app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()

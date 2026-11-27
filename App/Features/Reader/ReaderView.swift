@@ -18,9 +18,9 @@ struct ReaderView: View {
     @StateObject private var model: ReaderViewModel
     private var book: Book { model.book }
     @State private var sourceSwitchBook: Book?
-    @StateObject private var speech = ReaderSpeechController()
+    @ObservedObject private var speech = ReaderSpeechController.shared
     private enum ReaderSheet: Hashable, Identifiable {
-        case bookmarks, bookInfo, listening
+        case bookmarks
         case dictionary(String)
         case replaceRule(ReplaceRule)
         case originalWebPage(URL)
@@ -30,12 +30,14 @@ struct ReaderView: View {
     @State private var translationText: String?
     @State private var textSelection: ReaderTextSelection?
     @State private var activeSheet: ReaderSheet?
+    @State private var showsListeningPlayer = false
     private enum BottomPanel { case appearance, autoRead, settings }
     @State private var changingPageAnimation = false
     @State private var draftReplaceRules = false
     @State private var draftDefaultMode = EPUBReadingMode.original
     @State private var savingPanel = false
     @State private var bottomPanel: BottomPanel?
+    @State private var bookInfo: ReaderBookInfoPage?
     @State private var showsTableOfContents = false
     @State private var readerSessionActive = false
     @State private var chapterCommentsTarget: ReaderChapterCommentsTarget?
@@ -61,21 +63,15 @@ struct ReaderView: View {
     @State private var contentSearchQuery = ""
     @State private var readerPosition = 0
     @State private var readerPageRanges: [NSRange] = []
-    @State private var listeningPack: OfflineVoicePack?
-    @State private var listeningVoice = OfflineVoice.uncleFu
-    @State private var speechChapter: Int?
-    @State private var speechPageIndex = 0
+    private var isListening: Bool { speech.listeningBook?.bookUrl == book.bookUrl }
+    private var speechChapter: Int? { isListening ? speech.listeningChapter : nil }
     @State private var currentPage = 1
     @State private var totalPages = 1
     @State private var readerRenderRevision = 0
     @State private var isWaitingForNextChapter = false
     @State private var isWaitingForPreviousChapter = false
-    @State private var resumesSpeechAfterChapterLoad = false
-    @State private var speechTimerTask: Task<Void, Never>?
     @State private var progressSaveTask: Task<Void, Never>?
     @State private var progressSaveGeneration = 0
-    @State private var speechStartGeneration = 0
-    @State private var speechTimerRemaining = 0
     @State private var isSavingBookmark = false
     @ScaledMetric(relativeTo: .subheadline) private var pageSliderLabelWidth: CGFloat = 92
     @ScaledMetric(relativeTo: .body) private var toolbarIconSize = 21
@@ -118,12 +114,10 @@ struct ReaderView: View {
     @AppStorage("readerPreviousDayTheme") private var previousDayTheme = "wechat"
     @AppStorage("autoReadSpeed") private var autoReadSpeed = 10
     @AppStorage("ttsSpeechRate") private var ttsSpeechRate = 5
-    @AppStorage("readAloudByPage") private var readAloudByPage = false
     @AppStorage("readAloudWakeLock") private var readAloudWakeLock = false
     @AppStorage("ignoreAudioFocus") private var ignoreAudioFocus = false
     @AppStorage("pauseReadAloudWhilePhoneCalls") private var pauseReadAloudWhilePhoneCalls = false
     @AppStorage("mediaButtonPerNext") private var mediaButtonPerNext = false
-    @AppStorage("ttsTimer") private var ttsTimer = 0
     @ReaderPanelPreference("readerSimplifiedChinese") private var simplifiedChinese = false
     @AppStorage("readerFullJustify") private var fullJustify = true
     @ReaderPanelPreference("readerKeepScreenOn") private var keepScreenOn = false
@@ -202,7 +196,8 @@ struct ReaderView: View {
             _model = StateObject(wrappedValue: ReaderViewModel(
                 book: book, chapters: readerChapters, initialIndex: readerInitialIndex,
                 source: BookSource(bookSourceUrl: "https://reader-failure.invalid", bookSourceName: "正文失败测试源"),
-                service: ReaderFailureTestLoader()
+                service: ReaderFailureTestLoader(),
+                cache: ChapterContentCache(directory: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString))
             ))
             return
         }
@@ -228,7 +223,7 @@ struct ReaderView: View {
     }
 
     var body: some View {
-        if isLocalEPUB, (sessionEPUBMode ?? defaultEPUBMode) == .original {
+        if isLocalEPUB, (sessionEPUBMode ?? (isListening ? .text : defaultEPUBMode)) == .original {
             EPUBReaderView(book: book, chapters: model.chapters, initialIndex: model.currentIndex,
                            restoresSavedLocation: sessionEPUBMode == nil, defaultMode: defaultEPUBSelection) { chapterIndex in
                 model.select(index: chapterIndex)
@@ -239,34 +234,29 @@ struct ReaderView: View {
         }
     }
 
-    private var menuBackGesture: ReaderMenuBackGesture {
-        ReaderMenuBackGesture(menuVisible: showsReaderMenu) { dismiss() }
-    }
-
     private var textReaderBody: some View {
         readerCanvas
         .readerPresentationColorScheme(resolvedStyle.id == "night" ? .dark : .light)
         .readingTabBarHidden()
-        .navigationBarBackButtonHidden(true)
+        .navigationBarHidden(true)
         .statusBarHidden(hideStatusBar)
         .readingHomeIndicatorHidden(hideHomeIndicator)
         .alert("阅读设置未保存", isPresented: readerSettingErrorPresented(inSettings: false)) {
             Button("好", role: .cancel) { readerSettingSaveError = nil }
         } message: { Text(readerSettingSaveError ?? "") }
         .alert("朗读中断", isPresented: Binding(
-            get: { speech.errorMessage != nil && activeSheet == nil && bottomPanel == nil },
+            get: { speech.errorBookURL == book.bookUrl && speech.errorMessage != nil && activeSheet == nil && !showsListeningPlayer && bottomPanel == nil },
             set: { if !$0 { speech.clearError() } }
         )) {
-            Button("重试") { closePlayer(); startListening() }
+            Button("重试") { if speech.isPaused { speech.pauseOrResume() } }
             Button("取消", role: .cancel) { speech.clearError() }
         } message: { Text(speech.errorMessage ?? "") }
         .onAppear {
             guard !readerSessionActive else { return }
             readerSessionActive = true
             activity.beginReading(book)
-            speech.onNextChapter = { moveSpeechToChapter(direction: 1) }
-            speech.onPreviousChapter = { moveSpeechToChapter(direction: -1) }
-            speech.onRemoteStop = { closePlayer() }
+            if isLocalEPUB, isListening { sessionEPUBMode = .text }
+            followListeningChapter()
             UIDevice.current.isBatteryMonitoringEnabled = true
             brightnessBeforeReading = Double(UIScreen.main.brightness)
             if storedReaderBrightness >= 0.05 {
@@ -288,13 +278,12 @@ struct ReaderView: View {
             }
         }
         .onDisappear {
-            guard !showsTableOfContents, !showsContentSearch, chapterCommentsTarget == nil else { return }
+            guard !showsListeningPlayer, bookInfo == nil, !showsTableOfContents, !showsContentSearch, chapterCommentsTarget == nil else { return }
             if bottomPanel != nil { cancelPanel() }
             readerSessionActive = false
             model.stopBackgroundReading()
             isAutoReading = false
             UIApplication.shared.isIdleTimerDisabled = false
-            closePlayer()
             saveProgress(immediate: true)
             ReaderScreenOrientation.restoreApplicationDefault()
             if sessionEPUBMode != .original { activity.cancelReading(book) }
@@ -302,61 +291,50 @@ struct ReaderView: View {
             if !followsSystemBrightness {
                 UIScreen.main.brightness = CGFloat(brightnessBeforeReading)
             }
-            speechTimerTask?.cancel()
-            speechTimerRemaining = 0
-            speech.onNextChapter = nil
-            speech.onPreviousChapter = nil
-            speech.onRemoteStop = nil
         }
-        .modifier(menuBackGesture)
+        .background(ReaderEdgeBackNavigation(isAllowed: bottomPanel == nil && textSelection == nil))
         .overlay {
-            GeometryReader { viewport in
+            GeometryReader { _ in
                 VStack(spacing: 0) {
                     if showsReaderMenu {
                         readerTopChrome
-                            .modifier(menuBackGesture)
                             .transition(reduceMotion ? .opacity : .move(edge: .top).combined(with: .opacity))
                     }
-                    if listeningPack != nil {
-                        ReaderListeningPlayer(book: book, speech: speech, tint: foregroundColor,
-                                              background: readerChromeBackground, viewportHeight: viewport.size.height,
-                                              close: closePlayer)
+                    if isListening {
+                        ListeningPlayerViewport(tint: foregroundColor, background: readerChromeBackground)
+                        .allowsHitTesting(false)
                     } else {
                         Spacer(minLength: 0)
                     }
                     if showsReaderMenu {
                         readerBottomChrome
-                            .modifier(menuBackGesture)
                             .transition(reduceMotion ? .opacity : .move(edge: .bottom).combined(with: .opacity))
                     }
                 }
                 .animation(bottomPanel == nil ? readerMenuAnimation : nil, value: showsReaderMenu)
             }
-            .coordinateSpace(name: ReaderListeningPlayer.viewportSpace)
         }
         .accessibilityHidden(bottomPanel != nil)
         .allowsHitTesting(bottomPanel == nil)
         .overlay { readerBottomPanel.allowsHitTesting(bottomPanel != nil) }
+        .fullScreenCover(isPresented: $showsListeningPlayer) {
+            ListeningPlayerPage(reader: (isListening ? speech.listeningReader : nil) ?? model,
+                                readingPosition: readerPosition, onStart: startListening,
+                                onBrowseChapter: { moveChapter($0, previousPosition: 0) },
+                                onClose: { showsListeningPlayer = false })
+        }
         .sheet(item: $activeSheet) { sheet in
             switch sheet {
             case .bookmarks: bookmarksSheet
-            case .listening:
-                ReadingNavigationStack {
-                    listeningPreferences
-                }
             case .dictionary(let term): ReaderDictionary(term: term)
             case .replaceRule(let rule):
                 ReplaceRuleEditorView(rule: rule, readingBook: book)
             case .originalWebPage(let url):
-                InAppWebBrowser(url: url, close: { activeSheet = nil })
+                InAppWebBrowser(url: url, isChapterPage: true, close: { activeSheet = nil })
                     .ignoresSafeArea()
-            case .bookInfo:
-                ReaderBookInfoSheet(book: model.bookAtReadingPosition(readerPosition),
-                                    source: model.source ?? sourceLibrary.sources.first { $0.id == book.origin },
-                                    chapters: model.chapters)
-                    .environment(\.resumeBookReading, resumeFromBookInfo)
             }
         }
+        .readerBookInfoDestination($bookInfo)
         .fullScreenCover(isPresented: $showsTableOfContents) { tableOfContents }
         .fullScreenCover(isPresented: $showsContentSearch) { contentSearchSheet }
         .fullScreenCover(item: $chapterCommentsTarget) { target in
@@ -419,12 +397,10 @@ struct ReaderView: View {
             await pending?.value
             guard !Task.isCancelled else { return }
             if progressSaveGeneration == pendingGeneration { progressSaveTask = nil }
-            if let chapter = model.currentChapter {
+            if isListening {
+                followListeningChapter()
+            } else if let chapter = model.currentChapter {
                 await library.updateProgress(for: book, chapter: chapter, position: readerPosition)
-            }
-            if resumesSpeechAfterChapterLoad {
-                resumesSpeechAfterChapterLoad = false
-                if model.content.isEmpty { closePlayer() } else { startConfiguredSpeech() }
             }
         }
         .task(id: "\(model.chapterLoadGeneration):\(model.currentIndex):\(model.hasLoadedCurrentChapter)") {
@@ -463,23 +439,13 @@ struct ReaderView: View {
         .onChange(of: speech.isSpeaking) { _ in
             updateIdleTimer()
         }
-        .onChange(of: speech.completionCount) { _ in
-            if readAloudByPage {
-                continueSpeechToNextPage()
-            } else {
-                continueSpeechToNextChapter()
-            }
+        .onChange(of: speechChapter) { _ in
+            followListeningChapter()
         }
         .onChange(of: speech.spokenPosition) { position in
             guard let position, speechChapter == model.currentIndex, pageAnimation != 3,
                   !readerPageRanges.indices.contains(currentPage - 1) || !NSLocationInRange(position, readerPageRanges[currentPage - 1]) else { return }
             readerJumpPosition = position
-        }
-        .onChange(of: speech.errorMessage) { error in
-            if error != nil { closePlayer() }
-        }
-        .onChange(of: readAloudByPage) { _ in
-            restartSpeechAfterReaderLayoutChange()
         }
         .onChange(of: readAloudWakeLock) { _ in
             updateIdleTimer()
@@ -606,18 +572,17 @@ struct ReaderView: View {
             .disabled(model.isLoading || model.scrollRetries.contains(model.currentIndex))
             .accessibilityIdentifier("reader.retryChapter")
             if model.source != nil {
-                Button("换源", action: openSourceSwitch)
+                Button(action: openSourceSwitch) { Label("换源", systemImage: SourceSwitchView.symbol) }
                     .accessibilityIdentifier("reader.failureChangeSource")
             }
         }
         .readingSecondaryButtonStyle()
-        if model.source?.ruleContent?.content?.contains("source.bookSourceComment") == true, let chapter = model.currentChapter {
+        if let chapter = model.browserRecoveryChapter {
             Button("在原站打开本章") { browserChapter = chapter }
         }
     }
 
     private func resumeFromBookInfo(_ selectedBook: Book, _ chapters: [BookChapter], _ source: BookSource?, _ index: Int?) {
-        activeSheet = nil
         if book.bookUrl != selectedBook.bookUrl || book.origin != selectedBook.origin || model.chapters != chapters {
             let previous = book
             var updated = selectedBook
@@ -791,7 +756,7 @@ struct ReaderView: View {
             isEInkMode: themeMode == "3",
             backgroundColor: activeBackgroundImage == nil ? resolvedStyle.background : .clear,
             foregroundColor: resolvedStyle.foreground,
-            spokenRange: speechChapter == model.currentIndex ? speech.spokenRange : nil,
+            spokenText: speechChapter == model.currentIndex ? speech.spokenText : nil,
             spokenPosition: speechChapter == model.currentIndex ? speech.spokenPosition : nil,
             speechColor: resolvedStyle.speechBackground,
             requestedPosition: pageAnimation == 3 ? readerPosition : model.requestedPosition,
@@ -1063,7 +1028,7 @@ struct ReaderView: View {
             .accessibilityElement(children: .combine)
             HStack(spacing: 0) {
                 if model.source != nil {
-                    readerChromeIconButton("rectangle.2.swap", label: "换源", action: openSourceSwitch)
+                    readerChromeIconButton(SourceSwitchView.symbol, label: "换源", action: openSourceSwitch)
                         .accessibilityIdentifier("reader.changeSource")
                         .accessibilityValue(book.originName)
                     Rectangle()
@@ -1104,9 +1069,12 @@ struct ReaderView: View {
                 }
                 .accessibilityIdentifier("reader.chapterComments")
             }
-            Button("书籍信息", systemImage: "info.circle") {
+            Button("书籍详情", systemImage: "info.circle") {
                 showsReaderMenu = false
-                activeSheet = .bookInfo
+                isAutoReading = false
+                bookInfo = ReaderBookInfoPage(book: model.bookAtReadingPosition(readerPosition),
+                                              source: model.source ?? sourceLibrary.sources.first { $0.id == book.origin },
+                                              chapters: model.chapters, resume: resumeFromBookInfo)
             }
             if let url = model.currentChapterWebPageURL {
                 Button("打开原网页", systemImage: "safari") {
@@ -1135,9 +1103,12 @@ struct ReaderView: View {
                     illustrationChapter = model.currentChapter
                 }
             }
-            Button(bookmarkSaved ? "已添加书签" : "添加书签", systemImage: bookmarkSaved ? "bookmark.fill" : "bookmark", action: addBookmark)
-                .disabled(isSavingBookmark)
-                .accessibilityIdentifier("reader.addBookmark")
+            let bookmark = currentBookmark
+            Button(bookmark == nil ? "添加书签" : "移除书签", systemImage: bookmark == nil ? "bookmark" : "bookmark.slash") {
+                toggleBookmark(bookmark)
+            }
+            .disabled(isSavingBookmark)
+            .accessibilityIdentifier("reader.addBookmark")
             Button("书签列表", systemImage: "list.bullet") {
                 showsReaderMenu = false
                 activeSheet = .bookmarks
@@ -1161,9 +1132,9 @@ struct ReaderView: View {
                             openPanel(.autoRead)
                         }
                     }
-                    quickAction("听书", icon: "headphones", action: openListeningSettings)
-                        .disabled(!canStartListening)
-                        .opacity(canStartListening ? 1 : 0.38)
+                    quickAction("听书", icon: "headphones", action: openListeningPlayer)
+                        .disabled(!canOpenListeningPlayer)
+                        .opacity(canOpenListeningPlayer ? 1 : 0.38)
                 }
             }
             readerChapterControls
@@ -1331,7 +1302,7 @@ struct ReaderView: View {
 
     private func updateIdleTimer() {
         UIApplication.shared.isIdleTimerDisabled = keepScreenOn || isAutoReading
-            || (readAloudWakeLock && speech.isSpeaking)
+            || (readAloudWakeLock && isListening && speech.isSpeaking)
     }
 
     private func pageDidChange() {
@@ -1350,8 +1321,8 @@ struct ReaderView: View {
                         .onTapGesture { dismissTopPanel() }
                         .accessibilityHidden(true)
                         .transition(.opacity)
-                    let height = dynamicTypeSize.isAccessibilitySize ? viewport.size.height : panelHeight(bottomPanel)
-                    ReaderBottomPanel(height: min(height, viewport.size.height),
+                    let height = dynamicTypeSize.isAccessibilitySize ? viewport.size.height : min(panelHeight(bottomPanel), viewport.size.height)
+                    ReaderBottomPanel(height: height,
                                       bottomInset: viewport.safeAreaInsets.bottom,
                                       dismiss: { cancelPanel() }) {
                         switch bottomPanel {
@@ -1363,7 +1334,7 @@ struct ReaderView: View {
                     .disabled(savingPanel)
                     .accessibilityHidden(showsPageSettings)
                     .allowsHitTesting(!showsPageSettings)
-                    .transition(panelTransition)
+                    .transition(panelTransition(distance: height + viewport.safeAreaInsets.bottom))
                     .zIndex(1)
                     if showsPageSettings {
                         detailPanel(.page, isPresented: $showsPageSettings, viewport: viewport)
@@ -1387,10 +1358,8 @@ struct ReaderView: View {
         }
     }
 
-    private var panelTransition: AnyTransition {
-        // Earlier systems leave accessibility frames at the slide-in starting position.
-        if #available(iOS 18, *), !reduceMotion { return .move(edge: .bottom) }
-        return .opacity
+    private func panelTransition(distance: CGFloat) -> AnyTransition {
+        reduceMotion ? .opacity : .offset(y: distance)
     }
 
     private var readerSettingsFields: [any ReaderPanelField] {
@@ -1463,7 +1432,7 @@ struct ReaderView: View {
                           dismiss: { isPresented.wrappedValue = false }) {
             styleDetail(detail, isPresented: isPresented)
         }
-        .transition(panelTransition)
+        .transition(panelTransition(distance: viewport.size.height + viewport.safeAreaInsets.bottom))
     }
 
     private func panelHeight(_ panel: BottomPanel) -> CGFloat {
@@ -1524,7 +1493,6 @@ struct ReaderView: View {
                 .padding(16)
                 .frame(maxWidth: .infinity)
             }
-            .readingSheetSurface()
             .readingSheetTitle("自动阅读")
             .toolbar {
                 ReadingSheetActions { ReadingSheetCloseButton(action: cancelPanel) }
@@ -1543,7 +1511,6 @@ struct ReaderView: View {
                     .padding(.bottom, 26)
                     .frame(maxWidth: .infinity)
             }
-            .readingSheetSurface()
             .readingSheetTitle("阅读样式")
             .toolbar {
                 ReadingSheetActions {
@@ -1580,7 +1547,6 @@ struct ReaderView: View {
                 }
             }
             .readingScrollContentBackgroundHidden()
-            .readingSheetSurface()
             .readingSheetTitle(detail.rawValue)
             .toolbar {
                 ReadingSheetActions {
@@ -1668,7 +1634,7 @@ struct ReaderView: View {
                 .foregroundStyle(.primary)
                 .contentShape(Rectangle())
             }
-            .listRowBackground(Color(uiColor: .secondarySystemBackground))
+            .listRowBackground(ReadingTheme.sheetCard)
         }
 
         pageSection("章节标题", icon: "textformat.size") {
@@ -1761,7 +1727,7 @@ struct ReaderView: View {
                                             @ViewBuilder content: () -> Content) -> some View {
         Section {
             content()
-                .listRowBackground(Color(uiColor: .secondarySystemBackground))
+                .listRowBackground(ReadingTheme.sheetCard)
         } header: {
             Label(title, systemImage: icon)
                 .font(.subheadline.weight(.semibold))
@@ -1925,7 +1891,7 @@ struct ReaderView: View {
                 } label: {
                     Image(systemName: "photo")
                         .frame(width: 32, height: 32)
-                        .background(Color(uiColor: .secondarySystemBackground), in: Circle())
+                        .background(ReadingTheme.sheetCard, in: Circle())
                         .frame(maxWidth: .infinity, minHeight: 44)
                         .contentShape(Rectangle())
                 }
@@ -1972,7 +1938,7 @@ struct ReaderView: View {
             Image(systemName: icon)
                 .font(.body.weight(.medium))
                 .frame(maxWidth: .infinity, minHeight: 32)
-                .background(Color(uiColor: .systemBackground), in: Capsule())
+                .background(ReadingTheme.sheetBackground, in: Capsule())
                 .frame(minHeight: 44)
                 .contentShape(Rectangle())
         }
@@ -2081,7 +2047,6 @@ struct ReaderView: View {
                 .padding(.vertical, 8)
                 .frame(maxWidth: .infinity)
             }
-            .readingSheetSurface()
             .readingSheetTitle("阅读设置")
             .alert("阅读设置未保存", isPresented: readerSettingErrorPresented(inSettings: true)) {
                 Button("好", role: .cancel) { readerSettingSaveError = nil }
@@ -2091,11 +2056,6 @@ struct ReaderView: View {
             }
         }
         .navigationViewStyle(.stack)
-    }
-
-    private var listeningPreferences: some View {
-        ListeningSettingsView(presented: true, isListening: listeningPack != nil, canStart: canStartListening,
-                              speechTimerRemaining: speechTimerRemaining, onStart: startListening)
     }
 
     private func refreshCurrentChapter() {
@@ -2114,7 +2074,7 @@ struct ReaderView: View {
         ReaderTableOfContents(
             directory: model.directory, simplifiedChinese: simplifiedChinese, currentIndex: model.currentIndex, bookTitle: book.name.readerText(simplified: simplifiedChinese),
             bookURL: model.book.bookUrl, sourceID: model.onlineSourceID, cache: model.chapterCache, descending: $tocDescending,
-            onCache: model.cacheChapters
+            onCache: model.cacheChapters, onCacheChapter: model.cacheChapter(at:)
         ) { index in
             if index != model.currentIndex { navigate(to: index) }
             showsTableOfContents = false
@@ -2130,7 +2090,7 @@ struct ReaderView: View {
                 } else if results.isEmpty {
                     ReadingUnavailableView.search(text: contentSearchQuery)
                 } else {
-                    List {
+                    ReadingSheetList {
                         Section("本章 · \(results.count) 个匹配段落") {
                             ForEach(results) { paragraph in
                                 Button {
@@ -2207,7 +2167,9 @@ struct ReaderView: View {
                         .swipeActions {
                             Button("删除", role: .destructive) { Task { await activity.removeBookmark(bookmark) } }
                         }
+                        .listRowBackground(ReadingTheme.sheetCard)
                     }
+                    .readingScrollContentBackgroundHidden()
                 }
             }
             .readingSheetTitle("书签")
@@ -2219,26 +2181,26 @@ struct ReaderView: View {
         }
     }
 
-    private var bookmarkSaved: Bool {
+    private var currentBookmark: Bookmark? {
         let page = currentPage - 1
         let range = pageAnimation != 3 && readerPageRanges.indices.contains(page) ? readerPageRanges[page] : nil
-        return !model.bookmarks(at: readerPosition, in: activity.bookmarks, pageRange: range).isEmpty
+        let matches = model.bookmarks(at: readerPosition, in: activity.bookmarks, pageRange: range)
+        return matches.first { $0.chapterPosition == readerPosition } ?? matches.first
     }
 
-    private func addBookmark() {
-        guard !isSavingBookmark, !bookmarkSaved, let chapter = model.currentChapter else { return }
+    private func toggleBookmark(_ bookmark: Bookmark?) {
+        guard !isSavingBookmark, let chapter = model.currentChapter else { return }
         let currentBook = book
         let position = readerPosition
         let content = model.content
         isSavingBookmark = true
         Task {
             defer { isSavingBookmark = false }
-            await activity.addBookmark(
-                book: currentBook,
-                chapter: chapter,
-                position: position,
-                content: content
-            )
+            if let bookmark {
+                await activity.removeBookmark(bookmark)
+            } else {
+                await activity.addBookmark(book: currentBook, chapter: chapter, position: position, content: content)
+            }
         }
     }
 
@@ -2269,6 +2231,10 @@ struct ReaderView: View {
     }
 
     private func saveProgress(immediate: Bool = false) {
+        if isListening {
+            if immediate { speech.saveListeningProgress() }
+            return
+        }
         guard model.hasLoadedCurrentChapter, let chapter = model.currentChapter else { return }
         let position = readerPosition
         let currentBook = book
@@ -2287,13 +2253,7 @@ struct ReaderView: View {
     }
 
     private func closePlayer() {
-        speechStartGeneration &+= 1
-        resumesSpeechAfterChapterLoad = false
-        listeningPack = nil
-        speechChapter = nil
-        speech.stop()
-        speechTimerTask?.cancel()
-        speechTimerRemaining = 0
+        if isListening { speech.stop() }
     }
 
     private func stopSpeechForContentChange() {
@@ -2301,155 +2261,43 @@ struct ReaderView: View {
         isAutoReading = false
     }
 
-    private func restartSpeechAfterReaderLayoutChange() {
-        guard speech.isSpeaking || speech.isPaused else { return }
-        speechStartGeneration &+= 1
-        speech.stop()
-        startConfiguredSpeech()
-    }
-
     private var canStartListening: Bool {
-        listeningPack == nil && !model.hasImageContent && !model.content.isEmpty
+        !isListening && !model.hasImageContent && !model.content.isEmpty
     }
 
-    private func openListeningSettings() {
-        guard canStartListening else { return }
+    private var canOpenListeningPlayer: Bool { isListening || canStartListening }
+
+    private func openListeningPlayer() {
+        guard canOpenListeningPlayer else { return }
         showsReaderMenu = false
-        activeSheet = .listening
+        showsListeningPlayer = true
     }
 
     private func startListening() {
         guard canStartListening else { return }
         showsReaderMenu = false
-        guard let pack = OfflineVoicePack.selected else {
-            activeSheet = .listening
-            return
-        }
-        activeSheet = nil
         isAutoReading = false
-        listeningPack = pack
-        listeningVoice = .preferred
-        scheduleSpeechTimer()
-        startConfiguredSpeech()
-    }
-
-    private func startConfiguredSpeech() {
-        guard let listeningPack else { return }
-        configureSpeech()
-        speechChapter = model.currentIndex
-        if readAloudByPage {
-            guard !readerPageRanges.isEmpty else {
-                guard !model.content.isEmpty else { return }
-                let generation = speechStartGeneration
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-                    guard generation == speechStartGeneration,
-                          readAloudByPage,
-                          !speech.isSpeaking,
-                          !speech.isPaused else { return }
-                    startConfiguredSpeech()
-                }
-                return
-            }
-            let pageIndex = readerPageRanges.firstIndex { readerPosition < NSMaxRange($0) }
-                ?? max(readerPageRanges.count - 1, 0)
-            speechPageIndex = pageIndex
-            speakPage(at: pageIndex, from: readerPosition)
-            return
-        }
-        let start = model.paragraphs.last(where: { $0.id <= readerPosition })?.id ?? 0
-        let range = NSRange(location: start, length: model.content.utf16.count - start)
-        speech.speak(model.content, reading: range, continuesAcrossChapters: true, voice: listeningVoice, pack: listeningPack)
-    }
-
-    private func speakPage(at index: Int, from position: Int? = nil) {
-        guard readerPageRanges.indices.contains(index) else {
-            continueSpeechToNextChapter()
-            return
-        }
-        let range = readerPageRanges[index]
-        let start = min(max(position ?? range.location, range.location), NSMaxRange(range))
-        let pageRange = NSRange(location: start, length: max(NSMaxRange(range) - start, 0))
-        guard pageRange.length > 0 else {
-            continueSpeechToNextPage()
-            return
-        }
-        speech.speak(model.content, reading: pageRange, continuesAcrossChapters: true, voice: listeningVoice, pack: listeningPack)
-    }
-
-    private func continueSpeechToNextPage() {
-        guard listeningPack != nil else { return }
-        guard readAloudByPage, readerPageRanges.indices.contains(speechPageIndex) else {
-            continueSpeechToNextChapter()
-            return
-        }
-        readerPosition = NSMaxRange(readerPageRanges[speechPageIndex])
-        guard readerPageRanges.indices.contains(speechPageIndex + 1) else {
-            continueSpeechToNextChapter()
-            return
-        }
-        speechPageIndex += 1
-        let nextPosition = readerPageRanges[speechPageIndex].location
-        readerPosition = nextPosition
-        readerJumpPosition = nextPosition
-        speakPage(at: speechPageIndex)
-    }
-
-    private func continueSpeechToNextChapter() {
-        guard listeningPack != nil else { return }
-        guard model.canGoNext else {
-            closePlayer()
-            return
-        }
-        saveProgress(immediate: true)
-        resumesSpeechAfterChapterLoad = true
-        readerJumpPosition = nil
-        model.goNext()
-        readerPosition = model.requestedPosition
-    }
-
-    private func moveSpeechToChapter(direction: Int) {
-        let canMove = direction < 0 ? model.canGoPrevious : model.canGoNext
-        guard canMove else { return }
-        speech.stop()
-        saveProgress(immediate: true)
-        resumesSpeechAfterChapterLoad = true
-        readerJumpPosition = nil
-        if direction < 0 { model.goPrevious() } else { model.goNext() }
-        readerPosition = model.requestedPosition
-    }
-
-    private func scheduleSpeechTimer() {
-        speechTimerTask?.cancel()
-        speechTimerRemaining = ttsTimer
-        guard speechTimerRemaining > 0 else { return }
-        speechTimerTask = Task { @MainActor in
-            do {
-                while speechTimerRemaining > 0 {
-                    try await Task.sleep(nanoseconds: 60 * 1_000_000_000)
-                    if !speech.isSpeaking && !speech.isPaused && !resumesSpeechAfterChapterLoad {
-                        speechTimerRemaining = 0
-                        break
-                    }
-                    if !speech.isPaused { speechTimerRemaining -= 1 }
-                    if speechTimerRemaining == 0 {
-                        closePlayer()
-                    }
-                }
-            } catch { }
-        }
-    }
-
-    private func configureSpeech() {
+        progressSaveTask?.cancel()
         speech.configure(
             speechRate: ttsSpeechRate,
             ignoresAudioFocus: ignoreAudioFocus,
             pausesForPhoneCalls: pauseReadAloudWhilePhoneCalls,
             mediaButtonPerNext: mediaButtonPerNext,
-            bookName: model.book.name,
-            chapterTitle: model.title,
-            author: model.book.author,
             coverAddress: model.book.displayCoverURL
         )
+        speech.startListening(to: model, at: readerPosition, voice: ListeningVoice.preferred, library: library, rules: replaceRules)
+    }
+
+    private func followListeningChapter() {
+        guard let index = speechChapter, model.chapters.indices.contains(index) else { return }
+        let position = speech.listeningPosition
+        if model.currentIndex != index {
+            readerJumpPosition = nil
+            model.select(index: index, position: position)
+        } else {
+            readerJumpPosition = position
+        }
+        readerPosition = position
     }
 
     private static func globalPageAnimation() -> Int {
@@ -2473,130 +2321,14 @@ struct ReaderView: View {
 #if DEBUG
 private struct ReaderFailureTestLoader: ChapterContentLoading {
     func loadContent(book: Book, chapter: BookChapter, source: BookSource, nextChapterURL: String?, maxPages: Int) async -> ChapterContentReport {
-        .init(content: ProcessInfo.processInfo.arguments.contains("-uiReaderPartialFailure") ? "本章只加载了第一页正文。" : "",
+        if chapter.url == ProcessInfo.processInfo.environment["READER_TEST_AVAILABLE_CHAPTER_URL"] {
+            return .init(content: "已下载的测试正文")
+        }
+        return .init(content: ProcessInfo.processInfo.arguments.contains("-uiReaderPartialFailure") ? "本章只加载了第一页正文。" : "",
               diagnostics: [.init(severity: .error, code: "content.request", message: "测试书源正文请求失败", rule: chapter.url)])
     }
 }
 #endif
-
-private struct ReaderListeningPlayer: View {
-    let book: Book
-    @ObservedObject var speech: ReaderSpeechController
-    let tint: Color
-    let background: Color
-    static let viewportSpace = "reader.listeningPlayer.viewport"
-    let viewportHeight: CGFloat
-    let close: () -> Void
-
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var dockedRight = false
-    @State private var verticalFraction: CGFloat = 1
-    @GestureState private var dragCenter: CGPoint?
-
-    private enum Control { case playback, close }
-    private let buttonSize: CGFloat = 44
-
-    var body: some View {
-        GeometryReader { geometry in
-            let size = geometry.size
-            let area = geometry.frame(in: .named(Self.viewportSpace))
-            let insetX = min(size.width / 2, buttonSize + 12)
-            let insetY = min(viewportHeight / 2, buttonSize / 2 + 10)
-            let travelY = viewportHeight - 2 * insetY
-            // Keep the preferred height in the full reader. Menus only constrain the visible position.
-            let minY = max(insetY, min(area.minY + buttonSize / 2, area.midY))
-            let maxY = max(minY, min(viewportHeight - insetY, area.maxY - buttonSize / 2))
-            let preferredY = insetY + verticalFraction * travelY
-            let anchor = CGPoint(x: dockedRight ? size.width - insetX : insetX,
-                                 y: min(max(preferredY, minY), maxY))
-            let snap: Animation? = reduceMotion ? nil : .spring(response: 0.32, dampingFraction: 0.86)
-            let center = dragCenter ?? anchor
-
-            let coverOnRight = center.x == size.width / 2 ? dockedRight : center.x > size.width / 2
-
-            controls(coverOnRight: coverOnRight)
-                .animation(snap, value: coverOnRight)
-                .contentShape(Rectangle())
-                .highPriorityGesture(
-                    DragGesture(minimumDistance: 6, coordinateSpace: .global)
-                        .updating($dragCenter) { value, center, _ in
-                            center = CGPoint(
-                                x: min(max(anchor.x + value.translation.width, insetX), size.width - insetX),
-                                y: min(max(anchor.y + value.translation.height, minY), maxY)
-                            )
-                        }
-                        .onEnded { value in
-                            withAnimation(snap) {
-                                dockedRight = anchor.x + value.translation.width > size.width / 2
-                                if travelY > 0, value.translation.height != 0 {
-                                    let y = min(max(anchor.y + value.translation.height, minY), maxY)
-                                    verticalFraction = (y - insetY) / travelY
-                                }
-                            }
-                        }
-                )
-                .position(x: center.x, y: center.y - area.minY)
-                .animation(dragCenter == nil ? snap : nil, value: dragCenter == nil)
-        }
-    }
-
-    private func controls(coverOnRight: Bool) -> some View {
-        let order: [Control] = coverOnRight ? [.close, .playback] : [.playback, .close]
-        return HStack(spacing: 0) {
-            ForEach(order, id: \.self) { control in
-                switch control {
-                case .playback:
-                    Button { speech.pauseOrResume() } label: {
-                        Image(systemName: speech.isPaused ? "play.fill" : "pause.fill")
-                            .font(.system(size: 15, weight: .bold))
-                            .foregroundStyle(.white)
-                            .opacity(speech.isPreparingAudio ? 0 : 1)
-                            .frame(width: 36, height: 36)
-                            .background {
-                                BookCoverArtwork(title: book.name, author: book.author, remoteURL: book.displayCoverURL,
-                                                 width: 36, height: 36)
-                                    .overlay(Color.black.opacity(0.48))
-                                    .clipShape(Circle())
-                                    .allowsHitTesting(false)
-                                    .accessibilityHidden(true)
-                            }
-                            .overlay {
-                                if speech.isPreparingAudio {
-                                    RagdollLoading(width: 28)
-                                        .allowsHitTesting(false)
-                                        .accessibilityHidden(true)
-                                }
-                            }
-                            .frame(width: buttonSize, height: buttonSize)
-                            .contentShape(Rectangle())
-                    }
-                    .disabled(!speech.isSpeaking && !speech.isPaused)
-                    .accessibilityLabel(speech.isPaused ? "继续播放" : "暂停播放")
-                    .accessibilityValue(speech.isPreparingAudio ? "正在缓冲" : "")
-                case .close:
-                    Button(action: close) {
-                        Image(systemName: "xmark")
-                            .font(.system(size: 11, weight: .semibold))
-                            .frame(width: 24, height: 24)
-                            .background(tint.opacity(0.09), in: Circle())
-                            .frame(width: buttonSize, height: buttonSize)
-                            .contentShape(Rectangle())
-                    }
-                    .accessibilityLabel("关闭播放器")
-                }
-            }
-        }
-        .environment(\.layoutDirection, .leftToRight)
-        .buttonStyle(.plain)
-        .foregroundStyle(tint)
-        .background {
-            Capsule().fill(background)
-                .overlay(Capsule().strokeBorder(tint.opacity(0.15), lineWidth: 1))
-                .frame(height: 40)
-        }
-        .shadow(color: .black.opacity(0.12), radius: 4, y: 2)
-    }
-}
 
 private struct ReaderBottomPanel<Content: View>: View {
     let height: CGFloat
@@ -2616,7 +2348,7 @@ private struct ReaderBottomPanel<Content: View>: View {
         }
         .frame(height: height)
         .padding(.bottom, bottomInset)
-        .background(Color(uiColor: .systemBackground))
+        .background(ReadingTheme.sheetBackground)
         .clipShape(TopCorners())
         .simultaneousGesture(DragGesture(coordinateSpace: .named("reader.bottomPanel"))
             .updating($dragOffset) { drag, offset, _ in

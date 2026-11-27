@@ -383,11 +383,10 @@ public struct Bookmark: Codable, Hashable, Identifiable, Sendable {
     }
 
     public func resolvedChapterIndex(in chapters: [BookChapter]) -> Int? {
-        if !chapterName.isEmpty,
-           let index = chapters.firstIndex(where: { !$0.isVolume && $0.title == chapterName }) {
-            return index
-        }
-        return chapters.firstIndex(where: { !$0.isVolume && $0.index == chapterIndex })
+        let saved = chapters.firstIndex { !$0.isVolume && $0.index == chapterIndex }
+        if chapterName.isEmpty { return saved }
+        if let saved, chapters[saved].title == chapterName { return saved }
+        return chapters.firstIndex { !$0.isVolume && $0.title == chapterName } ?? saved
     }
 
     public init(from decoder: Decoder) throws {

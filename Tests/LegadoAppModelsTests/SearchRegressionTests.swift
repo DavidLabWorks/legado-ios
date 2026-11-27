@@ -139,6 +139,31 @@ struct SearchRegressionTests {
         model.cancel(reset: true)
     }
 
+    @Test func pendingBrowserSearchWaitsWhileOtherSourcesPageAndResumesWithoutSkipping() async throws {
+        let transport = GatedModelSearchTransport(statusCode: 403, statusHost: "101kks.com")
+        await transport.release()
+        let model = model(transport: transport, repository: InMemorySearchBookRepository())
+        defer { model.cancel(reset: true) }
+        var blocked = BookSource(bookSourceUrl: "https://101kks.com", bookSourceName: "101 看书")
+        blocked.searchUrl = "/search/{{key}}/{{page}}.html"
+        blocked.ruleSearch = .init(bookList: "//a", name: "text", bookUrl: "href")
+        model.search(keyword: "从武林门派", sources: [blocked, source("working")])
+        try await waitUntil { model.state == .finished }
+        let first = try #require(model.browserPage)
+        model.loadMore()
+        try await waitUntil { !model.isLoadingMore }
+        #expect(!model.hasMore)
+        let beforeImport = await transport.requests()
+        #expect(beforeImport.filter { $0.url?.host == "working.example" }.count == 2)
+        #expect(beforeImport.filter { $0.url?.host == "101kks.com" }.count == 1)
+        try await model.useBrowserResults("<a href='/book/21828.html'>从武林门派</a>", for: first)
+        #expect(model.hasMore)
+        model.loadMore()
+        try await waitUntil { !model.isLoadingMore }
+        #expect(model.browserPage?.page == 2)
+        #expect(await transport.requests().compactMap(\.url).filter { $0.host == "101kks.com" }.map(\.lastPathComponent) == ["1.html", "2.html"])
+    }
+
     @Test func unsupportedRuleIsReportedOnceWhileOtherSourcesKeepPaging() async throws {
         let transport = GatedModelSearchTransport()
         await transport.release()
@@ -216,12 +241,14 @@ private actor GatedModelSearchTransport: HTTPTransport {
     nonisolated let started: AsyncStream<Void>
     private let continuation: AsyncStream<Void>.Continuation
     private let statusCode: Int
+    private let statusHost: String?
     private let fastHost: String?
     private var released = false
     private var pending: [UUID: (URLRequest, CheckedContinuation<HTTPResponse, Error>)] = [:]
     private var recorded: [URLRequest] = []
-    init(fastHost: String? = nil, statusCode: Int = 200) {
+    init(fastHost: String? = nil, statusCode: Int = 200, statusHost: String? = nil) {
         self.statusCode = statusCode
+        self.statusHost = statusHost
         self.fastHost = fastHost
         (started, continuation) = AsyncStream.makeStream(of: Void.self)
     }
@@ -248,6 +275,6 @@ private actor GatedModelSearchTransport: HTTPTransport {
     func requests() -> [URLRequest] { recorded }
     private func response(_ request: URLRequest) -> HTTPResponse {
         .init(data: Data(#"{"books":[{"name":"书","author":"作者","url":"/fresh"}]}"#.utf8),
-              statusCode: statusCode, headers: [:], finalURL: request.url!)
+              statusCode: statusHost == nil || statusHost == request.url?.host ? statusCode : 200, headers: [:], finalURL: request.url!)
     }
 }

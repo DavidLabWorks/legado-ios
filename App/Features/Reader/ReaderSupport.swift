@@ -58,10 +58,9 @@ struct ReaderChapterCommentsView: View {
                         }
                     }
                 }
-                .listRowBackground(Color(uiColor: .secondarySystemBackground))
+                .listRowBackground(ReadingTheme.sheetCard)
             }
             .readingScrollContentBackgroundHidden()
-            .readingSheetSurface()
             .readingSheetTitle("本章评论")
             .toolbar {
                 ReadingSheetActions {
@@ -182,9 +181,10 @@ struct ReaderChapterCommentsView: View {
 
 struct InAppWebBrowser: UIViewControllerRepresentable {
     let url: URL
+    var isChapterPage = false
     let close: () -> Void
 
-    func makeCoordinator() -> Coordinator { Coordinator(close: close) }
+    func makeCoordinator() -> Coordinator { Coordinator(chapterURL: isChapterPage ? url : nil, close: close) }
 
     func makeUIViewController(context: Context) -> SFSafariViewController {
         let controller = SFSafariViewController(url: url)
@@ -195,9 +195,175 @@ struct InAppWebBrowser: UIViewControllerRepresentable {
     func updateUIViewController(_ controller: SFSafariViewController, context: Context) {}
 
     final class Coordinator: NSObject, SFSafariViewControllerDelegate {
+        let chapterURL: URL?
         let close: () -> Void
-        init(close: @escaping () -> Void) { self.close = close }
+        init(chapterURL: URL?, close: @escaping () -> Void) {
+            self.chapterURL = chapterURL
+            self.close = close
+        }
+        func safariViewController(_ controller: SFSafariViewController, didCompleteInitialLoad didLoadSuccessfully: Bool) {
+            guard let chapterURL else { return }
+            let result = didLoadSuccessfully ? "初始导航完成" : "初始导航失败"
+            DiagnosticLog.shared.record(didLoadSuccessfully ? .info : .warning, category: "章节原网页",
+                message: "系统 Safari · \(DiagnosticLog.safeURL(chapterURL)) · \(result)（HTTP 状态不可见）")
+        }
+        func safariViewController(_ controller: SFSafariViewController, initialLoadDidRedirectTo url: URL) {
+            guard let chapterURL else { return }
+            DiagnosticLog.shared.record(category: "章节原网页",
+                message: "系统 Safari · \(DiagnosticLog.safeURL(chapterURL)) · 初始导航重定向到 \(DiagnosticLog.safeURL(url))")
+        }
         func safariViewControllerDidFinish(_ controller: SFSafariViewController) { close() }
+    }
+}
+
+struct ReaderEdgeBackNavigation: UIViewControllerRepresentable {
+    var isAllowed = true
+
+    func makeUIViewController(context: Context) -> Controller { Controller() }
+    func updateUIViewController(_ controller: Controller, context: Context) { controller.isAllowed = isAllowed }
+
+    final class Controller: UIViewController, UIGestureRecognizerDelegate, UINavigationControllerDelegate, UIViewControllerAnimatedTransitioning {
+        var isAllowed = true
+        private lazy var edgePan: UIPanGestureRecognizer = {
+            let gesture = UIPanGestureRecognizer(target: self, action: #selector(dragged(_:)))
+            gesture.maximumNumberOfTouches = 1
+            gesture.delegate = self
+            return gesture
+        }()
+        private var interaction: UIPercentDrivenInteractiveTransition?
+        private weak var draggedModal: UIViewController?
+
+        override func loadView() {
+            view = UIView()
+            view.isUserInteractionEnabled = false
+        }
+
+        override func viewDidAppear(_ animated: Bool) {
+            super.viewDidAppear(animated)
+            navigationController?.view.addGestureRecognizer(edgePan)
+        }
+
+        override func viewDidDisappear(_ animated: Bool) {
+            super.viewDidDisappear(animated)
+            edgePan.view?.removeGestureRecognizer(edgePan)
+        }
+
+        func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+            let x = touch.location(in: gestureRecognizer.view).x
+            return isAllowed && (0...28).contains(x)
+        }
+
+        // The player presents a full-screen reader with its own single-page navigation stack.
+        private var modalReader: UIViewController? {
+            guard let navigationController, navigationController.viewControllers.count == 1 else { return nil }
+            var host: UIViewController = navigationController
+            while let parent = host.parent { host = parent }
+            guard host.modalPresentationStyle == .overFullScreen, host.presentingViewController != nil,
+                  host.presentedViewController == nil else { return nil }
+            return host
+        }
+
+        func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+            let velocity = edgePan.velocity(in: edgePan.view)
+            guard velocity.x > abs(velocity.y), isAllowed, let navigationController,
+                  navigationController.viewControllers.count > 1 || modalReader != nil,
+                  navigationController.transitionCoordinator == nil, navigationController.presentedViewController == nil
+            else { return false }
+            var page = parent
+            while let controller = page {
+                if controller === navigationController.topViewController { return true }
+                page = controller.parent
+            }
+            return false
+        }
+
+        func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
+                               shouldBeRequiredToFailBy otherGestureRecognizer: UIGestureRecognizer) -> Bool {
+            otherGestureRecognizer is UIPanGestureRecognizer
+        }
+
+        @objc private func dragged(_ gesture: UIPanGestureRecognizer) {
+            let width = max(1, gesture.view?.bounds.width ?? 1)
+            let window = gesture.view?.window
+            let progress = min(1, max(0, gesture.translation(in: window).x / width))
+            let velocity = gesture.velocity(in: window).x
+            let shouldFinish = gesture.state == .ended && progress + velocity * 0.15 / width > 0.45
+            if gesture.state == .began { draggedModal = modalReader }
+            if let modalReader = draggedModal {
+                switch gesture.state {
+                case .began, .changed:
+                    modalReader.view.transform = CGAffineTransform(translationX: width * progress, y: 0)
+                case .ended, .cancelled, .failed:
+                    draggedModal = nil
+                    // Leave UIKit's sheet hierarchy intact until the user commits to leaving.
+                    UIView.animate(withDuration: UIAccessibility.isReduceMotionEnabled ? 0 : 0.2,
+                                   delay: 0, options: [.beginFromCurrentState, .curveEaseOut]) {
+                        modalReader.view.transform = shouldFinish ? CGAffineTransform(translationX: width, y: 0) : .identity
+                    } completion: { _ in
+                        if shouldFinish { modalReader.dismiss(animated: false) }
+                    }
+                default: break
+                }
+                return
+            }
+            switch gesture.state {
+            case .began:
+                guard let navigation = navigationController else { return }
+                interaction = UIPercentDrivenInteractiveTransition()
+                interaction?.completionCurve = .easeOut
+                let previousDelegate = navigation.delegate
+                navigation.delegate = self
+                navigation.popViewController(animated: true)
+                // SwiftUI owns subsequent pushes and pops, including changes to the bound path.
+                navigation.delegate = previousDelegate
+            case .changed:
+                interaction?.update(progress)
+            case .ended:
+                if shouldFinish { interaction?.finish() }
+                else { interaction?.cancel() }
+                interaction = nil
+            case .failed, .cancelled:
+                interaction?.cancel()
+                interaction = nil
+            default: break
+            }
+        }
+
+        func navigationController(_ navigationController: UINavigationController, animationControllerFor operation: UINavigationController.Operation,
+                                  from fromVC: UIViewController, to toVC: UIViewController) -> UIViewControllerAnimatedTransitioning? { self }
+
+        func navigationController(_ navigationController: UINavigationController,
+                                  interactionControllerFor animationController: UIViewControllerAnimatedTransitioning) -> UIViewControllerInteractiveTransitioning? {
+            interaction
+        }
+
+        func transitionDuration(using transitionContext: UIViewControllerContextTransitioning?) -> TimeInterval { 0.32 }
+
+        func animateTransition(using context: UIViewControllerContextTransitioning) {
+            guard let reader = context.view(forKey: .from), let previous = context.view(forKey: .to),
+                  let destination = context.viewController(forKey: .to) else {
+                context.completeTransition(false)
+                return
+            }
+            let width = context.containerView.bounds.width
+            let cornerRadius = reader.layer.cornerRadius
+            let clipped = reader.clipsToBounds
+            reader.clipsToBounds = true
+            previous.frame = context.finalFrame(for: destination)
+            context.containerView.insertSubview(previous, belowSubview: reader)
+            previous.transform = CGAffineTransform(translationX: -width * 0.25, y: 0)
+            UIView.animate(withDuration: transitionDuration(using: context), delay: 0, options: .curveLinear) {
+                reader.layer.cornerRadius = 24
+                reader.transform = CGAffineTransform(translationX: width, y: 0)
+                previous.transform = .identity
+            } completion: { _ in
+                reader.layer.cornerRadius = cornerRadius
+                reader.clipsToBounds = clipped
+                reader.transform = .identity
+                previous.transform = .identity
+                context.completeTransition(!context.transitionWasCancelled)
+            }
+        }
     }
 }
 
@@ -310,7 +476,7 @@ struct ReaderChapterSlider: View {
     }
 }
 
-// A details sheet opened by a reader sends chapter selections back to that session.
+// A detail page opened by a reader sends chapter selections back to that session.
 typealias ResumeBookReading = @MainActor (Book, [BookChapter], BookSource?, Int?) -> Void
 
 private struct ResumeBookReadingKey: EnvironmentKey {
@@ -347,28 +513,39 @@ struct BookChapterLink<Label: View>: View {
     }
 }
 
-struct ReaderBookInfoSheet: View {
+extension View {
+    @ViewBuilder
+    func readerBookInfoDestination(_ page: Binding<ReaderBookInfoPage?>) -> some View {
+        let presented = Binding(get: { page.wrappedValue != nil }, set: { if !$0 { page.wrappedValue = nil } })
+        if #available(iOS 18.0, *) {
+            readingNavigationDestination(isPresented: presented) { page.wrappedValue }
+        } else {
+            // A nested navigationDestination(isPresented:) repeatedly lays out the chapter list on iOS 17.
+            background(NavigationLink(isActive: presented, destination: { page.wrappedValue }) { EmptyView() }.hidden())
+        }
+    }
+}
+
+struct ReaderBookInfoPage: View {
+    @Environment(\.dismiss) private var dismiss
     let book: Book
     let source: BookSource?
     let chapters: [BookChapter]
-    @Environment(\.dismiss) private var dismiss
+    let resume: ResumeBookReading
 
     var body: some View {
-        ReadingNavigationStack {
-            Group {
-                if let source {
-                    BookDetailView(book: book, source: source, chapters: chapters)
-                } else {
-                    LocalBookDetailView(book: book)
-                }
-            }
-            .readingSheetTitle(source == nil ? book.name : "书籍详情")
-            .toolbar {
-                ReadingSheetActions {
-                    ReadingSheetCloseButton { dismiss() }
-                }
+        Group {
+            if let source {
+                BookDetailView(book: book, source: source, chapters: chapters)
+            } else {
+                LocalBookDetailView(book: book, pageTitle: "书籍详情")
             }
         }
+        .environment(\.resumeBookReading, { book, chapters, source, index in
+            dismiss()
+            resume(book, chapters, source, index)
+        })
+        .readingTabBarHidden()
     }
 }
 
@@ -382,16 +559,20 @@ struct ReaderTableOfContents: View {
     let cache: ChapterContentCache
     @Binding var descending: Bool
     let onCache: () -> Void
+    let onCacheChapter: (Int) async -> Bool
     @ObservedObject private var batchCache = ChapterBatchCache.shared
     let onSelect: (Int) -> Void
     @Environment(\.dismiss) private var dismiss
+    @State private var showsDownloadFailure = false
     @State private var search = ""
     @State private var showsSearch = false
     @FocusState private var searchFocused: Bool
 
     var body: some View {
-        ReadingNavigationStack {
-            ScrollViewReader { proxy in
+        ScrollViewReader { proxy in
+            VStack(spacing: 0) {
+                directoryHeader
+
                 let rows = directory.rows(matching: search, descending: descending, simplified: simplifiedChinese)
                 List {
                     ForEach(rows) { row in
@@ -399,50 +580,46 @@ struct ReaderTableOfContents: View {
                     }
                 }
                 .listStyle(.plain)
+                .readingScrollContentBackgroundHidden()
                 .id(descending)
                 .overlay {
                     if rows.isEmpty && !search.isEmpty { ReadingUnavailableView.search(text: search) }
                 }
-                .safeAreaInset(edge: .top, spacing: 0) {
-                    VStack(spacing: 0) {
-                        if showsSearch { searchBar } else { directoryHeader }
-                        if sourceID != nil, let progress = batchCache.progress[bookURL] {
-                            HStack {
-                                Text(progress.title)
-                                Text("\(progress.processed)/\(progress.total)").monospacedDigit()
-                                Spacer()
-                                if progress.isActive {
-                                    Button("停止缓存") { batchCache.cancel(bookURL: bookURL) }
-                                }
-                            }
-                            .font(.footnote)
-                            .padding(.horizontal)
-                            .padding(.vertical, 8)
-                            .background(.bar)
+
+                if sourceID != nil, let progress = batchCache.progress[bookURL] {
+                    HStack {
+                        Text(progress.title)
+                        Text("\(progress.processed)/\(progress.total)").monospacedDigit()
+                        Spacer()
+                        if progress.isActive {
+                            Button("停止缓存") { batchCache.cancel(bookURL: bookURL) }
                         }
                     }
+                    .font(.footnote)
+                    .padding(.horizontal)
+                    .padding(.vertical, 8)
+                    .background(ReadingTheme.surface)
                 }
-                .onChange(of: search) { query in
-                    if query.isEmpty { proxy.scrollTo(currentIndex, anchor: .center) }
-                }
-                .toolbar {
-                    ReadingSheetActions {
-                        if !showsSearch {
-                            Button { showsSearch = true } label: { Label("搜索章节", systemImage: "magnifyingglass") }
-                        }
-                        Button {
-                            if search.isEmpty { proxy.scrollTo(currentIndex, anchor: .center) }
-                            closeSearch()
-                        } label: { Image(systemName: "scope") }
-                        .accessibilityLabel("定位当前章节")
-                        ReadingSheetCloseButton { dismiss() }
-                    }
-                }
-                .onAppear {
-                    if !descending { DispatchQueue.main.async { proxy.scrollTo(currentIndex, anchor: .center) } }
+                Divider().overlay(ReadingTheme.separator)
+                if showsSearch {
+                    searchBar
+                } else {
+                    directoryTools { proxy.scrollTo(currentIndex, anchor: .center) }
                 }
             }
-            .readingSheetTitle("目录")
+            .background(ReadingTheme.sheetBackground.ignoresSafeArea())
+            .tint(ReadingTheme.accent)
+            .alert("章节缓存失败", isPresented: $showsDownloadFailure) {
+                Button("好", role: .cancel) {}
+            } message: {
+                Text("请稍后再点下载重试。")
+            }
+            .onChange(of: search) { query in
+                if query.isEmpty { proxy.scrollTo(currentIndex, anchor: .center) }
+            }
+            .onAppear {
+                if !descending { DispatchQueue.main.async { proxy.scrollTo(currentIndex, anchor: .center) } }
+            }
         }
     }
 
@@ -468,7 +645,6 @@ struct ReaderTableOfContents: View {
                 .frame(minHeight: 44)
         }
         .padding(.horizontal, 16)
-        .background(ReadingTheme.surface)
         .onAppear { searchFocused = true }
     }
 
@@ -479,88 +655,157 @@ struct ReaderTableOfContents: View {
     }
 
     private var directoryHeader: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            Text(bookTitle)
-                .font(.title3.bold())
-                .fixedSize(horizontal: false, vertical: true)
-                .accessibilityAddTraits(.isHeader)
-            HStack(spacing: 16) {
-                Text("共 \(directory.readableIndices.count) 章")
-                    .monospacedDigit()
+        HStack(alignment: .top, spacing: 8) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(verbatim: bookTitle)
+                    .font(.title2.weight(.semibold))
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityAddTraits(.isHeader)
+                    .accessibilityIdentifier("reader.toc.title")
+                Text("目录 · \(directory.readableIndices.count) 章")
+                    .font(.footnote)
                     .foregroundStyle(.secondary)
-                Spacer(minLength: 0)
-                if sourceID != nil {
-                    Button(action: onCache) {
-                        Label("缓存", systemImage: "arrow.down.circle")
-                            .frame(minHeight: 44)
-                    }
-                    .disabled(directory.readableIndices.isEmpty || batchCache.progress[bookURL]?.isActive == true)
-                    .accessibilityLabel("缓存全书章节")
-                    .accessibilityIdentifier("reader.toc.cache")
-                }
-                Button { descending.toggle() } label: {
-                    Label(descending ? "正序" : "倒序", systemImage: "arrow.up.arrow.down")
-                        .frame(minHeight: 44)
-                }
             }
-            .font(.footnote.weight(.medium))
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            Button { dismiss() } label: {
+                Image(systemName: "xmark")
+                    .font(.body.weight(.medium))
+                    .frame(width: 44, height: 44)
+                    .contentShape(Rectangle())
+            }
             .buttonStyle(.plain)
+            .accessibilityLabel("关闭")
         }
-        .padding(.top, 8)
-        .padding(.horizontal, 20)
-        .background(ReadingTheme.surface)
-        .overlay(alignment: .bottom) { Divider() }
+        .padding(.leading, 22)
+        .padding(.trailing, 8)
+        .padding(.top, 12)
+        .padding(.bottom, 16)
+        .overlay(alignment: .bottom) {
+            Rectangle()
+                .fill(ReadingTheme.separator)
+                .frame(height: 1)
+                .padding(.horizontal, 22)
+                .accessibilityHidden(true)
+        }
+    }
+
+    private func directoryTools(locate: @escaping () -> Void) -> some View {
+        HStack(spacing: 4) {
+            if sourceID != nil {
+                Button(action: onCache) {
+                    Label("缓存全书", systemImage: "square.and.arrow.down")
+                        .font(.subheadline.weight(.medium))
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 7)
+                        .background(ReadingTheme.accentSoft, in: Capsule())
+                        .frame(minHeight: 44)
+                        .contentShape(Rectangle())
+                }
+                .accessibilityLabel("缓存全书章节")
+                .accessibilityIdentifier("reader.toc.cache")
+                .disabled(directory.readableIndices.isEmpty || batchCache.progress[bookURL]?.isActive == true)
+                Spacer(minLength: 4)
+            }
+            directoryTool("搜索章节", icon: "magnifyingglass") { showsSearch = true }
+            directoryTool("定位当前章节", icon: "scope", action: locate)
+            directoryTool(descending ? "正序" : "倒序", icon: "arrow.up.arrow.down") { descending.toggle() }
+                .accessibilityValue(descending ? "当前倒序" : "当前正序")
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(ReadingTheme.accent)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 2)
+    }
+
+    private func directoryTool(_ title: String, icon: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: icon)
+                .font(.body)
+                .frame(minWidth: 44, maxWidth: sourceID == nil ? .infinity : 44, minHeight: 44)
+                .contentShape(Rectangle())
+        }
+        .accessibilityLabel(title)
     }
 
     @ViewBuilder private func chapterRow(_ row: ReaderChapterDirectory.Row) -> some View {
         if let number = row.number {
-            let current = row.id == currentIndex
-            Button { onSelect(row.id) } label: {
-                HStack(alignment: .firstTextBaseline, spacing: 0) {
-                    ChapterDirectoryLabel(number: number, count: directory.readableIndices.count,
-                                          title: row.title.readerText(simplified: simplifiedChinese), isCurrent: current)
-                    if let sourceID {
-                        ChapterAvailabilityIcon(bookURL: bookURL, chapterURL: row.chapterURL, sourceID: sourceID, cache: cache)
-                    }
-                }
-                .padding(.vertical, 6)
-                .frame(minHeight: 44)
-                .contentShape(Rectangle())
+            ReaderChapterRow(row: row, number: number, title: row.title.readerText(simplified: simplifiedChinese),
+                             isCurrent: row.id == currentIndex, bookURL: bookURL, sourceID: sourceID, cache: cache,
+                             batchIsActive: batchCache.progress[bookURL]?.isActive == true,
+                             onSelect: { onSelect(row.id) }) {
+                if !(await onCacheChapter(row.id)) { showsDownloadFailure = true }
             }
-            .buttonStyle(.plain)
-            .accessibilityAddTraits(current ? .isSelected : [])
-            .accessibilityIdentifier("reader.toc.\(row.id)")
-            .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 0, trailing: 20))
-            .listRowSeparatorTint(ReadingTheme.separator.opacity(0.65))
+            .listRowBackground(Color.clear)
+            .listRowInsets(EdgeInsets(top: 0, leading: 22, bottom: 0, trailing: 22))
+            .listRowSeparator(.hidden)
         } else {
             ChapterVolumeLabel(title: row.title.readerText(simplified: simplifiedChinese))
-                .listRowInsets(EdgeInsets(top: 2, leading: 20, bottom: 2, trailing: 20))
+                .listRowBackground(Color.clear)
+                .listRowInsets(EdgeInsets(top: 2, leading: 22, bottom: 2, trailing: 22))
                 .listRowSeparator(.hidden)
         }
     }
 }
 
-struct ChapterAvailabilityIcon: View {
+private struct ReaderChapterRow: View {
+    let row: ReaderChapterDirectory.Row
+    let number: Int
+    let title: String
+    let isCurrent: Bool
     let bookURL: String
-    let chapterURL: String
-    let sourceID: String
-    var cache: ChapterContentCache = .live()
+    let sourceID: String?
+    let cache: ChapterContentCache
+    let batchIsActive: Bool
+    let onSelect: () -> Void
+    let onDownload: () async -> Void
+
     @State private var isCached: Bool?
+    @State private var isDownloading = false
 
     var body: some View {
-        ZStack {
-            if isCached == false {
-                Image(systemName: "arrow.down.circle.fill")
-                    .font(.body)
-                    .foregroundStyle(.secondary)
-                    .frame(width: 24)
-                    .padding(.leading, 12)
-                    .accessibilityLabel("未下载")
+        HStack(spacing: 8) {
+            Button(action: onSelect) {
+                ChapterDirectoryLabel(number: number, title: title, wordCount: row.wordCount,
+                                      updateInfo: row.updateInfo, isCurrent: isCurrent,
+                                      titleColor: sourceID == nil || isCached == true ? .primary : .secondary)
+                    .padding(.vertical, 10)
+                    .frame(minHeight: 48)
+                    .contentShape(Rectangle())
+            }
+            .accessibilityAddTraits(isCurrent ? .isSelected : [])
+            .accessibilityValue(isCached.map { $0 ? "已缓存" : "未缓存" } ?? "")
+            .accessibilityIdentifier("reader.toc.\(row.id)")
+
+            if sourceID != nil, isCached == false {
+                Button {
+                    guard !isDownloading else { return }
+                    isDownloading = true
+                    Task {
+                        await onDownload()
+                        isDownloading = false
+                    }
+                } label: {
+                    Group {
+                        if isDownloading {
+                            ProgressView().controlSize(.small)
+                        } else {
+                            Image(systemName: "square.and.arrow.down").foregroundStyle(.secondary)
+                        }
+                    }
+                    .frame(width: 44, height: 44)
+                    .contentShape(Rectangle())
+                }
+                .disabled(isDownloading || batchIsActive)
+                .accessibilityLabel("下载 \(title)")
+                .accessibilityIdentifier("reader.toc.download.\(row.id)")
             }
         }
-        .task(id: [bookURL, chapterURL, sourceID]) {
+        .buttonStyle(.plain)
+        .task(id: [bookURL, row.chapterURL, sourceID]) {
             isCached = nil
-            let changes = await cache.availability(bookURL: bookURL, chapterURL: chapterURL, sourceID: sourceID)
+            guard let sourceID else { return }
+            let changes = await cache.availability(bookURL: bookURL, chapterURL: row.chapterURL, sourceID: sourceID)
             for await cached in changes {
                 guard !Task.isCancelled else { return }
                 isCached = cached

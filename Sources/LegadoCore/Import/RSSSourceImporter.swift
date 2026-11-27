@@ -2,6 +2,7 @@ import Foundation
 
 public struct RSSSourceImportPayload: Sendable {
     public var sources: [RssSource]
+    public var skippedEntries: [String] = []
     public var subscriptionURLs: [String]
     public init(sources: [RssSource] = [], subscriptionURLs: [String] = []) {
         self.sources = sources
@@ -18,7 +19,7 @@ public enum RSSSourceImportError: Error, LocalizedError, Sendable {
         switch self {
         case .emptyDocument: "导入内容为空"
         case .wrongFormat: "网站源规则格式错误"
-        case .invalidSource: "请选择包含 sourceUrl 的网站源规则"
+        case .invalidSource: "没有可导入的网站源，请确认至少一条规则填写了源地址（sourceUrl）。"
         case .duplicate(let url): "网站源已存在：\(url)"
         }
     }
@@ -39,8 +40,17 @@ public struct RSSSourceImporter: Sendable {
         if let values = try? decoder.decode([RssSource].self, from: data) { sources = values }
         else if let value = try? decoder.decode(RssSource.self, from: data) { sources = [value] }
         else { throw RSSSourceImportError.wrongFormat }
-        guard sources.isEmpty || sources.first?.sourceUrl.isEmpty == false else { throw RSSSourceImportError.invalidSource }
-        return .init(sources: sources)
+        var payload = RSSSourceImportPayload()
+        for (index, source) in sources.enumerated() {
+            if source.sourceUrl.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                let name = source.sourceName.isEmpty ? "" : "「\(source.sourceName)」"
+                payload.skippedEntries.append("第 \(index + 1) 条\(name)缺少源地址")
+            } else {
+                payload.sources.append(source)
+            }
+        }
+        guard !payload.sources.isEmpty else { throw RSSSourceImportError.invalidSource }
+        return payload
     }
 
     public func merge(

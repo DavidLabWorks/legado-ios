@@ -20,9 +20,7 @@ public actor SQLiteRssSourceRepository: RssSourceRepository {
     public func enabled() async throws -> [RssSource] { try await all().filter(\.enabled) }
     public func disabled() async throws -> [RssSource] { try await all().filter { !$0.enabled } }
     public func groups() async throws -> [String] {
-        var seen = Set<String>()
-        return try await all().flatMap(\.groups).filter { seen.insert($0).inserted }
-            .sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+        try await database.loadRssSourceGroups()
     }
     public func inGroup(_ group: String) async throws -> [RssSource] {
         try await all().filter { $0.groups.contains(group) }

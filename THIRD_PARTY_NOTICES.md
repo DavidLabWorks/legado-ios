@@ -23,7 +23,7 @@
 
 ## KSPlayer 与 FFmpegKit
 
-网站正文中的视频由 KSPlayer 2.3.4 提供播放界面和手势控制，KSMEPlayer 通过 FFmpegKit 6.1.5 解码。两个项目均以 GNU GPL v3 发布。[KSPlayer 源码及许可](https://github.com/kingslay/KSPlayer/tree/2.3.4) · [FFmpegKit 源码及许可](https://github.com/kingslay/FFmpegKit/tree/6.1.5)
+网站正文中的视频由 KSPlayer 2.3.4 提供播放界面和手势控制，KSMEPlayer 通过 FFmpegKit 6.1.5 解码。本地 KSPlayer 在打开解码器前创建 VideoToolbox 设备上下文，由 FFmpeg 在关闭解码器时释放。两个项目均以 GNU GPL v3 发布。[本地解码器改动](Vendor/KSPlayer/Sources/KSPlayer/MEPlayer/AVFFmpegExtension.swift) · [KSPlayer 源码及许可](https://github.com/kingslay/KSPlayer/tree/2.3.4) · [FFmpegKit 源码及许可](https://github.com/kingslay/FFmpegKit/tree/6.1.5)
 
 iOS 目标直接编译 FFmpeg n6.1 的协议注册代码，从 FFmpegKit 的 iOS 协议列表中移除了 SMB。升级 FFmpegKit 时需同步核对协议顺序和私有的 `URLProtocol` 结构。[本地实现](Vendor/FFmpegProtocols/protocols.c) · [上游源码](https://github.com/FFmpeg/FFmpeg/tree/n6.1/libavformat) · [LGPL 2.1 许可证](Vendor/FFmpegProtocols/COPYING.LGPLv2.1)
 
@@ -52,7 +52,3 @@ iOS 目标直接编译 FFmpeg n6.1 的协议注册代码，从 FFmpegKit 的 iOS
 ## Qwen3-TTS offline voices
 
 Earlier releases distributed three optional voice packs based on the Qwen3-TTS CustomVoice 0.6B model and 12 Hz codec from Qwen under Apache-2.0, in GGUF format provided by cstr. Each archive included the model license.
-
-## ZipVoice offline voices
-
-The ZipVoice option uses k2-fsa/ZipVoice-Distill with the sherpa-onnx v2.0.3 iOS runtime, ONNX Runtime and the Vocos 24 kHz decoder. Model files are downloaded into Application Support or imported from a ZIP. The two bundled speaker references are synthesized Qwen3-TTS Uncle_Fu and Serena recordings. The runtime and model notices are included in the ZipVoice resources.

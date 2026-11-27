@@ -3,11 +3,22 @@ import Testing
 @testable import LegadoCore
 
 struct SpokenPassageTests {
-    @Test func zipVoicePronouncesNumbersInChinese() {
-        #expect(SpokenPassage.zipVoiceText(for: "12") == "十二")
-        #expect(SpokenPassage.zipVoiceText(for: "😀第１２章，2026年，编号007。") == "😀第十二章，二零二六年，编号零零七。")
-        #expect(SpokenPassage.zipVoiceText(for: "1,024人，增长3.50%。") == "一千零二十四人，增长百分之三点五零。")
-        #expect(SpokenPassage.zipVoiceText(for: "过去12年。") == "过去十二年。")
+    @Test func chapterTitlePrecedesPlaybackFromTheSavedParagraph() {
+        let text = "已经读过。\n窗外下雨了。"
+        let range = (text as NSString).range(of: "窗外下雨了。")
+        let passages = SpokenPassage.chapterPassages(in: text, reading: range, title: "第140章")
+        #expect(passages.map(\.text) == ["第140章", "窗外下雨了。"])
+        #expect(passages.map(\.isChapterTitle) == [true, false])
+        #expect(passages.last?.sentence == range)
+        #expect(passages.last?.position == range.location)
+        #expect(SpokenPassage.groupEnd(in: passages, from: 0) == 1)
+    }
+
+    @Test func chapterTitleAlreadyInTheBodyIsReadOnce() {
+        let passages = SpokenPassage.chapterPassages(in: " 第一章 \n正文。", reading: nil, title: "第一章")
+        #expect(passages.map(\.text) == ["第一章", "正文。"])
+        #expect(passages.allSatisfy { !$0.isChapterTitle })
+        #expect(SpokenPassage.chapterPassages(in: "正文。", reading: nil, title: "  ").map(\.text) == ["正文。"])
     }
 
     @Test func repeatedSentencesKeepTheirOwnUTF16Offsets() {
@@ -37,13 +48,25 @@ struct SpokenPassageTests {
         #expect(passages.map(\.text).joined() == lines.joined())
     }
 
-    @Test func sentenceGroupsRespectParagraphsAndCharacterBudget() {
+    @Test func synthesisGroupsFollowParagraphBoundaries() {
         let passages = SpokenPassage.passages(in: "天亮了。他推开门。\r\n风停了。\n\n她走了。", reading: nil)
         #expect(passages.count == 4)
         #expect(passages.map(\.paragraph) == [0, 0, 1, 2])
-        #expect(SpokenPassage.groupEnd(in: passages, from: 0, characterLimit: 24) == 2)
-        #expect(SpokenPassage.groupEnd(in: passages, from: 0, characterLimit: 5) == 1)
-        #expect(SpokenPassage.groupEnd(in: passages, from: 2, characterLimit: 60) == 3)
+        #expect(SpokenPassage.groupEnd(in: passages, from: 0) == 2)
+        #expect(SpokenPassage.groupEnd(in: passages, from: 2) == 3)
+    }
+
+    @Test func synthesisPreservesLongParagraphAndRespectsTheReadingRange() {
+        let paragraph = "……！" + String(repeating: "雨停了，  他又等了一会儿。", count: 12) + "出发。"
+        let text = "先前。\r\n" + paragraph + "下一句。\n次段。"
+        let range = (text as NSString).range(of: paragraph)
+        let markers = SpokenPassage.passages(in: text, reading: range)
+        #expect(markers.first?.synthesisText == Substring(paragraph))
+        #expect(SpokenPassage.groupEnd(in: markers, from: 0) == markers.count)
+        for marker in markers.dropFirst() {
+            let remaining = NSRange(location: marker.position, length: NSMaxRange(range) - marker.position)
+            #expect(String(marker.synthesisText) == (text as NSString).substring(with: remaining))
+        }
     }
 
     @Test func groupedAudioKeepsEveryFrameAndChangesHighlightDuringThePause() {
@@ -61,10 +84,10 @@ struct SpokenPassageTests {
     @Test func paragraphPauseTopsUpExistingSilenceOnlyOnce() {
         let samples = [Float](repeating: 0.2, count: 480) + [Float](repeating: 0, count: 2_400)
         var audio = samples.withUnsafeBytes { Data($0) }
-        SpokenPassage.finishParagraph(&audio)
-        #expect(audio.count == (480 + 9_600) * 4)
-        SpokenPassage.finishParagraph(&audio)
-        #expect(audio.count == (480 + 9_600) * 4)
+        let frames = SpokenPassage.paragraphPaddingFrames(in: audio)
+        #expect(frames == 7_200)
+        audio.append(Data(count: frames * MemoryLayout<Float>.size))
+        #expect(SpokenPassage.paragraphPaddingFrames(in: audio) == 0)
     }
 
     @Test func longSentenceKeepsOneHighlightAcrossChunks() {
@@ -86,7 +109,8 @@ struct SpokenPassageTests {
         // The third passage must be ready by the time the second has finished playing.
         #expect(SpokenPassage.playbackReserve(in: passages, from: 1, synthesisPerCharacter: 2, playbackPerCharacter: 0.18, recovering: true) == 36)
         #expect(reserve >= 42 * 0.32 - 3 * 0.18)
-        #expect(SpokenPassage.playbackReserve(in: passages, from: 1, synthesisPerCharacter: 0.05, playbackPerCharacter: 0.18, recovering: false) == 6)
+        let fast = SpokenPassage.playbackReserve(in: passages, from: 1, synthesisPerCharacter: 0.05, playbackPerCharacter: 0.18, recovering: false)
+        #expect(abs(fast - (42 * 0.05 * 1.15 - 3 * 0.18)) < 0.0001)
         #expect(SpokenPassage.playbackReserve(in: passages, from: passages.count, synthesisPerCharacter: 1, playbackPerCharacter: 1, recovering: false) == 0)
     }
 }

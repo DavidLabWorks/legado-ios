@@ -76,6 +76,8 @@
 		<key>NSAllowsArbitraryLoads</key>
 		<true/>
 	</dict>
+	<key>NSFaceIDUsageDescription</key>
+	<string>用于验证你的身份并解锁喵阅。</string>
 	<key>NSCameraUsageDescription</key>
 	<string>用于扫描书源和净化规则的导入二维码。</string>
 	<key>NSPhotoLibraryAddUsageDescription</key>

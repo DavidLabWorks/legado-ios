@@ -80,8 +80,7 @@ struct ReadingHistoryView: View {
                 .readingScrollContentBackgroundHidden()
             }
         }
-        .navigationTitle("阅读记录")
-        .navigationBarTitleDisplayMode(.inline)
+        .readingPageTitle("阅读记录")
         .navigationBarHidden(false)
         .background(ReadingTheme.canvas)
         .toolbar {

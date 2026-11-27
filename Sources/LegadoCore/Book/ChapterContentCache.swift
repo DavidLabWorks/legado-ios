@@ -330,6 +330,33 @@ public actor ChapterContentCache {
         return (files.count, files.reduce(0) { $0 + $1.size })
     }
 
+    /// Counts files against the current directory without reading bodies or refreshing eviction dates.
+    public func exportCounts(for bookURLs: [String], directories: any BookChapterRepository) async throws
+        -> [String: (cached: Int, total: Int)] {
+        try prepareStorage()
+        let manager = FileManager.default
+        guard !bookURLs.isEmpty, manager.fileExists(atPath: directory.path) else { return [:] }
+        let names = try manager.contentsOfDirectory(atPath: directory.path)
+        let cachedBooks = Set(names.compactMap { name in
+            name.hasSuffix(".json") ? name.split(separator: "-", maxSplits: 1).first : nil
+        })
+        let files = Set(names)
+        var counts: [String: (cached: Int, total: Int)] = [:]
+        for url in bookURLs {
+            try Task.checkCancellation()
+            let bookKey = digest(url)
+            guard cachedBooks.contains(bookKey[...]) else { continue }
+            let chapters = try await directories.load(bookURL: url).filter { !$0.isVolume }
+            var cached = 0
+            for chapter in chapters {
+                try Task.checkCancellation()
+                if files.contains("\(bookKey)-\(digest(chapter.url)).json") { cached += 1 }
+            }
+            if cached > 0 { counts[url] = (cached, chapters.count) }
+        }
+        return counts
+    }
+
     private var byteLimit: Int {
         maximumTotalBytes ?? ApplicationSettingsStore.shared.settings.chapterCacheMB * 1024 * 1024
     }

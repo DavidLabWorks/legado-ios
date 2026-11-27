@@ -6,6 +6,7 @@ enum AppIdentity {
     static let author = "DavidLabWorks"
     static let authorURL = URL(string: "https://github.com/\(author)")!
     static let projectURL = authorURL.appendingPathComponent("legado-ios")
+    static let feedbackURL = URL(string: "https://t.me/maioreader")!
 }
 
 struct AboutView: View {
@@ -15,72 +16,174 @@ struct AboutView: View {
         "\(AppIdentity.name) \(version) (\(build))\niOS \(UIDevice.current.systemVersion)\n数据库版本 \(LegadoDatabase.schemaVersion)"
     }
 
+    @Environment(\.dynamicTypeSize) private var typeSize
+
     var body: some View {
-        List {
-            Section {
-                HStack(spacing: 16) {
-                    Image("BrandIcon")
-                        .resizable().scaledToFit().frame(width: 68, height: 68)
-                        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-                        .accessibilityHidden(true)
-                    VStack(alignment: .leading, spacing: 5) {
-                        Text(AppIdentity.name).font(.title.bold())
-                        Text("读小说、听书、整理网页").font(.subheadline)
-                    }
-                }
-                .foregroundStyle(ReadingTheme.onAccent)
-                .padding(20)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .listRowInsets(EdgeInsets())
-                .listRowBackground(ReadingTheme.emphasisSurface)
-            } footer: {
-                Text("兼容阅读书源的 iOS 阅读应用")
+        ScrollView {
+            VStack(alignment: .leading, spacing: 22) {
+                appCard
+                projectSection
+                policySection
             }
-            Section("版本信息") {
-                ReadingLabeledContent("版本", value: "\(version)（构建 \(build)）")
-                ReadingLabeledContent("系统", value: "iOS \(UIDevice.current.systemVersion)")
-                ReadingShareLink(item: diagnosticSummary) { Label("分享版本信息", systemImage: "square.and.arrow.up") }
-            }
-            .listRowBackground(ReadingTheme.surface)
-            Section {
-                projectLink("个人主页", detail: AppIdentity.author, url: AppIdentity.authorURL)
-                projectLink("项目源码", detail: "legado-ios", url: AppIdentity.projectURL)
-                ReadingShareLink(item: AppIdentity.projectURL) {
-                    Label("分享项目地址", systemImage: "square.and.arrow.up")
-                }
-                NavigationLink { OpenSourceLicensesView() } label: {
-                    ReadingLabeledContent("开源许可", value: "GPL-3.0")
-                }
-                .accessibilityLabel("开源许可")
-            } header: {
-                Text("项目与开发者")
-            } footer: {
-                Text("IPA 可从项目仓库的 release 目录获取，并自行签名安装。")
-            }
-            .listRowBackground(ReadingTheme.surface)
-            Section {
-                NavigationLink("免责协议") { policyPage("免责协议") { disclaimer } }
-                NavigationLink("数据与隐私") { policyPage("数据与隐私") { privacy } }
-            }
-            .listRowBackground(ReadingTheme.surface)
+            .buttonStyle(.plain)
+            .padding(.horizontal, 20)
+            .padding(.top, 12)
+            .padding(.bottom, 28)
+            .frame(maxWidth: 640)
+            .frame(maxWidth: .infinity)
         }
-        .listStyle(.insetGrouped)
-        .readingListTopMargin(12)
-        .readingScrollContentBackgroundHidden()
-        .background(ReadingTheme.canvas)
-        .navigationTitle("关于")
-        .navigationBarTitleDisplayMode(.inline)
+        .background(ReadingTheme.settingsCanvas)
+        .readingPageTitle("关于")
     }
 
-    private func projectLink(_ title: String, detail: String, url: URL) -> some View {
-        Link(destination: url) {
-            ReadingLabeledContent(title) {
-                HStack(spacing: 5) {
-                    Text(detail)
-                    Image(systemName: "arrow.up.right").font(.caption).accessibilityHidden(true)
+    private var appCard: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 8) {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(AppIdentity.name)
+                        .font(.system(.largeTitle, design: .serif).weight(.bold))
+                    Text("读小说、听书、整理网页")
+                        .font(.subheadline.weight(.medium))
+                    Text("兼容阅读书源的 iOS 阅读应用")
+                        .font(.caption)
+                        .foregroundStyle(.white.opacity(0.72))
+                }
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                if !typeSize.isAccessibilitySize {
+                    Image("BrandIcon")
+                        .resizable().scaledToFit()
+                        .frame(width: 112, height: 112)
+                        .blendMode(.screen)
+                        .accessibilityHidden(true)
                 }
             }
+            .padding(20)
+
+            Rectangle().fill(.white.opacity(0.16)).frame(height: 1)
+            HStack(spacing: 8) {
+                LazyVGrid(columns: Array(repeating: GridItem(.flexible(), alignment: .leading), count: typeSize.isAccessibilitySize ? 1 : 3), alignment: .leading, spacing: 10) {
+                    fact("版本", version)
+                    fact("构建", build)
+                    fact("系统", "iOS \(UIDevice.current.systemVersion)")
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                ReadingShareLink(item: diagnosticSummary) {
+                    Image(systemName: "square.and.arrow.up")
+                        .font(.body.weight(.medium))
+                        .frame(width: 44, height: 44)
+                        .background(.white.opacity(0.1), in: Circle())
+                }
+                .fixedSize()
+                .accessibilityLabel("分享版本信息")
+            }
+            .padding(.horizontal, 20)
+            .padding(.vertical, 12)
+            .frame(maxWidth: .infinity)
+            .background(.white.opacity(0.045))
         }
+        .foregroundStyle(.white)
+        .background(LinearGradient(colors: [Color(white: 0.15), .black], startPoint: .topLeading, endPoint: .bottomTrailing))
+        .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+    }
+
+    private func fact(_ title: String, _ value: String) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(title).font(.caption).foregroundStyle(.white.opacity(0.72))
+            Text(value).font(.system(.subheadline, design: .monospaced).weight(.medium))
+        }
+        .accessibilityElement(children: .combine)
+    }
+
+    private var projectSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("项目与社区").font(.headline).accessibilityAddTraits(.isHeader)
+                Spacer()
+                ReadingShareLink(item: AppIdentity.projectURL) {
+                    Label("分享地址", systemImage: "square.and.arrow.up")
+                        .font(.footnote.weight(.medium))
+                        .frame(minHeight: 44)
+                }
+                .accessibilityLabel("分享项目地址")
+            }
+            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 10), count: typeSize.isAccessibilitySize ? 1 : 2), spacing: 10) {
+                projectLink("项目源码", detail: "legado-ios", icon: "chevron.left.forwardslash.chevron.right", url: AppIdentity.projectURL)
+                projectLink("个人主页", detail: AppIdentity.author, icon: "person.crop.circle", url: AppIdentity.authorURL)
+            }
+            Link(destination: AppIdentity.feedbackURL) {
+                HStack(spacing: 12) {
+                    Image(systemName: "paperplane")
+                        .font(.title3.weight(.medium))
+                        .accessibilityHidden(true)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("反馈讨论").font(.subheadline.weight(.semibold))
+                        Text("Telegram · @maioreader").font(.footnote).foregroundStyle(.secondary)
+                    }
+                    Spacer(minLength: 0)
+                    Image(systemName: "arrow.up.right").font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary).accessibilityHidden(true)
+                }
+                .padding(14)
+                .background { ReadingCardBackground(cornerRadius: 16) }
+                .contentShape(Rectangle())
+            }
+            Text("IPA 可从项目仓库的 release 目录获取，并自行签名安装。")
+                .font(.footnote).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private func projectLink(_ title: String, detail: String, icon: String, url: URL) -> some View {
+        Link(destination: url) {
+            VStack(alignment: .leading, spacing: 4) {
+                HStack {
+                    Image(systemName: icon).font(.title3.weight(.medium))
+                    Spacer()
+                    Image(systemName: "arrow.up.right").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                }
+                .accessibilityHidden(true)
+                .padding(.bottom, 10)
+                Text(title).font(.subheadline.weight(.semibold))
+                Text(detail).font(.footnote).foregroundStyle(.secondary)
+            }
+            .padding(14)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+            .background { ReadingCardBackground(cornerRadius: 16) }
+        }
+    }
+
+    private var policySection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("许可与隐私").font(.headline).accessibilityAddTraits(.isHeader)
+            VStack(spacing: 0) {
+                policyLink("开源许可", icon: "doc.text", detail: "GPL-3.0") { OpenSourceLicensesView() }
+                Divider().padding(.leading, 34)
+                policyLink("免责协议", icon: "text.book.closed") { policyPage("免责协议") { disclaimer } }
+                Divider().padding(.leading, 34)
+                policyLink("数据与隐私", icon: "hand.raised") { policyPage("数据与隐私") { privacy } }
+            }
+            .padding(.horizontal, 16)
+            .background { ReadingCardBackground(cornerRadius: 18) }
+        }
+    }
+
+    private func policyLink(_ title: String, icon: String, detail: String? = nil, @ViewBuilder destination: () -> some View) -> some View {
+        NavigationLink(destination: destination()) {
+            HStack(spacing: 12) {
+                Image(systemName: icon).frame(width: 22).accessibilityHidden(true)
+                Text(title)
+                Spacer(minLength: 0)
+                if let detail { Text(detail).font(.footnote).foregroundStyle(.secondary) }
+                Image(systemName: "chevron.right").font(.caption.weight(.semibold)).foregroundStyle(.secondary).accessibilityHidden(true)
+            }
+            .font(.subheadline)
+            .padding(.vertical, 6)
+            .frame(minHeight: 48)
+            .contentShape(Rectangle())
+        }
+        .accessibilityLabel(title)
+        .accessibilityValue(detail ?? "")
     }
 
     private func policyPage(_ title: String, @ViewBuilder content: () -> some View) -> some View {
@@ -93,8 +196,7 @@ struct AboutView: View {
         .lineSpacing(5)
         .textSelection(.enabled)
         .background(ReadingTheme.canvas)
-        .navigationTitle(title)
-        .navigationBarTitleDisplayMode(.inline)
+        .readingPageTitle(title)
     }
 
     @ViewBuilder private var disclaimer: some View {
@@ -114,14 +216,14 @@ struct AboutView: View {
 
 private struct OpenSourceLicensesView: View {
     var body: some View {
-        List {
+        ReadingPageList {
             license("\(AppIdentity.name) / Legado", resource: "Legado-LICENSE", detail: "GNU GPL v3")
             license("SwiftSoup", resource: "SwiftSoup-LICENSE", detail: "MIT License")
             license("Kanna", resource: "Kanna-LICENSE", detail: "MIT License")
             license("KSPlayer 与 FFmpegKit", resource: "Legado-LICENSE", detail: "GNU GPL v3")
             license("Readium 及其依赖", resource: "Readium-LICENSE", detail: "组件、依赖与字体许可证")
             license("ZIPFoundation", resource: "ZIPFoundation-LICENSE", detail: "MIT License")
-        }.navigationTitle("开源许可").navigationBarTitleDisplayMode(.inline)
+        }.readingPageTitle("开源许可")
     }
 
     private func license(_ title: String, resource: String, detail: String) -> some View {
@@ -131,7 +233,7 @@ private struct OpenSourceLicensesView: View {
                     .flatMap { try? String(contentsOf: $0, encoding: .utf8) }) ?? "许可文件无法读取")
                     .font(.system(.footnote, design: .monospaced)).textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading).padding()
-            }.navigationTitle(title).navigationBarTitleDisplayMode(.inline)
+            }.readingPageTitle(title)
         } label: { ReadingLabeledContent(title, value: detail) }
     }
 }

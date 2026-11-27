@@ -268,7 +268,7 @@ struct EPUBReaderView: View {
     @EnvironmentObject private var library: BookLibraryModel
     @EnvironmentObject private var activity: ReadingActivityModel
     @StateObject private var model: EPUBReaderModel
-    @State private var showsBookInfo = false
+    @State private var bookInfo: ReaderBookInfoPage?
     @State private var showsTOC = false
     @State private var showsSettings = false
     @State private var showsBookmarks = false
@@ -331,10 +331,7 @@ struct EPUBReaderView: View {
         .readerPresentationColorScheme(theme == "system" ? nil : (pageTheme == .dark ? .dark : .light))
         .navigationBarHidden(true)
         .readingTabBarHidden()
-        .modifier(ReaderMenuBackGesture(menuVisible: model.showsControls) {
-            saveProgress()
-            dismiss()
-        })
+        .background(ReaderEdgeBackNavigation())
         .task {
             model.onLocationChanged = { locator, chapter in
                 if !isScrubbing, let progress = locator.locations.totalProgression { sliderProgress = progress }
@@ -353,7 +350,7 @@ struct EPUBReaderView: View {
             else { activity.beginReading(model.book) }
         }
         .onDisappear {
-            guard !showsTOC else { return }
+            guard !showsTOC, bookInfo == nil else { return }
             model.onLocationChanged = nil
             if !switchingToText {
                 saveProgress()
@@ -361,15 +358,7 @@ struct EPUBReaderView: View {
             }
         }
         .fullScreenCover(isPresented: $showsTOC) { tocSheet }
-        .sheet(isPresented: $showsBookInfo) {
-            ReaderBookInfoSheet(book: model.book, source: nil, chapters: model.chapters)
-                .environment(\.resumeBookReading) { _, chapters, _, index in
-                    showsBookInfo = false
-                    guard let index, chapters.indices.contains(index), chapters[index] != model.currentChapter,
-                          let link = model.link(for: chapters[index]) else { return }
-                    Task { await model.go(to: link) }
-                }
-        }
+        .readerBookInfoDestination($bookInfo)
         .sheet(isPresented: $showsSettings) {
             settingsSheet
                 .readingPresentationDetents([.medium, .large])
@@ -393,7 +382,13 @@ struct EPUBReaderView: View {
             .accessibilityElement(children: .combine)
             .frame(maxWidth: .infinity, alignment: .leading)
             Menu {
-                Button("书籍信息", systemImage: "info.circle") { showsBookInfo = true }
+                Button("书籍详情", systemImage: "info.circle") {
+                    bookInfo = ReaderBookInfoPage(book: model.book, source: nil, chapters: model.chapters) { _, chapters, _, index in
+                        guard let index, chapters.indices.contains(index), chapters[index] != model.currentChapter,
+                              let link = model.link(for: chapters[index]) else { return }
+                        Task { await model.go(to: link) }
+                    }
+                }
                 Button("添加书签", systemImage: "bookmark") {
                     guard let locator = model.location, let chapter = model.currentChapter else { return }
                     Task {
@@ -531,12 +526,11 @@ struct EPUBReaderView: View {
                     }
                     .buttonStyle(.borderless)
                     .padding(.leading, CGFloat(min(entry.depth, 5)) * 12)
-                    .listRowBackground(entry.id == currentID ? ReadingTheme.accentSoft : ReadingTheme.canvas)
+                    .listRowBackground(entry.id == currentID ? ReadingTheme.accentSoft : Color.clear)
                     .id(entry.id)
                 }
                 .listStyle(.plain)
                 .readingScrollContentBackgroundHidden()
-                .background(ReadingTheme.canvas)
                 .onAppear { if let currentID { proxy.scrollTo(currentID, anchor: .center) } }
             }
             .readingSheetTitle("目录")
@@ -595,7 +589,6 @@ struct EPUBReaderView: View {
                 .padding(16)
                 .frame(maxWidth: .infinity)
             }
-            .readingSheetSurface()
             .readingSheetTitle("EPUB 排版")
             .toolbar {
                 ReadingSheetActions {
@@ -643,7 +636,7 @@ struct EPUBReaderView: View {
                 if bookmarks.isEmpty {
                     ReadingUnavailableView("还没有书签", systemImage: "bookmark", description: Text("在阅读页的更多菜单中添加书签。"))
                         .listRowSeparator(.hidden)
-                        .listRowBackground(ReadingTheme.canvas)
+                        .listRowBackground(Color.clear)
                 }
                 ForEach(bookmarks) { bookmark in
                     Button {
@@ -657,13 +650,12 @@ struct EPUBReaderView: View {
                             }
                         }
                     }
-                    .listRowBackground(ReadingTheme.canvas)
+                    .listRowBackground(Color.clear)
                     .swipeActions { Button("删除", role: .destructive) { Task { await activity.removeBookmark(bookmark) } } }
                 }
             }
             .listStyle(.plain)
             .readingScrollContentBackgroundHidden()
-            .background(ReadingTheme.canvas)
             .readingSheetTitle("书签")
             .toolbar {
                 ReadingSheetActions {

@@ -337,14 +337,18 @@ extension Book {
         return URL(string: "https://101kks.com/book/\(bookID)/index.html")
     }
 
+    static func isBrowserChapterAddress(_ address: String, in directory: URL) -> Bool {
+        let bookID = directory.deletingLastPathComponent().lastPathComponent
+        return address.range(of: #"^https://101kks\.com/txt/\#(bookID)/[0-9]+\.html$"#, options: .regularExpression) != nil
+    }
+
     func chapters(fromBrowserRows rows: [[String: String]], at directory: URL) throws -> [BookChapter] {
         guard directory == browserDirectoryURL else { throw CancellationError() }
-        let bookID = directory.deletingLastPathComponent().lastPathComponent
         var seen = Set<String>()
         var parsed = [BookChapter]()
         for row in rows {
             guard let address = row["url"], let title = row["title"], !title.isEmpty,
-                  address.range(of: #"^https://101kks\.com/txt/\#(bookID)/[0-9]+\.html$"#, options: .regularExpression) != nil,
+                  Self.isBrowserChapterAddress(address, in: directory),
                   seen.insert(address).inserted else { continue }
             var chapter = BookChapter(url: address, title: title, bookUrl: bookUrl, index: parsed.count)
             chapter.baseUrl = directory.absoluteString

@@ -1,5 +1,9 @@
 import SwiftUI
 
+extension EnvironmentValues {
+    @Entry var isReadingSheet = false
+}
+
 struct ReadingUnavailableView<Label: View, Description: View, Actions: View>: View {
     private let label: Label
     private let description: Description
@@ -80,7 +84,7 @@ extension View {
     /// Shared destinations can also be pushed normally from a navigation stack.
     @ViewBuilder
     func readingRouteHeader<Actions: View>(
-        _ title: String, close: (() -> Void)?, displayMode: NavigationBarItem.TitleDisplayMode = .inline,
+        _ title: String, close: (() -> Void)?,
         @ViewBuilder actions: () -> Actions
     ) -> some View {
         if let close {
@@ -89,21 +93,40 @@ extension View {
                 ReadingSheetActions { ReadingSheetCloseButton(action: close) }
             }
         } else {
-            navigationTitle(title).navigationBarTitleDisplayMode(displayMode)
+            background(ReadingTheme.canvas)
+                .readingPageTitle(title)
                 .toolbar { ToolbarItemGroup(placement: .topBarTrailing) { actions() } }
         }
     }
 
     @ViewBuilder
+    func readingPageTitle(_ title: String?) -> some View {
+        if let title {
+            let font = UIFontMetrics(forTextStyle: .headline).scaledFont(for: .systemFont(ofSize: 18, weight: .semibold))
+            // The native gap after Back is wider with the iOS 26 glass toolbar.
+            let inset: CGFloat = if #available(iOS 26, *) { -4 } else { 6 }
+            readingLeadingTitle(title, font: font, identifier: "page.heading", leadingInset: inset)
+        } else {
+            self
+        }
+    }
+
     func readingSheetTitle(_ title: String) -> some View {
+        environment(\.isReadingSheet, true)
+            .readingSheetSurface()
+            .readingLeadingTitle(title, font: .preferredFont(forTextStyle: .headline), identifier: "sheet.heading")
+    }
+
+    @ViewBuilder
+    private func readingLeadingTitle(_ title: String, font: UIFont, identifier: String, leadingInset: CGFloat = 0) -> some View {
         let heading = ToolbarItem(placement: .topBarLeading) {
-            Text(title).font(.headline).lineLimit(1)
-                .frame(width: min(168, ceil((title as NSString).size(withAttributes: [
-                    .font: UIFont.preferredFont(forTextStyle: .headline)
-                ]).width) + 2), alignment: .leading)
+            Text(title).font(Font(font)).lineLimit(1)
+                .frame(width: min(168, ceil((title as NSString).size(withAttributes: [.font: font]).width) + 2),
+                       alignment: .leading)
                 .fixedSize()
+                .padding(.leading, leadingInset)
                 .accessibilityAddTraits(.isHeader)
-                .accessibilityIdentifier("sheet.heading")
+                .accessibilityIdentifier(identifier)
         }
         let page = navigationTitle(title).navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -143,6 +166,23 @@ private struct ReadingSheetSecondaryButtonStyle: ButtonStyle {
             .frame(minWidth: 44, minHeight: 44)
             .contentShape(Rectangle())
             .opacity(isEnabled ? (configuration.isPressed ? 0.55 : 1) : 0.45)
+    }
+}
+
+struct ReadingSheetCloseAction: ToolbarContent {
+    let action: () -> Void
+
+    var body: some ToolbarContent {
+        ToolbarItem(placement: .topBarTrailing) {
+            if #available(iOS 26.0, *) {
+                Button(role: .close, action: action).accessibilityLabel("关闭")
+            } else {
+                Button(action: action) {
+                    Image(systemName: "xmark").font(.body.weight(.semibold))
+                        .frame(width: 44, height: 44).contentShape(Rectangle())
+                }.accessibilityLabel("关闭")
+            }
+        }
     }
 }
 
@@ -247,6 +287,7 @@ extension View {
 }
 
 private struct ReadingSearchModifier: ViewModifier {
+    @Environment(\.isReadingSheet) private var isReadingSheet
     @Binding var text: String
     @Binding var isPresented: Bool
     let prompt: String
@@ -289,7 +330,7 @@ private struct ReadingSearchModifier: ViewModifier {
                 .animation(reduceMotion ? nil : .easeOut(duration: 0.2), value: isFocused)
                 .padding(.horizontal, 16)
                 .padding(.vertical, 8)
-                .background(ReadingTheme.canvas)
+                .background(isReadingSheet ? ReadingTheme.sheetBackground : ReadingTheme.canvas)
             }
             .onAppear { isFocused = isPresented }
             .onChange(of: isPresented) { isFocused = $0 }
@@ -305,15 +346,23 @@ enum ReadingTheme {
     static let toggleTint = Color(uiColor: .systemGreen)
     static let accentSoft = adaptive(0xEEEEEF, dark: 0x29292C)
     static let coral = Color(red: 0.76, green: 0.48, blue: 0.27)
-    static let paper = Color(red: 0.965, green: 0.945, blue: 0.895)
     static let ink = Color.primary
-    static let canvas = adaptive(0xFCFCFC, dark: 0x111113)
+    static let canvas = adaptive(0xF6F6F7, dark: 0x111113)
+    static let sheetBackground = elevated(.systemBackground)
+    static let sheetCard = elevated(.secondarySystemBackground)
+    static let settingsCanvas = canvas
     static let managementSecondary = adaptive(0x60645B, dark: 0xB7BAB3)
-    static let managementCanvas = adaptive(0xF9F8F5, dark: 0x151515)
     static let groupedCanvas = adaptive(0xF3F3F4, dark: 0x1C1C1F)
     static let surface = adaptive(0xFFFFFF, dark: 0x232326)
     static let separator = adaptive(0xE6E6E8, dark: 0x363639)
     static let onAccent = Color.white
+
+    // Reader overlays live in the base window. Resolve their surfaces at the same level as native sheets.
+    private static func elevated(_ color: UIColor) -> Color {
+        Color(uiColor: UIColor { traits in
+            color.resolvedColor(with: UITraitCollection(traitsFrom: [traits, UITraitCollection(userInterfaceLevel: .elevated)]))
+        })
+    }
 
     private static func adaptive(_ light: UInt32, dark: UInt32) -> Color {
         Color(uiColor: UIColor { traits in
@@ -365,7 +414,7 @@ struct ReadingPageHeader<Actions: View>: View {
 }
 
 enum ReadingHeaderArtwork: View {
-    case bookshelf, websites, profile
+    case bookshelf, websites, profile, appLock
 
     var body: some View {
         Canvas { context, size in
@@ -412,6 +461,27 @@ enum ReadingHeaderArtwork: View {
                 ribbon.addLine(to: CGPoint(x: 164, y: 62))
                 ribbon.closeSubpath()
                 context.fill(ribbon, with: .color(ReadingTheme.ink.opacity(0.13)))
+            case .appLock:
+                // Draw the cover, page edges and clasp on the same tilted plane.
+                let plane = CGAffineTransform(a: 1.04, b: -0.34, c: 0.57, d: 0.42, tx: 45, ty: 29)
+                let cover = Path(roundedRect: CGRect(x: 0, y: 0, width: 77, height: 86),
+                                 cornerRadius: 5).applying(plane)
+                context.fill(cover.offsetBy(dx: 0, dy: 5), with: edge)
+                context.fill(cover.offsetBy(dx: 0, dy: 3), with: .color(ReadingTheme.surface))
+                context.fill(cover, with: paper)
+                context.stroke(cover, with: edge, lineWidth: 0.9)
+
+                var hinge = Path()
+                hinge.move(to: CGPoint(x: 9, y: 1))
+                hinge.addLine(to: CGPoint(x: 9, y: 85))
+                context.stroke(hinge.applying(plane), with: edge, lineWidth: 1.5)
+
+                let clasp = Path(roundedRect: CGRect(x: 48, y: 34, width: 31, height: 22),
+                                 cornerRadius: 5).applying(plane)
+                context.fill(clasp, with: .color(ReadingTheme.separator))
+                var keyhole = Path(ellipseIn: CGRect(x: 54, y: 39, width: 7, height: 7))
+                keyhole.addRect(CGRect(x: 56, y: 44, width: 3, height: 6))
+                context.fill(keyhole.applying(plane), with: .color(ReadingTheme.ink.opacity(0.52)))
             case .websites:
                 // Three outward sweeps share the rounded ends of a printed RSS mark.
                 let origin = CGPoint(x: 68, y: 64)
@@ -454,16 +524,26 @@ struct SourceManagementSearchHeader: View {
                 .foregroundStyle(ReadingTheme.managementSecondary)
                 .monospacedDigit()
                 .padding(.horizontal, 20)
-            ReadingPillSearchField(placeholder: "名称、地址或分组", text: $searchText, cornerRadius: 14)
+            ReadingPillSearchField(placeholder: "名称、地址或分组", text: $searchText, cornerRadius: 14, fill: ReadingTheme.surface)
         }
         .padding(.top, 4)
     }
 }
 
-struct SourceGroupPicker: View {
+struct SourceGroupPicker<Actions: View>: View {
     let title: String
     let groups: [String]
     @Binding var selection: String?
+
+    let actions: Actions
+
+    init(title: String, groups: [String], selection: Binding<String?>,
+         @ViewBuilder actions: () -> Actions = { EmptyView() }) {
+        self.title = title
+        self.groups = groups
+        _selection = selection
+        self.actions = actions()
+    }
 
     private var selectionName: String {
         guard let selection else { return "全部分组" }
@@ -482,6 +562,7 @@ struct SourceGroupPicker: View {
                         Text(group).tag(String?.some(group))
                     }
                 }
+                actions
             } label: {
                 HStack(spacing: 6) {
                     Text(selectionName).font(.subheadline)
@@ -531,22 +612,22 @@ extension View {
             .readingListTopMargin(4)
             .readingScrollContentBackgroundHidden()
             .readingScrollDismissesKeyboard()
-            .background(ReadingTheme.managementCanvas)
+            .background(ReadingTheme.settingsCanvas)
     }
 }
 
-struct SourceManagementRow: View {
+struct SourceManagementRow<Icon: View>: View {
     let name: String
     let url: String
     let groups: [String]
-    let systemImage: String
     let enabled: Bool
     var showsToggle = true
     let onEnabledChanged: @MainActor @Sendable (Bool) -> Void
+    @ViewBuilder var icon: Icon
 
     var body: some View {
         HStack(spacing: 12) {
-            ManagementRowIcon(systemName: systemImage, active: enabled)
+            icon
             VStack(alignment: .leading, spacing: 4) {
                 Text(name)
                     .font(.body.weight(.semibold))
@@ -570,6 +651,76 @@ struct SourceManagementRow: View {
             }
         }
         .padding(.vertical, 5)
+    }
+}
+
+struct ReadingLayoutPicker<TrailingControl: View>: View {
+    @Binding var showsGrid: Bool
+    let gridLabel: String
+    let trailingControl: TrailingControl
+
+    init(showsGrid: Binding<Bool>, gridLabel: String = "网格布局",
+         @ViewBuilder trailingControl: () -> TrailingControl) {
+        _showsGrid = showsGrid
+        self.gridLabel = gridLabel
+        self.trailingControl = trailingControl()
+    }
+
+    var body: some View {
+        HStack(spacing: 0) {
+            segment(grid: true)
+            segment(grid: false)
+            trailingControl
+                .overlay(alignment: .leading) {
+                    Rectangle()
+                        .fill(ReadingTheme.separator)
+                        .frame(width: 1, height: 16)
+                        .padding(.leading, 6)
+                        .allowsHitTesting(false)
+                        .accessibilityHidden(true)
+                }
+        }
+        .background {
+            Capsule().fill(ReadingTheme.groupedCanvas).frame(height: 32)
+        }
+    }
+
+    private var listIcon: some View {
+        VStack(spacing: 3) {
+            ForEach(0..<2) { _ in
+                HStack(spacing: 2.5) {
+                    RoundedRectangle(cornerRadius: 1.2).frame(width: 5, height: 6)
+                    VStack(alignment: .leading, spacing: 1.5) {
+                        Capsule().frame(width: 10, height: 2)
+                        Capsule().frame(width: 6, height: 1.5)
+                    }
+                }
+            }
+        }
+    }
+
+    private func segment(grid: Bool) -> some View {
+        let selected = grid == showsGrid
+        return Button { showsGrid = grid } label: {
+            Group {
+                if grid {
+                    Image(systemName: "square.grid.2x2.fill")
+                        .font(.system(size: 15, weight: .semibold))
+                } else {
+                    listIcon
+                }
+            }
+            .foregroundStyle(selected ? ReadingTheme.onAccent : .secondary)
+            .frame(width: 40, height: 26)
+            .background {
+                if selected { Capsule().fill(ReadingTheme.accentFill) }
+            }
+            .frame(width: 44, height: 44)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(grid ? gridLabel : "列表布局")
+        .accessibilityAddTraits(selected ? .isSelected : [])
     }
 }
 
@@ -609,11 +760,7 @@ struct SourceBrowseRow<Icon: View>: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
-        .background {
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .fill(ReadingTheme.surface)
-                .shadow(color: .black.opacity(0.035), radius: 12, y: 6)
-        }
+        .background { ReadingCardBackground(cornerRadius: 18) }
         .contentShape(RoundedRectangle(cornerRadius: 18))
     }
 }
@@ -623,39 +770,12 @@ enum BookReadingPresentation {
         book.durChapterIndex > 0 || book.durChapterPos > 0 || book.durChapterTime > 0
     }
 
-    static func progress(_ book: Book) -> Double {
-        guard hasStarted(book), book.totalChapterNum > 0 else { return 0 }
-        return min(1, max(0, Double(book.durChapterIndex + 1) / Double(book.totalChapterNum)))
-    }
-
     static func position(_ book: Book) -> String {
-        if let title = book.durChapterTitle?.trimmingCharacters(in: .whitespacesAndNewlines), !title.isEmpty { return title }
         guard hasStarted(book) else { return "尚未阅读" }
+        if let title = book.durChapterTitle?.trimmingCharacters(in: .whitespacesAndNewlines), !title.isEmpty { return title }
         return book.totalChapterNum > 0
             ? "第\(book.durChapterIndex + 1)章 · 共\(book.totalChapterNum)章"
             : "已读至第\(book.durChapterIndex + 1)章"
-    }
-
-    static func progressLabel(_ book: Book) -> String {
-        guard hasStarted(book) else { return "尚未阅读" }
-        guard book.totalChapterNum > 0 else { return "已开始阅读" }
-        return "已读\(Int((progress(book) * 100).rounded()))%"
-    }
-}
-
-struct ReadingProgressLine: View {
-    let value: Double
-
-    var body: some View {
-        GeometryReader { geometry in
-            Capsule().fill(ReadingTheme.separator)
-                .overlay(alignment: .leading) {
-                    Capsule().fill(ReadingTheme.accent)
-                        .frame(width: geometry.size.width * min(1, max(0, value)))
-                }
-        }
-        .frame(height: 3)
-        .accessibilityHidden(true)
     }
 }
 
@@ -807,13 +927,29 @@ struct BookCoverArtwork: View {
     }
 }
 
+struct ReadingCardBackground: View {
+    @Environment(\.isReadingSheet) private var isReadingSheet
+    var cornerRadius: CGFloat = 20
+
+    var body: some View {
+        let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+        if isReadingSheet {
+            shape.fill(ReadingTheme.sheetCard)
+        } else {
+            shape.fill(ReadingTheme.surface)
+                .overlay { shape.strokeBorder(ReadingTheme.separator.opacity(0.65), lineWidth: 0.5) }
+                .shadow(color: .black.opacity(0.045), radius: 10, y: 4)
+        }
+    }
+}
+
 struct ReadingCard<Content: View>: View {
     @ViewBuilder let content: Content
 
     var body: some View {
         content
             .padding(20)
-            .background(ReadingTheme.groupedCanvas, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+            .background { ReadingCardBackground() }
     }
 }
 
@@ -837,6 +973,7 @@ struct ReadingPillSearchField: View {
     let placeholder: String
     @Binding var text: String
     var cornerRadius: CGFloat = 22
+    var fill = ReadingTheme.accentSoft
 
     var body: some View {
         HStack(spacing: 12) {
@@ -861,7 +998,7 @@ struct ReadingPillSearchField: View {
         .foregroundStyle(ReadingTheme.ink)
         .padding(.horizontal, 18)
         .frame(minHeight: 44)
-        .background(ReadingTheme.accentSoft, in: RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+        .background(fill, in: RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
         .padding(.horizontal, 20)
         .padding(.top, 14)
         .padding(.bottom, 8)
@@ -909,9 +1046,37 @@ struct ReadingIllustratedEmptyState<Actions: View>: View {
     }
 }
 
+struct ReadingPageList<Content: View>: View {
+    @ViewBuilder var content: Content
+
+    var body: some View {
+        List { content.listRowBackground(ReadingTheme.surface) }
+            .readingScrollContentBackgroundHidden()
+            .background(ReadingTheme.canvas)
+    }
+}
+
+struct ReadingSheetList<Content: View>: View {
+    @ViewBuilder var content: Content
+
+    var body: some View {
+        List { content.listRowBackground(ReadingTheme.sheetCard) }
+            .readingScrollContentBackgroundHidden()
+    }
+}
+
+struct ReadingSheetForm<Content: View>: View {
+    @ViewBuilder var content: Content
+
+    var body: some View {
+        Form { content.listRowBackground(ReadingTheme.sheetCard) }
+            .readingScrollContentBackgroundHidden()
+    }
+}
+
 extension View {
     func readingSheetGroup() -> some View {
-        background(Color(uiColor: .secondarySystemBackground),
+        background(ReadingTheme.sheetCard,
                    in: RoundedRectangle(cornerRadius: 16, style: .continuous))
     }
 }
@@ -921,11 +1086,6 @@ struct ReadingSoftCard<Content: View>: View {
 
     var body: some View {
         content
-            .background(ReadingTheme.surface, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
-            .overlay {
-                RoundedRectangle(cornerRadius: 20, style: .continuous)
-                    .strokeBorder(ReadingTheme.separator.opacity(0.18), lineWidth: 0.5)
-            }
-            .shadow(color: .black.opacity(0.045), radius: 12, x: 0, y: 5)
+            .background { ReadingCardBackground() }
     }
 }

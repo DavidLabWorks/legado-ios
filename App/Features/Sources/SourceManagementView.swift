@@ -135,9 +135,8 @@ struct SourceManagementView: View {
                 }
             }
         }
-        .navigationTitle("书源管理")
-        .background(ReadingTheme.managementCanvas)
-        .navigationBarTitleDisplayMode(.large)
+        .readingPageTitle("书源管理")
+        .background(ReadingTheme.settingsCanvas)
         .navigationBarHidden(false)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
@@ -156,7 +155,7 @@ struct SourceManagementView: View {
                     NavigationLink {
                         SourceBatchTestView()
                     } label: {
-                        Label("测试书源", systemImage: "checkmark.circle.badge.questionmark")
+                        Label("书源测试", systemImage: "checkmark.circle.badge.questionmark")
                     }
                     Button("管理分组", systemImage: "folder.badge.gearshape") { showsGroupManager = true }
                 }
@@ -247,7 +246,7 @@ private struct SourceTextImportView: View {
 
     var body: some View {
         ReadingNavigationStack {
-            Form {
+            ReadingSheetForm {
                 Picker("导入方式", selection: $mode) {
                     Text("URL").tag(0)
                     Text("粘贴 JSON").tag(1)
@@ -303,7 +302,9 @@ private struct SourceRow: View {
 
     var body: some View {
         SourceManagementRow(name: source.bookSourceName, url: source.bookSourceUrl, groups: source.groups,
-                            systemImage: source.bookSourceType == 1 ? "headphones" : "book.closed", enabled: source.enabled, showsToggle: showsToggle, onEnabledChanged: onEnabledChanged)
+                            enabled: source.enabled, showsToggle: showsToggle, onEnabledChanged: onEnabledChanged) {
+            ManagementRowIcon(systemName: source.bookSourceType == 1 ? "headphones" : "book.closed", active: source.enabled)
+        }
     }
 }
 
@@ -316,7 +317,7 @@ private struct SourceGroupManagerView: View {
 
     var body: some View {
         ReadingNavigationStack {
-            List {
+            ReadingSheetList {
                 Section("新建分组") {
                     HStack {
                         TextField("例如：文学", text: $newGroup)
@@ -396,7 +397,7 @@ private struct SourceGroupContentsView: View {
     }
 
     var body: some View {
-        List {
+        ReadingSheetList {
             Section {
                 ForEach(sources) { source in
                     NavigationLink {
@@ -416,10 +417,8 @@ private struct SourceGroupContentsView: View {
             }
         }
         .listStyle(.insetGrouped)
-        .readingScrollContentBackgroundHidden()
-        .background(ReadingTheme.groupedCanvas)
-        .navigationTitle(group)
-        .navigationBarTitleDisplayMode(.inline)
+        .readingSheetSurface()
+        .readingPageTitle(group)
     }
 }
 
@@ -431,7 +430,7 @@ private struct SourceBatchGroupView: View {
 
     var body: some View {
         ReadingNavigationStack {
-            List {
+            ReadingSheetList {
                 Section("已选择 \(sourceIDs.count) 个书源") {
                     HStack {
                         TextField("输入新分组", text: $customGroup)
@@ -477,7 +476,7 @@ private struct SourceDetailView: View {
     private var current: BookSource { library.sources.first { $0.id == (editedSourceID ?? source.id) } ?? source }
 
     var body: some View {
-        List {
+        ReadingPageList {
             Section("基本信息") {
                 ReadingLabeledContent("名称", value: current.bookSourceName)
                 ReadingLabeledContent("地址", value: current.bookSourceUrl)
@@ -510,7 +509,7 @@ private struct SourceDetailView: View {
                 NavigationLink {
                     SourceDebugView(source: current)
                 } label: {
-                    Label("运行端到端调试", systemImage: "stethoscope")
+                    Label("书源调试", systemImage: "stethoscope")
                 }
                 Text("使用你输入的关键词，逐步验证搜索、详情、目录和正文规则。")
                     .font(.footnote).foregroundStyle(.secondary)
@@ -530,8 +529,7 @@ private struct SourceDetailView: View {
                 Section("说明") { Text(comment) }
             }
         }
-        .navigationTitle(current.bookSourceName)
-        .navigationBarTitleDisplayMode(.inline)
+        .readingPageTitle(current.bookSourceName)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 Button("编辑") { showsEditor = true }
@@ -551,37 +549,106 @@ struct DetectedRuleImportView: View {
     @State private var saving = false
     @State private var failure: String?
 
+    @State private var selected: IndexSet
+    private let names: [String]
+
+    private let skippedWebsites: [String]
+
+    init(rules: SourceLibraryModel.DetectedRules, skippedWebsites: [String]) {
+        self.skippedWebsites = skippedWebsites
+        self.rules = rules
+        names = rules.names
+        _selected = State(initialValue: IndexSet(integersIn: names.indices))
+    }
+
     var body: some View {
         ReadingNavigationStack {
-            List {
-                Section("共 \(rules.names.count) 项") {
-                    ForEach(Array(rules.names.enumerated()), id: \.offset) { _, name in Text(name) }
+            ReadingSheetList {
+                if !skippedWebsites.isEmpty {
+                    DisclosureGroup("可导入 \(names.count) 条，已跳过 \(skippedWebsites.count) 条") {
+                        ForEach(skippedWebsites.indices, id: \.self) { index in
+                            Text(skippedWebsites[index])
+                        }
+                    }
+                }
+                Section {
+                    ForEach(names.indices, id: \.self) { index in
+                        Button {
+                            if selected.contains(index) { selected.remove(index) }
+                            else { selected.insert(index) }
+                        } label: {
+                            HStack(spacing: 12) {
+                                Image(systemName: selected.contains(index) ? "checkmark.circle.fill" : "circle")
+                                    .font(.title3)
+                                    .foregroundStyle(selected.contains(index) ? ReadingTheme.accent : Color.secondary)
+                                    .accessibilityHidden(true)
+                                if case .websites(let sources) = rules {
+                                    WebsiteSourceIcon(source: sources[index])
+                                        .padding(5)
+                                        .frame(width: 36, height: 36)
+                                        .background(ReadingTheme.accentSoft, in: RoundedRectangle(cornerRadius: 10))
+                                        .accessibilityHidden(true)
+                                }
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text(names[index]).font(.body.weight(.medium)).foregroundStyle(.primary)
+                                    if case .websites(let sources) = rules,
+                                       let host = URL(string: sources[index].sourceUrl)?.host {
+                                        Text(host).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                                    }
+                                }
+                                Spacer(minLength: 4)
+                            }
+                            .frame(minHeight: 44)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityAddTraits(selected.contains(index) ? .isSelected : [])
+                        .accessibilityIdentifier("import.item.\(index)")
+                    }
+                } header: {
+                    HStack {
+                        Text("已选 \(selected.count) / \(names.count) 项")
+                            .font(.subheadline.weight(.medium))
+                            .foregroundStyle(ReadingTheme.ink)
+                        Spacer()
+                        Button(selected.count == names.count ? "取消全选" : "全选") {
+                            selected = selected.count == names.count ? [] : IndexSet(integersIn: names.indices)
+                        }
+                        .font(.subheadline.weight(.semibold))
+                        .frame(minHeight: 44)
+                        .disabled(names.isEmpty)
+                    }
+                    .textCase(nil)
                 }
                 if let failure { Text(failure).foregroundStyle(.red) }
             }
+            .listStyle(.insetGrouped)
+            .readingListTopMargin(4)
             .readingSheetTitle("导入" + rules.title)
             .toolbar {
                 ReadingSheetActions {
-                    Button("取消") { library.cancelPendingImport() }.disabled(saving)
+                    Button("取消") { library.cancelPendingImport() }
                     ReadingSheetActionButton("导入", busyTitle: "导入中", isWorking: saving) {
+                        let indices = selected
                         saving = true
                         Task {
                             defer { saving = false }
                             do {
                                 switch rules {
-                                case .websites(let sources): try await websites.importSources(sources)
-                                case .replacements(let items): try await replacements.importRules(items)
-                                case .contents(let items): try await TxtTocRuleManagementModel().importRules(items)
+                                case .websites(let items): try await websites.importSources(indices.map { items[$0] })
+                                case .replacements(let items): try await replacements.importRules(indices.map { items[$0] })
+                                case .contents(let items): try await TxtTocRuleManagementModel().importRules(indices.map { items[$0] })
                                 }
-                                library.notice = .init(kind: .success, title: rules.title + "已导入", detail: "已处理 \(rules.names.count) 项。")
+                                library.notice = .init(kind: .success, title: rules.title + "已导入", detail: "已处理 \(indices.count) 项。")
                                 library.cancelPendingImport()
                             } catch { failure = error.localizedDescription }
                         }
-                    }.disabled(saving)
+                    }.disabled(selected.isEmpty)
                 }
             }
-            .interactiveDismissDisabled(saving)
         }
+        .disabled(saving)
+        .interactiveDismissDisabled(saving)
     }
 }
 
@@ -606,7 +673,7 @@ struct SourceImportReviewView: View {
 
     var body: some View {
         ReadingNavigationStack {
-            List {
+            ReadingSheetList {
                 Section {
                     HStack(spacing: 10) {
                         importCountCard(

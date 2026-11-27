@@ -224,6 +224,36 @@ struct RuleLibraryRegressionTests {
         }
     }
 
+    @Test func websiteImportsSkipOnlyEntriesWithoutAddresses() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let database = try LegadoDatabase(url: directory.appendingPathComponent("sites.sqlite3"))
+        let websites = RSSLibraryModel(database: database)
+        let library = SourceLibraryModel.demo(sources: [])
+        let file = directory.appendingPathComponent("合集.json")
+        let json = #"[{"sourceName":"缺字段"},{"sourceUrl":"站点标识"},{"sourceUrl":"  ","sourceName":"空白"},{"sourceUrl":null},{}]"#
+        try Data(json.utf8).write(to: file)
+
+        await library.previewFiles([file])
+        let review = try #require(library.pendingImport)
+        #expect(review.validCount == 1)
+        #expect(review.invalidCount == 4)
+        #expect(review.rules?.names == ["站点标识"])
+        #expect(review.skippedWebsites == ["第 1 条「缺字段」缺少源地址", "第 3 条「空白」缺少源地址",
+                                           "第 4 条缺少源地址", "第 5 条缺少源地址"])
+        let direct = try #require(await websites.previewFiles([file]))
+        #expect(direct.skippedEntries == review.skippedWebsites)
+        try await websites.importSources(direct.sources)
+        #expect(try await database.loadRssSources().map(\.sourceUrl) == ["站点标识"])
+
+        library.cancelPendingImport()
+        let invalid = #"[{"sourceName":"六间房","sourceUrl":""}]"#
+        await library.previewText(invalid)
+        #expect(library.notice?.kind == .error)
+        #expect(library.pendingImport == nil)
+        #expect(await websites.previewText(invalid) == nil)
+    }
+
     @Test func openingJSONFileDetectsTheRuleLibraryFromItsContents() async throws {
         let files = [
             (#"[{"sourceUrl":"https://site.test","sourceName":"网站","ruleArticles":"item"}]"#, "网站源", "网站"),

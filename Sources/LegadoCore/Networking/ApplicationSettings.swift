@@ -14,6 +14,28 @@ public struct ApplicationSettings: Codable, Equatable, Sendable {
 
     public init() {}
 
+    public enum Page: Sendable {
+        case chapterCache, connection, advancedNetwork
+
+        public func applying(_ draft: ApplicationSettings, to current: ApplicationSettings) -> ApplicationSettings {
+            var result = current
+            switch self {
+            case .chapterCache:
+                result.chapterCacheMB = draft.chapterCacheMB
+                result.prefetchChapters = draft.prefetchChapters
+            case .connection:
+                result.timeoutSeconds = draft.timeoutSeconds
+                result.concurrentSources = draft.concurrentSources
+                result.ignoreCertificateErrors = draft.ignoreCertificateErrors
+            case .advancedNetwork:
+                result.userAgent = draft.userAgent
+                result.proxy = draft.proxy
+                result.hosts = draft.hosts
+            }
+            return result
+        }
+    }
+
     public var effectiveUserAgent: String {
         userAgent.isEmpty ? LegadoURLBuilder.defaultUserAgent : userAgent
     }

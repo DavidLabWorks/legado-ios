@@ -32,6 +32,8 @@ struct LocalBookDetailView: View {
     @EnvironmentObject private var library: BookLibraryModel
     @Environment(\.dismiss) private var dismiss
     let book: Book
+    var pageTitle: String?
+    @Environment(\.resumeBookReading) private var resume
     @StateObject private var model = LocalBookDetailViewModel()
     @State private var showsTocRule = false
 
@@ -53,12 +55,18 @@ struct LocalBookDetailView: View {
                 }
                 .padding(.top, 12)
 
+                if resume != nil {
+                    Button("继续阅读") { dismiss() }
+                        .readingProminentButtonStyle()
+                }
+
                 if let intro = book.intro, !intro.isEmpty {
                     ReadingCard { Text(intro).font(.subheadline).frame(maxWidth: .infinity, alignment: .leading) }
                 }
             }
             .frame(maxWidth: .infinity)
             .listRowSeparator(.hidden)
+            .listRowBackground(Color.clear)
             if model.isLoading {
                 HStack { Spacer(); RagdollLoading("正在识别章节…", width: 72, axis: .vertical); Spacer() }.padding(.vertical, 28)
             } else if let error = model.errorMessage {
@@ -70,8 +78,7 @@ struct LocalBookDetailView: View {
         .listStyle(.plain)
         .readingScrollContentBackgroundHidden()
         .background(ReadingTheme.canvas)
-        .navigationTitle(book.name)
-        .navigationBarTitleDisplayMode(.inline)
+        .readingPageTitle(pageTitle ?? book.name)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 Menu {
@@ -119,7 +126,7 @@ private struct LocalBookTocRuleView: View {
 
     var body: some View {
         ReadingNavigationStack {
-            List {
+            ReadingSheetList {
                 Section("目录规则") {
                     if !book.tocUrl.isEmpty { choice("保留当前规则", value: "current") }
                     choice("自动识别", value: "automatic")

@@ -153,6 +153,27 @@ struct RSSVideoPlayer: UIViewControllerRepresentable {
 
         override func customizeUIComponents() {
             super.customizeUIComponents()
+            var playStyle: UIButton.Configuration
+            if #available(iOS 26.0, *) {
+                playStyle = .clearGlass()
+            } else {
+                playStyle = .plain()
+                playStyle.background.visualEffect = UIBlurEffect(style: .systemThinMaterialDark)
+                playStyle.background.strokeColor = UIColor.white.withAlphaComponent(0.35)
+                playStyle.background.strokeWidth = 1
+            }
+            playStyle.cornerStyle = .capsule
+            playStyle.contentInsets = .zero
+            playStyle.baseForegroundColor = .white
+            playStyle.preferredSymbolConfigurationForImage = UIImage.SymbolConfiguration(pointSize: 28, weight: .semibold)
+            replayButton.backgroundColor = .clear
+            replayButton.configuration = playStyle
+            NSLayoutConstraint.activate([
+                replayButton.widthAnchor.constraint(equalToConstant: 56),
+                replayButton.heightAnchor.constraint(equalTo: replayButton.widthAnchor),
+            ])
+            controllerView.insertSubview(replayButton, aboveSubview: bottomMaskView)
+
             // KSPlayer installs a fixed width of 25 pt on its back button.
             backButton.constraints.first { $0.firstAttribute == .width && $0.secondItem == nil }?.constant = 44
             backButton.setImage(nil, for: .normal)

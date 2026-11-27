@@ -4,15 +4,36 @@ import SwiftUI
 import LegadoCore
 #endif
 
+enum WebsiteSort: String, CaseIterable {
+    case recent, name, custom
+
+    var title: String {
+        switch self {
+        case .recent: "最近阅览"
+        case .name: "名称"
+        case .custom: "自定义"
+        }
+    }
+}
+
 @MainActor
 final class RSSLibraryModel: ObservableObject {
     @Published private(set) var hasLoadedSources = false
     @Published private(set) var sources: [RssSource] = []
+    @Published private(set) var groups: [String] = []
     @Published private(set) var articles: [RssArticle] = []
     @Published private(set) var stars: [RssStar] = []
     @Published private(set) var records: [RssReadRecord] = []
     @Published private(set) var isWorking = false
     @Published var errorMessage: String?
+
+    private let defaults: UserDefaults
+    @Published private var groupSorts: [String: String] {
+        didSet { defaults.set(groupSorts, forKey: "websiteGroupSorts") }
+    }
+    @Published private var lastVisits: [String: Int64] {
+        didSet { defaults.set(lastVisits, forKey: "websiteLastVisits") }
+    }
 
     private var sourceRepository: SQLiteRssSourceRepository { get throws { .init(database: try database) } }
     private var articleRepository: SQLiteRssArticleRepository { get throws { .init(database: try database) } }
@@ -37,16 +58,23 @@ final class RSSLibraryModel: ObservableObject {
     private var articleRequestID = UUID()
     @Published private var loadingMoreRequestID: UUID?
     @Published private(set) var refreshingFeed = false
+    @Published private(set) var feedError: String?
     @Published private(set) var paginationError: String?
     var isLoadingMore: Bool { loadingMoreRequestID != nil }
     private var activeOperations = 0
 
-    init(database: LegadoDatabase, service: RSSService = .init()) {
+    init(database: LegadoDatabase, service: RSSService = .init(), defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+        groupSorts = defaults.dictionary(forKey: "websiteGroupSorts") as? [String: String] ?? [:]
+        lastVisits = defaults.dictionary(forKey: "websiteLastVisits") as? [String: Int64] ?? [:]
         databaseResult = .success(database)
         self.service = service
     }
 
     private init(databaseError: Error) {
+        defaults = .standard
+        groupSorts = [:]
+        lastVisits = [:]
         let error = LegadoDatabaseError.open("RSS 数据库无法打开：\(databaseError.localizedDescription)。请检查存储空间后重新启动应用。")
         databaseResult = .failure(error)
         service = .init()
@@ -60,12 +88,46 @@ final class RSSLibraryModel: ObservableObject {
 
     func reloadAfterBackup() async {
         resetActiveFeed()
+        lastVisits = [:]
         await load()
+    }
+
+    func sort(for group: String?) -> WebsiteSort {
+        groupSorts[group ?? ""].flatMap(WebsiteSort.init(rawValue:)) ?? .name
+    }
+
+    func setSort(_ sort: WebsiteSort, for group: String?) {
+        groupSorts[group ?? ""] = sort.rawValue
+    }
+
+    func websites(in group: String?) -> [RssSource] {
+        let members = sources.filter { source in
+            source.enabled && (group.map { source.groups.contains($0) } ?? true)
+        }
+        return sortedWebsites(members, by: sort(for: group))
+    }
+
+    func sortedWebsites(_ members: [RssSource], by sort: WebsiteSort) -> [RssSource] {
+        guard sort != .custom else { return members }
+        return members.sorted { lhs, rhs in
+            if sort == .recent {
+                let left = lastVisits[lhs.id] ?? 0, right = lastVisits[rhs.id] ?? 0
+                if left != right { return left > right }
+            }
+            let order = lhs.sourceName.compare(rhs.sourceName, options: [.caseInsensitive, .numeric],
+                                               locale: Locale(identifier: "zh_CN"))
+            return order == .orderedSame ? lhs.id < rhs.id : order == .orderedAscending
+        }
+    }
+
+    func visitWebsite(_ id: String) {
+        lastVisits[id] = Int64(Date().timeIntervalSince1970 * 1_000)
     }
 
     private func resetActiveFeed() {
         invalidatePageRequests()
         activeFeed = nil
+        feedError = nil
         paginationError = nil
         visitedPageURLs.removeAll()
         articles = []
@@ -83,49 +145,77 @@ final class RSSLibraryModel: ObservableObject {
         defer { hasLoadedSources = true }
         do {
             async let loadedSources = sourceRepository.all()
+            async let loadedGroups = database.loadRssSourceGroups()
             async let loadedStars = starRepository.all()
             async let loadedRecords = recordRepository.all()
-            (sources, stars, records) = try await (loadedSources, loadedStars, loadedRecords)
+            (sources, groups, stars, records) = try await (loadedSources, loadedGroups, loadedStars, loadedRecords)
         } catch { errorMessage = error.localizedDescription }
     }
 
     func importSources(_ incoming: [RssSource]) async throws {
         sources = try await database.mergeImportedRssSources(incoming)
+        groups = try await database.loadRssSourceGroups()
     }
 
-    func importFiles(_ urls: [URL]) async {
+    func changeGroup(from old: String?, to new: String?) async throws {
+        try await database.changeRssSourceGroup(from: old, to: new)
+        if let old {
+            let saved = groupSorts.removeValue(forKey: old)
+            if let new { groupSorts[new] = saved }
+        }
+        sources = try await sourceRepository.all()
+        groups = try await database.loadRssSourceGroups()
+    }
+
+    func moveSources(_ ids: Set<String>, toGroup group: String?) async throws {
+        try await database.moveRssSources(ids, toGroup: group)
+        sources = try await sourceRepository.all()
+        groups = try await database.loadRssSourceGroups()
+    }
+
+    func deleteGroups(_ selected: Set<String>, includingSources: Bool) async throws {
+        let removed = try await database.deleteRssSourceGroups(selected, includingSources: includingSources)
+        groupSorts = groupSorts.filter { !selected.contains($0.key) }
+        if includingSources {
+            didRemoveSources(removed)
+        } else {
+            sources = try await sourceRepository.all()
+        }
+        groups = try await database.loadRssSourceGroups()
+    }
+
+    func previewFiles(_ urls: [URL]) async -> RSSSourceImportPayload? {
         await perform {
-            var merged = self.sources
+            var incoming = RSSSourceImportPayload()
             for url in urls {
-                let granted = url.startAccessingSecurityScopedResource()
-                defer { if granted { url.stopAccessingSecurityScopedResource() } }
-                let payload = try self.importer.decode(Data(contentsOf: url))
-                merged = try self.importer.merge(payload.sources, into: merged)
-                for remote in payload.subscriptionURLs { merged = try await self.importRemote(remote, existing: merged) }
+                let file = SourceImportFile(url: url)
+                let data = try await Task.detached(priority: .userInitiated) { try file.read() }.value
+                let payload = try await self.resolveImport(data)
+                incoming.sources += payload.sources
+                incoming.skippedEntries += payload.skippedEntries
             }
-            try await self.sourceRepository.save(merged)
-            self.sources = try await self.sourceRepository.all()
+            return incoming
         }
     }
 
-    @discardableResult
-    func importText(_ text: String) async -> Bool {
-        var succeeded = false
+    func previewText(_ text: String) async -> RSSSourceImportPayload? {
         await perform {
             let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-            var merged: [RssSource]
             if let url = URL(string: trimmed), ["http", "https"].contains(url.scheme?.lowercased() ?? "") {
-                merged = try await self.importRemote(trimmed, existing: self.sources)
-            } else {
-                let payload = try self.importer.decode(Data(trimmed.utf8))
-                merged = try self.importer.merge(payload.sources, into: self.sources)
-                for remote in payload.subscriptionURLs { merged = try await self.importRemote(remote, existing: merged) }
+                return try await self.importRemote(trimmed)
             }
-            try await self.sourceRepository.save(merged)
-            self.sources = try await self.sourceRepository.all()
-            succeeded = true
+            return try await self.resolveImport(Data(trimmed.utf8))
         }
-        return succeeded
+    }
+
+    private func resolveImport(_ data: Data) async throws -> RSSSourceImportPayload {
+        var payload = try importer.decode(data)
+        for remote in payload.subscriptionURLs {
+            let imported = try await importRemote(remote)
+            payload.sources += imported.sources
+            payload.skippedEntries += imported.skippedEntries
+        }
+        return payload
     }
 
     func applySilentSubscription(_ data: Data) async throws {
@@ -140,20 +230,33 @@ final class RSSLibraryModel: ObservableObject {
         }
         try await sourceRepository.save(updated)
         sources = try await sourceRepository.all()
+        groups = try await database.loadRssSourceGroups()
     }
 
     func setEnabled(_ enabled: Bool, source: RssSource) async {
         do { try await sourceRepository.setEnabled(enabled, sourceURL: source.sourceUrl); sources = try await sourceRepository.all() }
         catch { errorMessage = error.localizedDescription }
     }
-    func remove(_ source: RssSource) async {
+    @discardableResult
+    func remove(_ source: RssSource) async -> Bool {
+        await remove(sourceIDs: [source.id])
+    }
+
+    func remove(sourceIDs: Set<String>) async -> Bool {
         do {
-            try await sourceRepository.remove(sourceURL: source.sourceUrl)
-            if activeFeed?.origin == source.sourceUrl {
-                resetActiveFeed()
-            }
-            sources = try await sourceRepository.all()
-        } catch { errorMessage = error.localizedDescription }
+            try await database.removeRssSources(sourceURLs: sourceIDs)
+            didRemoveSources(sourceIDs)
+            return true
+        } catch {
+            errorMessage = error.localizedDescription
+            return false
+        }
+    }
+
+    private func didRemoveSources(_ sourceIDs: Set<String>) {
+        lastVisits = lastVisits.filter { !sourceIDs.contains($0.key) }
+        if let origin = activeFeed?.origin, sourceIDs.contains(origin) { resetActiveFeed() }
+        sources.removeAll { sourceIDs.contains($0.id) }
     }
 
     func clearArticleCache(for source: RssSource) async {
@@ -172,11 +275,10 @@ final class RSSLibraryModel: ObservableObject {
         }
     }
 
-    func moveSources(from offsets: IndexSet, to destination: Int) async {
-        var values = sources
-        values.move(fromOffsets: offsets, toOffset: destination)
-        for index in values.indices { values[index].customOrder = index }
-        do { try await sourceRepository.save(values); sources = try await sourceRepository.all() }
+    func moveSources(_ displayed: [RssSource], from offsets: IndexSet, to destination: Int) async {
+        var ids = displayed.map(\.id)
+        ids.move(fromOffsets: offsets, toOffset: destination)
+        do { sources = try await database.reorderRssSources(ids) }
         catch { errorMessage = error.localizedDescription }
     }
 
@@ -196,7 +298,11 @@ final class RSSLibraryModel: ObservableObject {
             var values = sources.filter { $0.sourceUrl != originalURL && $0.sourceUrl != source.sourceUrl }
             values.append(source)
             try await sourceRepository.save(values)
+            if let originalURL, originalURL != url, let visit = lastVisits.removeValue(forKey: originalURL) {
+                lastVisits[url] = max(lastVisits[url] ?? 0, visit)
+            }
             sources = try await sourceRepository.all()
+            groups = try await database.loadRssSourceGroups()
             return true
         } catch { errorMessage = error.localizedDescription; return false }
     }
@@ -205,6 +311,7 @@ final class RSSLibraryModel: ObservableObject {
         let name = sortName ?? source.sourceName
         let url = sortURL ?? source.sortUrl?.nilIfBlank ?? source.sourceUrl
         let feed = Feed(origin: source.sourceUrl, sort: name, key: key)
+        feedError = nil
         if preferCache, activeFeed == feed, hasLoadedFeed { return }
         let requestID = UUID()
         articleRequestID = requestID
@@ -219,7 +326,7 @@ final class RSSLibraryModel: ObservableObject {
             page = 1
         }
         activeFeed = feed
-        await perform(isCurrent: { self.articleRequestID == requestID }) {
+        do {
             if preferCache, key == nil {
                 let cached = try await self.database.cachedRssFeed(origin: source.sourceUrl, sort: name)
                 guard self.articleRequestID == requestID else { return }
@@ -259,6 +366,8 @@ final class RSSLibraryModel: ObservableObject {
             self.nextURL = report.result.nextURL
             self.articles = articles
             self.hasLoadedFeed = true
+        } catch {
+            if articleRequestID == requestID, !isRequestCancellation(error) { feedError = error.localizedDescription }
         }
     }
 
@@ -312,7 +421,7 @@ final class RSSLibraryModel: ObservableObject {
     static let websiteHistoryKey = "recordWebsiteBrowsingHistory"
 
     func read(_ article: RssArticle) async {
-        guard UserDefaults.standard.object(forKey: Self.websiteHistoryKey) as? Bool ?? true else { return }
+        guard defaults.object(forKey: Self.websiteHistoryKey) as? Bool ?? true else { return }
         do {
             try await recordRepository.insertIgnoringExisting(article.record())
             records = try await recordRepository.all()
@@ -354,7 +463,6 @@ final class RSSLibraryModel: ObservableObject {
             return policy.mode(article: updated, source: source, resolvedContent: content)
         } catch {
             if isRequestCancellation(error) { return policy.mode(article: article, source: source) }
-            errorMessage = error.localizedDescription
             if article.type == 0 { return .html(content: "加载正文失败\n\(error.localizedDescription)", baseURL: nil) }
             return policy.mode(article: article, source: source)
         }
@@ -385,11 +493,13 @@ final class RSSLibraryModel: ObservableObject {
     }
 
     func clearRecords() async {
-        do { try await recordRepository.clear(); records = [] }
-        catch { errorMessage = error.localizedDescription }
+        do {
+            try await recordRepository.clear()
+            records = []
+        } catch { errorMessage = error.localizedDescription }
     }
 
-    private func importRemote(_ value: String, existing: [RssSource]) async throws -> [RssSource] {
+    private func importRemote(_ value: String) async throws -> RSSSourceImportPayload {
         let withoutUA = value.hasSuffix("#requestWithoutUA")
         let raw = withoutUA ? String(value.dropLast("#requestWithoutUA".count)) : value
         guard let url = URL(string: raw) else { throw URLError(.badURL) }
@@ -397,18 +507,20 @@ final class RSSLibraryModel: ObservableObject {
         if withoutUA { request.setValue("", forHTTPHeaderField: "User-Agent") }
         let (data, response) = try await URLSessionHTTPTransport.shared.download(for: request)
         guard (response as? HTTPURLResponse).map({ (200...299).contains($0.statusCode) }) != false else { throw URLError(.badServerResponse) }
-        let payload = try importer.decode(data)
-        return try importer.merge(payload.sources, into: existing)
+        return try importer.decode(data)
     }
     private func isRequestCancellation(_ error: Error) -> Bool {
         Task.isCancelled || error is CancellationError || (error as? URLError)?.code == .cancelled
     }
 
-    private func perform(isCurrent: () -> Bool = { true }, _ operation: () async throws -> Void) async {
+    private func perform<T>(_ operation: () async throws -> T) async -> T? {
         activeOperations += 1
         isWorking = true
         defer { activeOperations -= 1; isWorking = activeOperations > 0 }
-        do { try await operation() } catch { if isCurrent(), !isRequestCancellation(error) { errorMessage = error.localizedDescription } }
+        do { return try await operation() } catch {
+            if !isRequestCancellation(error) { errorMessage = error.localizedDescription }
+            return nil
+        }
     }
 }
 

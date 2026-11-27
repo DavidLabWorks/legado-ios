@@ -2,6 +2,31 @@ import SwiftUI
 import PhotosUI
 import UniformTypeIdentifiers
 
+struct SourceExportDocument<Source: Codable & Sendable>: FileDocument {
+    static var readableContentTypes: [UTType] { [.json] }
+    let sources: [Source]
+
+    init(sources: [Source]) { self.sources = sources }
+
+    init(configuration: ReadConfiguration) throws {
+        guard let data = configuration.file.regularFileContents else { throw CocoaError(.fileReadCorruptFile) }
+        sources = try JSONDecoder().decode([Source].self, from: data)
+    }
+
+    func fileWrapper(configuration: WriteConfiguration) throws -> FileWrapper {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+        return FileWrapper(regularFileWithContents: try encoder.encode(sources))
+    }
+}
+
+func sourceExportFilename(_ name: String?, fallback: String) -> String {
+    let separators = CharacterSet(charactersIn: "/\\:").union(.controlCharacters)
+    let filename = (name ?? "").components(separatedBy: separators).joined(separator: "_")
+        .trimmingCharacters(in: .whitespacesAndNewlines.union(CharacterSet(charactersIn: ".")))
+    return filename.isEmpty ? fallback : filename
+}
+
 enum ReadingCompatibility {
     static var usesLegacyUI: Bool {
         #if DEBUG
@@ -391,11 +416,11 @@ extension View {
     }
 
     @ViewBuilder
-    func readingTabBarHidden() -> some View {
+    func readingTabBarHidden(_ hidden: Bool = true) -> some View {
         if #available(iOS 16.0, *), !ReadingCompatibility.usesLegacyUI {
-            toolbar(.hidden, for: .tabBar)
+            toolbar(hidden ? .hidden : .automatic, for: .tabBar)
         } else {
-            background(ReadingHiddenTabBar())
+            background { if hidden { ReadingHiddenTabBar() } }
         }
     }
 
@@ -410,14 +435,13 @@ extension View {
 
     @ViewBuilder
     func readingSheetSurface() -> some View {
-        let backgroundColor = Color(uiColor: .systemBackground)
-        let page = background(backgroundColor.ignoresSafeArea())
+        let page = background(ReadingTheme.sheetBackground.ignoresSafeArea())
         if #available(iOS 16, *) {
             let opaqueBar = page
-                .toolbarBackground(backgroundColor, for: .navigationBar)
+                .toolbarBackground(ReadingTheme.sheetBackground, for: .navigationBar)
                 .toolbarBackground(.visible, for: .navigationBar)
             if #available(iOS 16.4, *) {
-                opaqueBar.presentationBackground(backgroundColor)
+                opaqueBar.presentationBackground(ReadingTheme.sheetBackground)
             } else {
                 opaqueBar
             }
@@ -489,52 +513,95 @@ private struct ReadingHiddenTabBar: UIViewControllerRepresentable {
     func updateUIViewController(_ controller: Controller, context: Context) {}
 
     final class Controller: UIViewController {
-        private weak var hiddenBar: UITabBar?
-        private var previouslyHidden = false
+        private weak var tabs: UITabBarController?
+        private var previouslyHidden: Bool?
 
-        override func loadView() { view = UIView(); view.isUserInteractionEnabled = false }
-
-        override func viewWillAppear(_ animated: Bool) {
-            super.viewWillAppear(animated)
-            guard let bar = tabBarController?.tabBar else { return }
-            hiddenBar = bar
-            previouslyHidden = bar.isHidden
-            bar.isHidden = true
-        }
-
-        override func viewWillDisappear(_ animated: Bool) {
-            super.viewWillDisappear(animated)
-            hiddenBar?.isHidden = previouslyHidden
-        }
-    }
-}
-
-struct BookshelfTabBar: UIViewControllerRepresentable {
-    func makeUIViewController(context: Context) -> Controller { Controller() }
-    func updateUIViewController(_ controller: Controller, context: Context) {}
-
-    final class Controller: UIViewController {
         override func loadView() { view = UIView(); view.isUserInteractionEnabled = false }
 
         override func viewWillAppear(_ animated: Bool) {
             super.viewWillAppear(animated)
             guard let tabs = tabBarController else { return }
-            // SwiftUI can restore the reader's hidden tab bar only after the pop finishes.
-            let wasHidden: Bool
-            let setHidden: (Bool) -> Void
-            if #available(iOS 18, *) {
-                wasHidden = tabs.isTabBarHidden
-                setHidden = { tabs.setTabBarHidden($0, animated: false) }
-            } else {
-                wasHidden = tabs.tabBar.isHidden
-                setHidden = { tabs.tabBar.isHidden = $0 }
-            }
-            setHidden(false)
-            if wasHidden, let transition = transitionCoordinator, transition.isInteractive {
-                transition.notifyWhenInteractionChanges { context in
-                    if context.isCancelled { setHidden(true) }
+            self.tabs = tabs
+            if previouslyHidden == nil { previouslyHidden = tabs.tabBar.isHidden }
+            tabs.tabBar.isHidden = true
+        }
+
+        override func viewWillDisappear(_ animated: Bool) {
+            super.viewWillDisappear(animated)
+            guard previouslyHidden == false, let tabs else { return }
+            if let root = navigationController?.viewControllers.first, let transition = transitionCoordinator,
+               transition.isAnimated, transition.viewController(forKey: .to) === root {
+                transition.animate(alongsideTransition: nil) { context in
+                    if !context.isCancelled && tabs.tabBar.isHidden { tabs.showReadingTabBar(animated: true) }
                 }
+            } else {
+                tabs.tabBar.isHidden = false
             }
         }
+
+        override func viewDidDisappear(_ animated: Bool) {
+            super.viewDidDisappear(animated)
+            previouslyHidden = nil
+        }
+    }
+}
+
+struct HomeTabBar: UIViewControllerRepresentable {
+    func makeUIViewController(context: Context) -> Controller { Controller() }
+    func updateUIViewController(_ controller: Controller, context: Context) {}
+
+    final class Controller: UIViewController {
+        private var wasHidden = false
+
+        override func loadView() { view = UIView(); view.isUserInteractionEnabled = false }
+
+        override func viewWillAppear(_ animated: Bool) {
+            super.viewWillAppear(animated)
+            wasHidden = tabBarController?.readingTabBarIsHidden == true
+        }
+
+        override func viewDidAppear(_ animated: Bool) {
+            super.viewDidAppear(animated)
+            guard let tabs = tabBarController else { return }
+            if wasHidden || tabs.readingTabBarIsHidden { tabs.showReadingTabBar(animated: animated) }
+            updatePlayerBoundary()
+        }
+
+        override func viewDidLayoutSubviews() {
+            super.viewDidLayoutSubviews()
+            updatePlayerBoundary()
+        }
+
+        private func updatePlayerBoundary() {
+            guard let bar = tabBarController?.tabBar, let scene = view.window?.windowScene else { return }
+            scene.windows.compactMap { $0 as? ListeningPlayerWindow }.first?.useTabBar(bar)
+        }
+    }
+}
+
+private extension UITabBarController {
+    var readingTabBarIsHidden: Bool {
+        if #available(iOS 18, *), !ReadingCompatibility.usesLegacyUI { return isTabBarHidden }
+        return tabBar.isHidden
+    }
+
+    func showReadingTabBar(animated: Bool) {
+        if #available(iOS 18, *), !ReadingCompatibility.usesLegacyUI {
+            setTabBarHidden(false, animated: false)
+        } else {
+            tabBar.isHidden = false
+        }
+        guard animated, !UIAccessibility.isReduceMotionEnabled,
+              UserDefaults.standard.string(forKey: "themeMode") != "3" else { return }
+        view.layoutIfNeeded()
+        let distance = view.bounds.maxY - tabBar.convert(tabBar.bounds, to: view).minY
+        // Animate only the presentation layer so the system retains the bar's final layout.
+        let slide = CABasicAnimation(keyPath: "position.y")
+        slide.isAdditive = true
+        slide.fromValue = max(tabBar.bounds.height, distance)
+        slide.toValue = 0
+        slide.duration = 0.24
+        slide.timingFunction = CAMediaTimingFunction(name: .easeOut)
+        tabBar.layer.add(slide, forKey: "homeTabBarReveal")
     }
 }

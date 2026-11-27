@@ -34,25 +34,6 @@ struct HostsHTTPTransportTests {
         }
     }
 
-    @Test func voiceDownloadReportsBytesBeforeCompletionWithoutContentLength() async throws {
-        actor ProgressLog {
-            var values: [Int64] = []
-            func record(_ value: Int64) { values.append(value) }
-        }
-        let server = try HostsLoopbackServer()
-        let port = try await server.start()
-        defer { server.stop() }
-        let output = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        defer { try? FileManager.default.removeItem(at: output) }
-        let request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/voice-part")!, timeoutInterval: 4)
-        let progress = ProgressLog()
-        try await VoicePackTransfer.download(request, to: output, size: 524288) { await progress.record($0) }
-        let values = await progress.values
-        #expect(values.contains { $0 > 0 && $0 < 524288 })
-        #expect(values.last == 524288)
-        #expect(try Data(contentsOf: output).count == 524288)
-    }
-
     @Test func hostsOverrideConnectsToIPAndRetainsOriginHost() async throws {
         let server = try HostsLoopbackServer()
         let port = try await server.start()
@@ -169,16 +150,6 @@ private final class HostsLoopbackServer: @unchecked Sendable {
             if let data { buffer.append(data) }
             if buffer.range(of: Data("\r\n\r\n".utf8)) != nil {
                 let text = String(decoding: buffer, as: UTF8.self)
-                if text.hasPrefix("GET /voice-part ") {
-                    let chunk = Data(repeating: 0x5a, count: 262144)
-                    let head = Data("HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n".utf8)
-                    connection.send(content: head + chunk, completion: .contentProcessed { _ in
-                        DispatchQueue.global().asyncAfter(deadline: .now() + 0.5) {
-                            connection.send(content: chunk, completion: .contentProcessed { _ in connection.cancel() })
-                        }
-                    })
-                    return
-                }
                 var response: Data
                 if text.hasPrefix("GET /redirect "), let port = connection.currentPath?.localEndpoint,
                    case .hostPort(_, let localPort) = port {

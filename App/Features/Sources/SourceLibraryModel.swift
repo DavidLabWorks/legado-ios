@@ -63,11 +63,12 @@ final class SourceLibraryModel: ObservableObject {
         let items: [Item]
         let invalidItems: [InvalidItem]
 
+        var skippedWebsites: [String] = []
         var backup: LibraryBackup?
         var rules: DetectedRules?
 
         var validCount: Int { rules?.names.count ?? items.count }
-        var invalidCount: Int { invalidItems.count }
+        var invalidCount: Int { invalidItems.count + skippedWebsites.count }
         var totalCount: Int { validCount + invalidCount }
     }
 
@@ -97,6 +98,7 @@ final class SourceLibraryModel: ObservableObject {
         var sources: [BookSource] = []
         var invalidItems: [PendingImport.InvalidItem] = []
         var websites: [RssSource] = []
+        var skippedWebsites: [String] = []
         var replacements: [ReplaceRule] = []
         var contents: [TxtTocRule] = []
 
@@ -104,6 +106,7 @@ final class SourceLibraryModel: ObservableObject {
             sources += other.sources
             invalidItems += other.invalidItems
             websites += other.websites
+            skippedWebsites += other.skippedWebsites
             replacements += other.replacements
             contents += other.contents
             let populated = [!sources.isEmpty || !invalidItems.isEmpty, !websites.isEmpty, !replacements.isEmpty, !contents.isEmpty]
@@ -344,11 +347,8 @@ final class SourceLibraryModel: ObservableObject {
             let inspected = try validatedSources(from: normalized)
             return ImportBatch(sources: inspected.sources, invalidItems: inspected.invalidItems)
         case "网站源":
-            let sources = try RSSSourceImporter().decode(normalized).sources
-            guard sources.allSatisfy({ !$0.sourceUrl.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) else {
-                throw RSSSourceImportError.invalidSource
-            }
-            return ImportBatch(websites: sources)
+            let payload = try RSSSourceImporter().decode(normalized)
+            return ImportBatch(websites: payload.sources, skippedWebsites: payload.skippedEntries)
         case "净化规则":
             return ImportBatch(replacements: try ReplaceRuleImporter().decode(normalized))
         case "TXT 目录规则":
@@ -376,8 +376,10 @@ final class SourceLibraryModel: ObservableObject {
             else if entry["showRule"] != nil { kinds.insert("字典规则") }
             else if entry["name"] != nil, entry["rule"] != nil { kinds.insert("TXT 目录规则") }
             else if entry["name"] != nil, entry["url"] != nil { kinds.insert("朗读引擎") }
+            else if entry["sourceName"] != nil { kinds.insert("网站源") }
             else { kinds.insert("未知规则") }
         }
+        if kinds == ["网站源", "未知规则"] { return "网站源" }
         if kinds.count > 1 {
             throw BookSourceImportError.invalidDocument("导入内容混合了 \(kinds.sorted().joined(separator: "、"))，请分别从对应入口导入。")
         }
@@ -582,6 +584,6 @@ final class SourceLibraryModel: ObservableObject {
         return .init(items: Array(unique.values)
             .sorted { $0.bookSourceName.localizedStandardCompare($1.bookSourceName) == .orderedAscending }
             .map { .init(source: $0, existing: existingByID[$0.id]) },
-            invalidItems: batch.invalidItems, rules: batch.rules)
+            invalidItems: batch.invalidItems, skippedWebsites: batch.skippedWebsites, rules: batch.rules)
     }
 }

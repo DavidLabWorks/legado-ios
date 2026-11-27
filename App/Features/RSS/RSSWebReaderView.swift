@@ -58,8 +58,9 @@ struct RSSWebReaderView: UIViewRepresentable {
         }
         let webView = ReadingWebView(frame: .zero, configuration: configuration)
         webView.isOpaque = false
-        webView.backgroundColor = UIColor(ReadingTheme.canvas)
-        webView.scrollView.backgroundColor = UIColor(ReadingTheme.canvas)
+        let background = UIColor(context.environment.isReadingSheet ? ReadingTheme.sheetBackground : ReadingTheme.canvas)
+        webView.backgroundColor = background
+        webView.scrollView.backgroundColor = background
         webView.navigationDelegate = context.coordinator
         webView.uiDelegate = context.coordinator
         webView.allowsBackForwardNavigationGestures = true
@@ -183,7 +184,11 @@ struct RSSWebReaderView: UIViewRepresentable {
 
         var onShowPhoto: ((RSSGallerySelection) -> Void)?
         var onPlayVideo: ((URL) -> Void)?
-        private var videoURLs: [URL] = []
+        private enum ArticleVideo {
+            case fixed(URL)
+            case scripted(baseURL: String)
+        }
+        private var articleVideos: [ArticleVideo] = []
         var titleObservation: AnyCancellable?
         private var source: RssSource
         var onAction: (RSSWebAction) -> Void
@@ -402,7 +407,7 @@ struct RSSWebReaderView: UIViewRepresentable {
             guard rulesInstalled else { return }
             guard loadedMode != mode else { return }
             loadedMode = mode
-            videoURLs.removeAll()
+            articleVideos.removeAll()
             switch mode {
             case .html(let content, let baseURL):
                 let html = articleVideoLinks(in: content, baseURL: baseURL ?? source.sourceUrl)
@@ -417,7 +422,7 @@ struct RSSWebReaderView: UIViewRepresentable {
                 let escaped = Self.htmlEscape(value)
                 let html = articleVideoLinks(in: "<video src=\"\(escaped)\"></video>", baseURL: source.sourceUrl)
                 webView.loadHTMLString(htmlProcessor.contentHTML(html, style: source.style), baseURL: nil)
-                if let url = videoURLs.first { DispatchQueue.main.async { self.onPlayVideo?(url) } }
+                if case let .fixed(url)? = articleVideos.first { DispatchQueue.main.async { self.onPlayVideo?(url) } }
             }
         }
 
@@ -425,26 +430,70 @@ struct RSSWebReaderView: UIViewRepresentable {
             guard html.range(of: "<video", options: .caseInsensitive) != nil else { return html }
             do {
                 let document = try SwiftSoup.parse(html, baseURL)
-                let policy = RSSResourcePolicy(blacklist: source.contentBlacklist, whitelist: source.contentWhitelist)
                 for video in try document.select("video") {
                     let candidates = [video] + (try video.select("source[src]").array())
-                    let urls = try candidates.compactMap { element -> URL? in
-                        let address = try element.attr("abs:src")
-                        guard let url = URL(string: address), let scheme = url.scheme?.lowercased(),
-                              ["http", "https"].contains(scheme), url.host != nil, policy.allows(address) else { return nil }
-                        return url
-                    }
-                    if let url = urls.first {
-                        let index = videoURLs.count
-                        videoURLs.append(url)
-                        try video.before("<a href=\"legado-video://clip/\(index)\" style=\"display:inline-block;padding:0.8em 1.2em\">▶ 播放视频 \(index + 1)</a>")
+                    // SwiftSoup resolves src="" to the article URL. Check the raw attribute first.
+                    let assigned = try candidates.filter { try $0.attr("src").trimmedNonEmpty != nil }
+                    let index = articleVideos.count
+                    if let url = try assigned.compactMap({ try playableVideoURL($0.attr("abs:src")) }).first {
+                        articleVideos.append(.fixed(url))
+                    } else if assigned.isEmpty, source.enableJs, case .html = loadedMode {
+                        articleVideos.append(.scripted(baseURL: baseURL))
+                        try video.attr("data-legado-video", String(index)).attr("hidden", true).attr("preload", "none")
+                        try video.removeAttr("autoplay")
+                        try video.after("<span data-legado-video-status=\"\(index)\" role=\"status\"></span>")
                     } else {
                         try video.before("<span>视频地址不可用</span>")
+                        try video.remove()
+                        continue
                     }
-                    try video.remove()
+                    try video.before("<a href=\"legado-video://clip/\(index)\" style=\"display:inline-block;padding:0.8em 1.2em\">▶ 播放视频 \(index + 1)</a>")
+                    if case .fixed = articleVideos[index] { try video.remove() }
                 }
                 return try document.outerHtml()
             } catch { return html }
+        }
+
+        private func playableVideoURL(_ address: String) -> URL? {
+            let policy = RSSResourcePolicy(blacklist: source.contentBlacklist, whitelist: source.contentWhitelist)
+            guard let url = URL(string: address), let scheme = url.scheme?.lowercased(),
+                  ["http", "https"].contains(scheme), url.host != nil, policy.allows(address) else { return nil }
+            return url
+        }
+
+        private func playArticleVideo(at index: Int, in webView: WKWebView) {
+            switch articleVideos[index] {
+            case .fixed(let url):
+                onPlayVideo?(url)
+            case .scripted(let baseURL):
+                let mode = loadedMode
+                webView.callAsyncJavaScript("""
+                    const video = document.querySelector(`video[data-legado-video="${index}"]`);
+                    const status = document.querySelector(`[data-legado-video-status="${index}"]`);
+                    const urls = [];
+                    if (video) {
+                        const base = /^https?:/i.test(video.baseURI) ? video.baseURI : baseURL;
+                        const candidates = video.getAttribute('src')?.trim() ? [video] : video.querySelectorAll('source[src]');
+                        for (const node of candidates) {
+                            const raw = node.getAttribute('src')?.trim();
+                            if (!raw) continue;
+                            try { urls.push(new URL(raw, base).href); } catch (_) {}
+                        }
+                        if (urls.includes(video.currentSrc)) urls.unshift(video.currentSrc);
+                    }
+                    if (status) status.textContent = urls.length ? '' : '视频地址尚未加载';
+                    return urls;
+                    """, arguments: ["index": index, "baseURL": baseURL], in: nil, in: .defaultClient) { [weak self] result in
+                    guard let self, loadedMode == mode, case .success(let value) = result,
+                          let addresses = value as? [String], !addresses.isEmpty else { return }
+                    if let url = addresses.compactMap(playableVideoURL).first {
+                        onPlayVideo?(url)
+                    } else {
+                        webView.evaluateJavaScript("document.querySelector('[data-legado-video-status=\"\(index)\"]')?.replaceChildren('视频地址不可用')",
+                                                   in: nil, in: .defaultClient, completionHandler: nil)
+                    }
+                }
+            }
         }
 
         private func load(_ value: String, in webView: WKWebView) {
@@ -599,8 +648,8 @@ struct RSSWebReaderView: UIViewRepresentable {
             if scheme == "legado-video" {
                 decisionHandler(.cancel)
                 if navigationAction.navigationType == .linkActivated, navigationAction.sourceFrame.isMainFrame,
-                   url.host == "clip", let index = Int(url.lastPathComponent), videoURLs.indices.contains(index) {
-                    onPlayVideo?(videoURLs[index])
+                   url.host == "clip", let index = Int(url.lastPathComponent), articleVideos.indices.contains(index) {
+                    playArticleVideo(at: index, in: webView)
                 }
                 return
             }
@@ -611,6 +660,25 @@ struct RSSWebReaderView: UIViewRepresentable {
                 decisionHandler(.cancel); return
             }
             decisionHandler(.allow)
+        }
+
+        func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
+                     for action: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
+            let request = action.request
+            guard action.targetFrame == nil, let url = request.url,
+                  ["http", "https"].contains(url.scheme?.lowercased()),
+                  var presenter = webView.window?.rootViewController else { return nil }
+            while let presented = presenter.presentedViewController { presenter = presented }
+            guard webView.isDescendant(of: presenter.view), !presenter.isBeingDismissed else { return nil }
+
+            let alert = UIAlertController(title: "打开新网页？", message: url.absoluteString, preferredStyle: .alert)
+            alert.addAction(UIAlertAction(title: "取消", style: .cancel))
+            alert.addAction(UIAlertAction(title: "当前页面打开", style: .default) { [weak webView] _ in
+                guard let webView, webView.window != nil else { return }
+                webView.load(request)
+            })
+            presenter.present(alert, animated: true)
+            return nil
         }
 
         func webView(_ webView: WKWebView, decidePolicyFor navigationResponse: WKNavigationResponse, decisionHandler: @escaping @MainActor @Sendable (WKNavigationResponsePolicy) -> Void) {

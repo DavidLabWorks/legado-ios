@@ -37,7 +37,7 @@ final class RuleEditorUITests: XCTestCase {
         let app = XCUIApplication()
         app.launchArguments = ["-uiDemo", "-uiDemoTab", "settings", "-uiDemoRules"]
         app.launch()
-        app.navigationBars["净化规则"].buttons["更多"].tap()
+        app.navigationBars["替换净化"].buttons["更多"].tap()
         app.buttons["URL 或粘贴 JSON"].tap()
         let editor = app.textViews.firstMatch
         editor.tap()
@@ -68,7 +68,7 @@ final class RuleEditorUITests: XCTestCase {
         XCTAssertEqual(name.value as? String, "Draft")
         app.buttons["取消"].tap()
         confirmation.buttons["放弃修改"].tap()
-        XCTAssertTrue(app.navigationBars["净化规则"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.navigationBars["替换净化"].waitForExistence(timeout: 5))
         XCTAssertFalse(name.exists)
     }
 
@@ -143,6 +143,47 @@ final class RuleEditorUITests: XCTestCase {
         if wasEnabled { toggle.tap() }
     }
 
+    func testSafariSharesOnlineJSONForImport() throws {
+        guard #available(iOS 16.4, *),
+              let fixture = ProcessInfo.processInfo.environment["LEGADO_RSS_UI_FIXTURE_URL"],
+              let url = URL(string: fixture) else {
+            throw XCTSkip("Requires the local RSS fixture and Safari")
+        }
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { app.terminate(); try? FileManager.default.removeItem(at: directory) }
+        app.launchEnvironment["LEGADO_UI_RSS_DATABASE"] = directory.appendingPathComponent("rss.sqlite3").path
+        app.launchArguments = ["-uiDemo", "-uiDemoTab", "rss"]
+        app.launch()
+        let safari = XCUIApplication(bundleIdentifier: "com.apple.mobilesafari")
+        safari.open(url)
+        let share = safari.buttons.matching(NSPredicate(format: "label IN %@", ["Share", "分享", "共享"])).firstMatch
+        if !share.waitForExistence(timeout: 3) {
+            safari.buttons.matching(NSPredicate(format: "label IN %@", ["More", "更多"])).firstMatch.tap()
+        }
+        share.tap()
+        let target = safari.descendants(matching: .any).matching(NSPredicate(format: "label == %@", "喵阅")).firstMatch
+        if !target.waitForExistence(timeout: 2) || !target.isHittable {
+            let row = safari.collectionViews.scrollViews.firstMatch
+            if row.exists { row.swipeLeft() }
+            safari.buttons.matching(NSPredicate(format: "label IN %@", ["More", "更多"])).firstMatch.tap()
+        }
+        target.tap()
+        let done = safari.buttons["完成"]
+        XCTAssertTrue(done.waitForExistence(timeout: 8))
+        done.tap()
+        app.activate()
+        XCTAssertTrue(app.navigationBars["导入网站源"].waitForExistence(timeout: 15))
+        XCTAssertTrue(app.staticTexts["RSS 全流程测试"].exists)
+        app.navigationBars["导入网站源"].buttons["导入"].tap()
+        let notice = app.alerts["网站源已导入"]
+        XCTAssertTrue(notice.waitForExistence(timeout: 8))
+        notice.buttons["好"].tap()
+        XCTAssertTrue(app.staticTexts["RSS 全流程测试"].waitForExistence(timeout: 8))
+    }
+
     func testOpeningWebsiteSourceJSONFromBookshelf() throws {
         continueAfterFailure = false
         let name = "导入验证-" + UUID().uuidString.prefix(8)
@@ -176,6 +217,252 @@ final class RuleEditorUITests: XCTestCase {
         XCTAssertFalse(app.staticTexts[name].exists)
     }
 
+    func testWebsiteImportCommitsOnlyCheckedRows() throws {
+        continueAfterFailure = false
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let app = XCUIApplication()
+        defer { app.terminate(); try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("websites.json")
+        let existingURL = "https://existing.invalid/"
+        let selectedURL = "https://selected.invalid/"
+        let skippedURL = "https://skipped.invalid/"
+        let database = directory.appendingPathComponent("rss.sqlite3")
+        app.launchEnvironment["LEGADO_UI_RSS_DATABASE"] = database.path
+        app.launchArguments = ["-uiDemo", "-uiDemoTab", "rss", "-uiAutomationImportURL", file.absoluteString]
+
+        func open(_ entries: [[String: String]]) throws {
+            try JSONSerialization.data(withJSONObject: entries).write(to: file, options: .atomic)
+            app.launch()
+            XCTAssertTrue(app.buttons["import.item.0"].waitForExistence(timeout: 10))
+        }
+        let commit = app.navigationBars["导入网站源"].buttons["导入"]
+        try open([["sourceName": "保留原名称", "sourceUrl": existingURL]])
+        commit.tap()
+        let firstNotice = app.alerts["网站源已导入"]
+        XCTAssertTrue(firstNotice.waitForExistence(timeout: 10))
+        firstNotice.buttons["好"].tap()
+
+        let batch = [["sourceName": "覆盖原名称", "sourceUrl": existingURL],
+                     ["sourceName": "同名网站", "sourceUrl": selectedURL],
+                     ["sourceName": "同名网站", "sourceUrl": skippedURL]]
+        try open(batch)
+        app.buttons["取消全选"].tap()
+        XCTAssertFalse(commit.isEnabled)
+        app.buttons["全选"].tap()
+        let skipped = app.buttons["import.item.2"]
+        skipped.tap()
+        XCTAssertFalse(skipped.isSelected)
+        skipped.tap()
+        XCTAssertTrue(skipped.isSelected)
+        app.navigationBars["导入网站源"].buttons["取消"].tap()
+        XCTAssertTrue(app.staticTexts["保留原名称"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["websites.source." + selectedURL].exists)
+
+        try open(batch)
+        app.buttons["import.item.0"].tap()
+        skipped.tap()
+        XCTAssertTrue(app.buttons["import.item.1"].isSelected)
+        attach(app, name: "网站源导入选择")
+        commit.tap()
+        let notice = app.alerts["网站源已导入"]
+        XCTAssertTrue(notice.staticTexts["已处理 1 项。"].waitForExistence(timeout: 5))
+        notice.buttons["好"].tap()
+        app.launchArguments = ["-uiDemo", "-uiDemoTab", "rss"]
+        app.launch()
+        XCTAssertTrue(app.buttons["websites.source." + selectedURL].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.staticTexts["保留原名称"].exists)
+        XCTAssertFalse(app.buttons["websites.source." + skippedURL].exists)
+    }
+
+    func testWebsiteSourceGroupManagementAndSelection() throws {
+        continueAfterFailure = false
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let file = dir.appendingPathComponent("sites.json")
+        try JSONSerialization.data(withJSONObject: [
+            ["sourceName": "分组测试站", "sourceUrl": "https://groups.invalid", "sourceGroup": "阅读"],
+            ["sourceName": "待移除网站", "sourceUrl": "https://member.invalid", "sourceGroup": "临时,阅读"]
+        ]).write(to: file)
+        let app = XCUIApplication()
+        app.launchEnvironment["LEGADO_UI_RSS_DATABASE"] = dir.appendingPathComponent("rss.sqlite3").path
+        app.launchArguments = ["-uiDemo", "-uiDemoTab", "rss", "-uiAutomationImportURL", file.absoluteString]
+        app.launch()
+        app.navigationBars["导入网站源"].buttons["导入"].tap()
+        XCTAssertTrue(app.alerts["网站源已导入"].waitForExistence(timeout: 8))
+        app.launchArguments = ["-uiDemo", "-uiDemoTab", "rss"]
+        app.launch()
+        app.buttons["网站源管理"].tap()
+        let group = app.buttons["分组"]
+        let editorGroups = app.buttons["websiteEditor.groups"]
+        let editor = app.navigationBars["编辑网站源"]
+        let source = app.staticTexts["分组测试站"]
+        let manager = app.navigationBars["管理分组"]
+        let picker = app.navigationBars["选择分组"]
+        let manageGroups = app.buttons["管理分组…"]
+        group.tap()
+        manageGroups.tap()
+        XCTAssertTrue(manager.waitForExistence(timeout: 5))
+        app.buttons["新建分组"].tap()
+        let name = app.textFields["分组名称"]
+        name.tap()
+        name.typeText("News")
+        app.navigationBars["新建分组"].buttons["保存"].tap()
+        XCTAssertTrue(app.buttons["News的操作"].waitForExistence(timeout: 5))
+        manager.buttons.element(boundBy: 0).tap()
+        XCTAssertTrue(source.waitForExistence(timeout: 5))
+
+        source.tap()
+        editorGroups.tap()
+        app.buttons["未分组"].tap()
+        picker.buttons["取消"].tap()
+        XCTAssertEqual(editorGroups.value as? String, "阅读")
+        editorGroups.tap()
+        app.buttons["未分组"].tap()
+        app.buttons["阅读"].tap()
+        app.buttons["News"].tap()
+        XCTAssertTrue(app.buttons["阅读"].isSelected && app.buttons["News"].isSelected)
+        attach(app, name: "网站源分组多选")
+        picker.buttons["完成"].tap()
+        XCTAssertEqual(editorGroups.value as? String, "阅读、News")
+        editor.buttons["保存"].tap()
+        XCTAssertTrue(app.navigationBars["网站源管理"].waitForExistence(timeout: 5))
+
+        group.tap()
+        app.buttons["News"].tap()
+        XCTAssertTrue(source.waitForExistence(timeout: 5))
+        group.tap()
+        manageGroups.tap()
+        XCTAssertTrue(manager.waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["News的操作"].waitForExistence(timeout: 5))
+        attach(app, name: "网站源分组管理")
+        app.buttons["News的操作"].tap()
+        app.buttons["重命名"].tap()
+        XCTAssertEqual(name.value as? String, "News")
+        name.tap()
+        name.typeText("room")
+        app.navigationBars["重命名分组"].buttons["保存"].tap()
+        XCTAssertTrue(app.buttons["Newsroom的操作"].waitForExistence(timeout: 5))
+        manager.buttons.element(boundBy: 0).tap()
+        XCTAssertEqual(group.value as? String, "Newsroom")
+        group.tap()
+        app.buttons["全部"].tap()
+        group.tap()
+        manageGroups.tap()
+        XCTAssertTrue(manager.waitForExistence(timeout: 5))
+        app.buttons["Newsroom的操作"].tap()
+        app.buttons["删除"].tap()
+        let confirmation = app.navigationBars["删除分组"]
+        let includingSites = app.buttons["同时删除分组中的网站"]
+        XCTAssertTrue(includingSites.waitForExistence(timeout: 5))
+        XCTAssertFalse(includingSites.isSelected)
+        includingSites.tap()
+        confirmation.buttons["取消"].tap()
+        app.buttons["Newsroom的操作"].tap()
+        app.buttons["删除"].tap()
+        XCTAssertFalse(includingSites.isSelected)
+        attach(app, name: "删除网站分组")
+        confirmation.buttons["删除"].tap()
+        manager.buttons.element(boundBy: 0).tap()
+        source.tap()
+        XCTAssertEqual(editorGroups.value as? String, "阅读")
+        editorGroups.tap()
+        app.buttons["未分组"].tap()
+        picker.buttons["完成"].tap()
+        editor.buttons["保存"].tap()
+        XCTAssertTrue(app.navigationBars["网站源管理"].waitForExistence(timeout: 5))
+        group.tap()
+        app.buttons["未分组"].tap()
+        XCTAssertTrue(source.waitForExistence(timeout: 5))
+
+        group.tap()
+        app.buttons["临时"].tap()
+        XCTAssertTrue(app.staticTexts["待移除网站"].exists)
+        group.tap()
+        manageGroups.tap()
+        XCTAssertTrue(manager.waitForExistence(timeout: 5))
+        manager.buttons["多选"].tap()
+        let trash = app.buttons["删除所选分组"]
+        XCTAssertFalse(trash.isEnabled)
+        app.buttons["临时"].tap()
+        XCTAssertTrue(app.buttons["临时"].isSelected)
+        app.buttons["阅读"].tap()
+        app.buttons["取消全选"].tap()
+        XCTAssertFalse(trash.isEnabled)
+        app.buttons["全选"].tap()
+        XCTAssertTrue(app.buttons["阅读"].isSelected && app.buttons["临时"].isSelected)
+        attach(app, name: "管理分组批量选择")
+        trash.tap()
+        XCTAssertTrue(app.staticTexts["2 个分组"].exists)
+        // Both groups contain the same remaining member.
+        XCTAssertTrue(app.staticTexts["1 个网站"].firstMatch.exists)
+        attach(app, name: "批量删除分组确认")
+        confirmation.buttons["取消"].tap()
+        XCTAssertTrue(app.buttons["阅读"].isSelected && app.buttons["临时"].isSelected)
+        trash.tap()
+        XCTAssertFalse(includingSites.isSelected)
+        includingSites.tap()
+        XCTAssertTrue(includingSites.isSelected)
+        confirmation.buttons["删除"].tap()
+        manager.buttons.element(boundBy: 0).tap()
+        XCTAssertEqual(group.value as? String, "全部分组")
+        XCTAssertFalse(app.staticTexts["待移除网站"].exists)
+        XCTAssertTrue(source.exists)
+    }
+
+    func testWebsiteHomeKeepsRowPositionWhenReturningFromWebsite() throws {
+        continueAfterFailure = false
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let app = XCUIApplication()
+        defer {
+            app.terminate()
+            try? FileManager.default.removeItem(at: directory)
+        }
+        let file = directory.appendingPathComponent("sites.json")
+        let feed = "<rss><channel><item><title>位置测试文章</title><link>https://position.invalid/article</link></item></channel></rss>"
+        let sortURL = "文章::data:text/xml;base64," + Data(feed.utf8).base64EncodedString()
+        let sources = (1...20).map { index in
+            ["sourceName": String(format: "位置验证 %02d", index),
+             "sourceUrl": "https://position.invalid/\(index)", "sortUrl": sortURL]
+        }
+        try JSONSerialization.data(withJSONObject: sources).write(to: file)
+        app.launchEnvironment["LEGADO_UI_RSS_DATABASE"] = directory.appendingPathComponent("rss.sqlite3").path
+        app.launchArguments = ["-uiDemo", "-uiDemoTab", "rss", "-websiteShowsCards", "NO",
+                               "-websiteGroupSorts", "{}", "-uiAutomationImportURL", file.absoluteString]
+        app.launch()
+        app.navigationBars["导入网站源"].buttons["导入"].tap()
+        let notice = app.alerts["网站源已导入"]
+        XCTAssertTrue(notice.waitForExistence(timeout: 10))
+        notice.buttons["好"].tap()
+        let dismissed = expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: notice)
+        wait(for: [dismissed], timeout: 5)
+        let last = app.buttons["websites.source.https://position.invalid/20"]
+        let scroll = app.scrollViews["websites.scroll"]
+        let tabs = app.tabBars.firstMatch
+        for _ in 0..<5 {
+            if last.exists && last.frame.maxY <= tabs.frame.minY && last.isHittable { break }
+            scroll.swipeUp()
+        }
+        XCTAssertTrue(last.isHittable)
+        let before = last.frame
+        XCTAssertLessThanOrEqual(before.maxY, tabs.frame.minY)
+        last.press(forDuration: 0.8)
+        app.buttons["移动到分组"].tap()
+        let cancel = app.navigationBars["移动到分组"].buttons["取消"]
+        XCTAssertTrue(cancel.waitForExistence(timeout: 5))
+        cancel.tap()
+        XCTAssertEqual(last.frame.midY, before.midY, accuracy: 1)
+        last.tap()
+        XCTAssertTrue(app.staticTexts["位置测试文章"].waitForExistence(timeout: 8))
+        XCTAssertFalse(tabs.exists && tabs.buttons["网站"].isHittable)
+        app.navigationBars.buttons.element(boundBy: 0).tap()
+        XCTAssertTrue(tabs.waitForExistence(timeout: 5))
+        XCTAssertEqual(last.frame.midY, before.midY, accuracy: 1)
+        XCTAssertLessThanOrEqual(last.frame.maxY, tabs.frame.minY)
+    }
+
     func testWebsiteHomeScrollsThroughLargeLibrary() throws {
         continueAfterFailure = false
         let count = 500
@@ -205,7 +492,7 @@ final class RuleEditorUITests: XCTestCase {
         notice.buttons["好"].tap()
         let dismissed = expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: notice)
         wait(for: [dismissed], timeout: 5)
-        let total = app.buttons["websites.sourceCount"]
+        let total = app.descendants(matching: .any)["websites.sourceCount"]
         XCTAssertTrue(total.waitForExistence(timeout: 10))
         XCTAssertTrue(total.label.contains("已启用 500 个网站"), total.label)
         let scroll = app.scrollViews["websites.scroll"]
@@ -432,6 +719,238 @@ final class RuleEditorUITests: XCTestCase {
         XCTAssertFalse(app.buttons["书架布局"].exists)
     }
 
+    func testWebsiteContextMenuActions() throws {
+        continueAfterFailure = false
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = "https://menu.invalid"
+        let sites = [["sourceUrl": url, "sourceName": "Daily", "sourceGroup": "旅行"],
+                     ["sourceUrl": "https://other.invalid", "sourceName": "Other", "sourceGroup": "阅读"]]
+        let file = directory.appendingPathComponent("sites.json")
+        try JSONSerialization.data(withJSONObject: sites).write(to: file)
+        let app = XCUIApplication()
+        app.launchEnvironment["LEGADO_UI_RSS_DATABASE"] = directory.appendingPathComponent("rss.sqlite3").path
+        app.launchArguments = ["-uiDemo", "-uiDemoTab", "rss", "-uiAutomationImportURL", file.absoluteString]
+        app.launch()
+        app.navigationBars["导入网站源"].buttons["导入"].tap()
+        let notice = app.alerts["网站源已导入"]
+        XCTAssertTrue(notice.waitForExistence(timeout: 10))
+        notice.buttons["好"].tap()
+
+        let site = app.buttons["websites.source." + url]
+        app.buttons["列表布局"].tap()
+        site.press(forDuration: 0.8)
+        app.buttons["停用网站"].tap()
+        let hidden = expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: site)
+        wait(for: [hidden], timeout: 5)
+        app.buttons["网站源管理"].tap()
+        let toggle = app.switches["启用Daily"]
+        XCTAssertTrue(toggle.waitForExistence(timeout: 5))
+        XCTAssertEqual(toggle.value as? String, "0")
+        toggle.coordinate(withNormalizedOffset: CGVector(dx: 0.93, dy: 0.5)).tap()
+        app.navigationBars["网站源管理"].buttons.element(boundBy: 0).tap()
+        XCTAssertTrue(site.waitForExistence(timeout: 5))
+        site.press(forDuration: 0.8)
+        let edit = app.buttons["编辑网站"]
+        XCTAssertTrue(edit.waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["重命名"].exists)
+        edit.tap()
+        let editor = app.navigationBars["编辑网站源"]
+        XCTAssertTrue(editor.waitForExistence(timeout: 5))
+        XCTAssertEqual(app.textFields.matching(NSPredicate(format: "placeholderValue == %@", "网站名称")).firstMatch.value as? String,
+                       "Daily")
+        editor.buttons.element(boundBy: 0).tap()
+
+        app.buttons["卡片布局"].tap()
+        let groups = app.buttons["网站分组"]
+        groups.tap()
+        app.buttons["旅行"].tap()
+        site.press(forDuration: 0.8)
+        app.buttons["移动到分组"].tap()
+        let move = app.navigationBars["移动到分组"].buttons["移动"]
+        XCTAssertTrue(move.waitForExistence(timeout: 5))
+        app.buttons["阅读"].tap()
+        XCTAssertTrue(move.isEnabled)
+        move.tap()
+        XCTAssertTrue(groups.waitForExistence(timeout: 5))
+        XCTAssertFalse(site.exists)
+        groups.tap()
+        app.buttons["阅读"].tap()
+        site.press(forDuration: 0.8)
+        app.buttons["移除网站"].tap()
+        let removal = app.alerts["移除网站？"]
+        XCTAssertTrue(removal.waitForExistence(timeout: 5))
+        removal.buttons["取消"].tap()
+        site.press(forDuration: 0.8)
+        app.buttons["移除网站"].tap()
+        XCTAssertTrue(removal.waitForExistence(timeout: 5))
+        removal.buttons["移除"].tap()
+        let removed = expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: site)
+        wait(for: [removed], timeout: 5)
+
+        app.terminate()
+        app.launchArguments = ["-uiDemo", "-uiDemoTab", "rss"]
+        app.launch()
+        XCTAssertTrue(app.buttons["websites.source.https://other.invalid"].waitForExistence(timeout: 10))
+        XCTAssertFalse(site.exists)
+    }
+
+    func testWebsiteCardLayoutAndListLayout() throws {
+        continueAfterFailure = false
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let names = ["城市漫步", "山野手记", "书店日历", "独立杂志"]
+        let feed = "<rss><channel><item><title>站点文章</title><link>https://sites.invalid/article</link></item></channel></rss>"
+        let sortURL = "文章::data:text/xml;base64," + Data(feed.utf8).base64EncodedString()
+        let sources: [[String: Any]] = names.enumerated().map { index, name in
+            ["sourceName": name, "sourceUrl": "https://sites.invalid/\(index)", "customOrder": index,
+             "sortUrl": sortURL, "sourceGroup": index < 2 ? "旅行" : "阅读"]
+        }
+        let file = directory.appendingPathComponent("sites.json")
+        try JSONSerialization.data(withJSONObject: sources).write(to: file)
+        let app = XCUIApplication()
+        app.launchEnvironment["LEGADO_UI_RSS_DATABASE"] = directory.appendingPathComponent("rss.sqlite3").path
+        app.launchArguments = ["-uiDemo", "-uiDemoTab", "rss", "-uiAutomationImportURL", file.absoluteString]
+        app.launch()
+        app.navigationBars["导入网站源"].buttons["导入"].tap()
+        let notice = app.alerts["网站源已导入"]
+        XCTAssertTrue(notice.waitForExistence(timeout: 10))
+        notice.buttons["好"].tap()
+
+        let cards = app.buttons["卡片布局"]
+        let list = app.buttons["列表布局"]
+        let first = app.buttons["websites.source.https://sites.invalid/0"]
+        let second = app.buttons["websites.source.https://sites.invalid/1"]
+        let third = app.buttons["websites.source.https://sites.invalid/2"]
+        let groupMenu = app.buttons["网站分组"]
+        let count = app.descendants(matching: .any)["websites.sourceCount"]
+        XCTAssertEqual(groupMenu.value as? String, "全部")
+        list.tap()
+        groupMenu.tap()
+        let travel = app.buttons["旅行"]
+        XCTAssertTrue(travel.waitForExistence(timeout: 5))
+        XCTAssertLessThanOrEqual(travel.frame.width, 120)
+        attach(app, name: "网站短分组菜单")
+        travel.tap()
+        let sort = app.buttons["排序方式"]
+        sort.tap()
+        app.buttons["名称"].tap()
+        XCTAssertTrue(count.label.contains("已启用 2 个网站"), count.label)
+        XCTAssertGreaterThan(groupMenu.frame.width, 55)
+        XCTAssertFalse(third.exists)
+        XCTAssertLessThanOrEqual(first.frame.maxY, second.frame.minY)
+        attach(app, name: "网站单列列表")
+        cards.tap()
+        XCTAssertTrue(cards.isSelected)
+        XCTAssertFalse(third.exists)
+        XCTAssertEqual(first.frame.midY, second.frame.midY, accuracy: 1)
+        XCTAssertLessThan(first.frame.maxX, second.frame.minX)
+        attach(app, name: "网站双列卡片")
+
+        app.terminate()
+        app.launchArguments = ["-uiDemo", "-uiDemoTab", "rss", "-recordWebsiteBrowsingHistory", "<false/>"]
+        app.launch()
+        XCTAssertTrue(cards.waitForExistence(timeout: 10))
+        XCTAssertTrue(cards.isSelected)
+        XCTAssertEqual(groupMenu.value as? String, "旅行")
+        XCTAssertFalse(third.exists)
+        groupMenu.tap()
+        app.buttons["全部"].tap()
+        XCTAssertTrue(third.waitForExistence(timeout: 5))
+        app.buttons["websites.history"].tap()
+        XCTAssertEqual(app.switches["记录网页浏览历史"].value as? String, "0")
+        app.navigationBars["网站阅读记录"].buttons.element(boundBy: 0).tap()
+        first.tap()
+        XCTAssertTrue(app.navigationBars[names[0]].waitForExistence(timeout: 5))
+        app.navigationBars[names[0]].buttons.element(boundBy: 0).tap()
+        list.tap()
+        XCTAssertTrue(list.isSelected)
+        XCTAssertLessThanOrEqual(first.frame.maxY, second.frame.minY)
+
+        groupMenu.tap()
+        travel.tap()
+        XCTAssertEqual(sort.value as? String, "名称")
+        cards.tap()
+        sort.tap()
+        app.buttons["最近阅览"].tap()
+        XCTAssertLessThan(first.frame.minX, second.frame.minX)
+        second.tap()
+        let site = app.navigationBars[names[1]]
+        XCTAssertTrue(site.waitForExistence(timeout: 5))
+        site.buttons.element(boundBy: 0).tap()
+        XCTAssertEqual(second.frame.minY, first.frame.minY, accuracy: 1)
+        XCTAssertLessThan(second.frame.minX, first.frame.minX)
+        list.tap()
+        XCTAssertLessThanOrEqual(second.frame.maxY, first.frame.minY)
+        sort.tap()
+        app.buttons["自定义"].tap()
+        let row = app.cells.containing(.staticText, identifier: names[1]).firstMatch
+        XCTAssertTrue(row.waitForExistence(timeout: 5))
+        let other = app.cells.containing(.staticText, identifier: names[0]).firstMatch
+        row.coordinate(withNormalizedOffset: .init(dx: 0.94, dy: 0.5)).press(forDuration: 0.55, thenDragTo:
+            other.coordinate(withNormalizedOffset: .init(dx: 0.94, dy: 0.2)), withVelocity: .slow, thenHoldForDuration: 0.4)
+        XCTAssertLessThan(row.frame.minY, other.frame.minY)
+        app.buttons["关闭"].tap()
+        XCTAssertLessThanOrEqual(second.frame.maxY, first.frame.minY)
+        groupMenu.tap()
+        app.buttons["全部"].tap()
+        XCTAssertEqual(sort.value as? String, "名称")
+        groupMenu.tap()
+        travel.tap()
+        XCTAssertEqual(sort.value as? String, "自定义")
+        sort.tap()
+        app.buttons["名称"].tap()
+        XCTAssertLessThanOrEqual(first.frame.maxY, second.frame.minY)
+
+        app.buttons["网站源管理"].tap()
+        let managementGroup = app.buttons["分组"]
+        let managementSort = app.buttons["排序"]
+        XCTAssertLessThanOrEqual(managementGroup.frame.maxX, managementSort.frame.minX)
+        XCTAssertEqual(managementGroup.frame.midY, managementSort.frame.midY, accuracy: 1)
+        managementGroup.tap()
+        travel.tap()
+        let firstToggle = app.switches["启用" + names[0]]
+        let secondToggle = app.switches["启用" + names[1]]
+        managementSort.tap()
+        XCTAssertFalse(app.buttons["自定义"].exists)
+        app.buttons["名称"].tap()
+        XCTAssertLessThan(firstToggle.frame.midY, secondToggle.frame.midY)
+        managementSort.tap()
+        app.buttons["最近阅览"].tap()
+        XCTAssertLessThan(secondToggle.frame.midY, firstToggle.frame.midY)
+        app.navigationBars["网站源管理"].buttons.element(boundBy: 0).tap()
+        XCTAssertEqual(sort.value as? String, "名称")
+        groupMenu.tap()
+        app.buttons["全部"].tap()
+        app.buttons["网站源管理"].tap()
+        XCTAssertEqual(managementSort.value as? String, "最近阅览")
+    }
+
+    func testContinueReadingCardVisibilityPersistsAfterRelaunch() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["-uiDemo", "-uiDemoTab", "bookshelf"]
+        app.launch()
+        let card = app.buttons["bookshelf.continue"]
+        let shelfLayout = app.buttons["网格布局"]
+        func toggleCard() {
+            app.buttons["更多"].firstMatch.tap()
+            app.buttons["显示「继续阅读」卡片"].tap()
+        }
+
+        XCTAssertTrue(card.waitForExistence(timeout: 10))
+        toggleCard()
+        XCTAssertFalse(card.exists)
+        app.terminate()
+        app.launch()
+        XCTAssertTrue(shelfLayout.waitForExistence(timeout: 10))
+        XCTAssertFalse(card.exists)
+        toggleCard()
+        XCTAssertTrue(card.waitForExistence(timeout: 5))
+    }
+
     func testManagingBookshelfGroupsFromSheet() {
         continueAfterFailure = false
         let app = XCUIApplication()
@@ -469,20 +988,73 @@ final class RuleEditorUITests: XCTestCase {
         app.buttons["删除"].tap()
         XCTAssertFalse(app.buttons["Essays A的操作"].exists)
         app.navigationBars["书架分组"].buttons["保存"].tap()
-        let all = app.buttons["全部"]
+        let groups = app.buttons["选择分组"]
         let poetry = app.buttons["Poetry"]
         let sort = app.buttons["排序方式"]
-        XCTAssertTrue(poetry.waitForExistence(timeout: 5))
+        XCTAssertTrue(groups.waitForExistence(timeout: 5))
+        XCTAssertEqual(groups.value as? String, "全部")
+        XCTAssertFalse(poetry.exists)
         sort.tap()
         app.buttons["书名"].tap()
+        groups.tap()
         poetry.tap()
+        XCTAssertEqual(groups.value as? String, "Poetry")
         sort.tap()
         app.buttons["作者"].tap()
-        all.tap()
+        groups.tap()
+        app.buttons["全部"].tap()
         XCTAssertEqual(sort.value as? String, "书名")
+        groups.tap()
         poetry.tap()
-        XCTAssertTrue(app.staticTexts["Poetry，0本"].exists)
+        XCTAssertTrue(app.staticTexts["书籍，0本"].exists)
         XCTAssertEqual(sort.value as? String, "作者")
+    }
+
+    func testBookshelfRestoresSelectedGroupAfterRelaunch() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["-uiDemoTab", "bookshelf"]
+        app.launch()
+        let name = "Shelf-" + UUID().uuidString.prefix(6)
+        let group = app.buttons["选择分组"]
+        XCTAssertTrue(group.waitForExistence(timeout: 10))
+        let original = group.value as? String
+        func openManager() {
+            app.buttons["更多"].firstMatch.tap()
+            app.buttons["书架分组"].tap()
+        }
+        openManager()
+        let add = app.buttons["新建分组"]
+        XCTAssertTrue(add.waitForExistence(timeout: 5))
+        add.tap()
+        let alert = app.alerts["新建分组"]
+        XCTAssertTrue(alert.waitForExistence(timeout: 5))
+        alert.textFields.firstMatch.tap()
+        alert.textFields.firstMatch.typeText(name)
+        alert.buttons["创建"].tap()
+        let save = app.navigationBars["书架分组"].buttons["保存"]
+        save.tap()
+        group.tap()
+        app.buttons[name].tap()
+        XCTAssertEqual(group.value as? String, name)
+        app.terminate()
+        app.launch()
+        XCTAssertTrue(group.waitForExistence(timeout: 10))
+        let restored = group.value as? String
+        openManager()
+        let options = app.buttons["\(name)的操作"]
+        XCTAssertTrue(options.waitForExistence(timeout: 5))
+        if !options.isHittable { app.collectionViews.firstMatch.swipeUp() }
+        options.tap()
+        app.buttons["删除"].tap()
+        save.tap()
+        XCTAssertTrue(group.waitForExistence(timeout: 5))
+        XCTAssertEqual(group.value as? String, "全部")
+        if let original, original != "全部" {
+            group.tap()
+            app.buttons[original].tap()
+        }
+        XCTAssertEqual(restored, name)
     }
 
     func testBookshelfSortingFromLayoutControls() {
@@ -492,11 +1064,14 @@ final class RuleEditorUITests: XCTestCase {
         app.launch()
         let sort = app.buttons["排序方式"]
         XCTAssertTrue(sort.waitForExistence(timeout: 10))
-        let heading = app.staticTexts["全部书籍，3本"]
+        let heading = app.staticTexts["书籍，3本"]
         XCTAssertTrue(heading.exists)
-        for button in [sort, app.buttons["网格布局"], app.buttons["列表布局"]] {
+        let groups = app.buttons["选择分组"]
+        for button in [groups, sort, app.buttons["网格布局"], app.buttons["列表布局"]] {
             XCTAssertEqual(button.frame.midY, heading.frame.midY, accuracy: 1)
         }
+        XCTAssertLessThanOrEqual(groups.frame.maxX, app.buttons["网格布局"].frame.minX)
+        XCTAssertLessThanOrEqual(app.buttons["列表布局"].frame.maxX, sort.frame.minX)
         XCTAssertTrue(app.buttons["网格布局"].isHittable)
         XCTAssertEqual(sort.value as? String, "最近阅读")
         attach(app, name: "group-sort-control")
@@ -936,8 +1511,8 @@ final class RuleEditorUITests: XCTestCase {
             if index == 1 {
                 showControls()
                 let close = player.buttons["关闭视频"].frame
-                XCTAssertGreaterThanOrEqual(close.width, 44)
-                XCTAssertGreaterThanOrEqual(close.height, 44)
+                // Accessibility frame conversion can round a 44-point target down by a few ULPs.
+                XCTAssertGreaterThanOrEqual(min(close.width, close.height), 44 - 0.000001)
                 XCTAssertGreaterThanOrEqual(player.staticTexts["gesture.mov"].frame.minX - close.maxX, 8)
                 speed.tap()
                 app.buttons["1.5 x"].tap()
@@ -1074,6 +1649,7 @@ final class RuleEditorUITests: XCTestCase {
             ("打开分类", "java.open('sort')"),
             ("打开文章", "java.open('rss','about:blank','文章')"),
             ("添加书籍", "java.addBook('https://example.invalid/book')"),
+            ("打开已收藏书籍", "java.addBook('https://classic.example/book/1')"),
             ("打开起始页", "java.open('rss')")
         ]
         let html = """
@@ -1100,6 +1676,14 @@ final class RuleEditorUITests: XCTestCase {
             XCTAssertTrue(close.waitForExistence(timeout: 8), label)
             XCTAssertLessThan(bar.staticTexts["sheet.heading"].frame.minX, app.frame.midX)
             XCTAssertGreaterThan(close.frame.midX, app.frame.midX)
+            if label == "打开已收藏书籍" {
+                let changeSource = bar.buttons["换源"]
+                let more = bar.buttons["更多"]
+                XCTAssertTrue(changeSource.waitForExistence(timeout: 5))
+                XCTAssertTrue(more.isHittable)
+                XCTAssertLessThan(changeSource.frame.midX, more.frame.midX)
+                XCTAssertLessThan(more.frame.midX, close.frame.midX)
+            }
             attach(app, name: label)
             close.tap()
             XCTAssertTrue(link.waitForExistence(timeout: 5))
@@ -1185,6 +1769,15 @@ final class RuleEditorUITests: XCTestCase {
         let done = app.buttons.matching(NSPredicate(format: "label IN %@", ["Done", "完成", "关闭", "Close"])).firstMatch
         done.tap()
         XCTAssertTrue(web.links["第2次首页"].waitForExistence(timeout: 5))
+        let headline = web.links["打开新闻报道"]
+        headline.tap()
+        let prompt = app.alerts["打开新网页？"]
+        XCTAssertTrue(prompt.staticTexts[link + "page/2/?from=paper"].waitForExistence(timeout: 5))
+        prompt.buttons["取消"].tap()
+        XCTAssertTrue(web.links["第2次首页"].isHittable)
+        headline.tap()
+        prompt.buttons["当前页面打开"].tap()
+        XCTAssertTrue(web.links["第二页文章"].waitForExistence(timeout: 8))
     }
 
     func testWebsiteGridPullToRefreshAndAutomaticNextPage() throws {
@@ -1274,7 +1867,13 @@ final class RuleEditorUITests: XCTestCase {
             XCTAssertTrue(editor.waitForExistence(timeout: 5))
             editor.tap()
             editor.typeText(url)
-            app.navigationBars["导入网站源"].buttons["导入"].tap()
+            app.navigationBars["导入网站源"].buttons["预检"].tap()
+            let commit = app.navigationBars["导入网站源"].buttons["导入"]
+            XCTAssertTrue(commit.waitForExistence(timeout: 10))
+            commit.tap()
+            let confirmation = app.alerts["网站源已导入"]
+            XCTAssertTrue(confirmation.waitForExistence(timeout: 10))
+            confirmation.buttons["好"].tap()
             let dismissed = expectation(for: NSPredicate { _, _ in !app.navigationBars["导入网站源"].exists }, evaluatedWith: nil)
             wait(for: [dismissed], timeout: 10)
         }
@@ -1439,20 +2038,22 @@ final class RuleEditorUITests: XCTestCase {
         }
         app.launchArguments += ["-defaultEPUBReadingMode", "original"]
         app.launch()
-        let importTitle = fromFileManagement ? "导入 TXT / EPUB" : "本地文件"
-        let more = fromFileManagement
-            ? app.navigationBars["文件管理"].buttons["更多"].firstMatch
-            : app.buttons["更多"].firstMatch
-        XCTAssertTrue(more.waitForExistence(timeout: 20))
-        more.tap()
-        app.buttons[importTitle].firstMatch.tap()
+        let importTitle = fromFileManagement ? "导入 TXT / EPUB" : "导入本地书"
+        func openPicker() {
+            if !fromFileManagement {
+                let more = app.buttons["更多"].firstMatch
+                XCTAssertTrue(more.waitForExistence(timeout: 20))
+                more.tap()
+            }
+            app.buttons[importTitle].firstMatch.tap()
+        }
+        openPicker()
         let cancel = app.buttons.matching(NSPredicate(format: "label IN %@", ["Cancel", "取消"])).firstMatch
         XCTAssertTrue(cancel.waitForExistence(timeout: 10))
         cancel.tap()
         let closed = expectation(for: NSPredicate { _, _ in !cancel.exists }, evaluatedWith: nil)
         wait(for: [closed], timeout: 10)
-        more.tap()
-        app.buttons[importTitle].firstMatch.tap()
+        openPicker()
         XCTAssertTrue(cancel.waitForExistence(timeout: 10))
 
         let pickerFiles = app.collectionViews["File View"].cells
@@ -1493,7 +2094,7 @@ final class RuleEditorUITests: XCTestCase {
         open.tap()
 
         if fromFileManagement {
-            XCTAssertTrue(app.navigationBars["文件管理"].waitForExistence(timeout: 15))
+            XCTAssertTrue(app.navigationBars["本地书籍文件"].waitForExistence(timeout: 15))
             XCTAssertFalse(app.alerts["文件操作失败"].waitForExistence(timeout: 3), app.debugDescription)
             app.tabBars.buttons["书架"].tap()
         } else {
@@ -1519,7 +2120,7 @@ final class RuleEditorUITests: XCTestCase {
         if !fromFileManagement {
             let txtBook = app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "TXT-Book")).firstMatch
             txtBook.press(forDuration: 1)
-            app.buttons["书籍信息"].tap()
+            app.buttons["书籍详情"].tap()
             let operations = app.buttons["本地书操作"]
             XCTAssertTrue(operations.waitForExistence(timeout: 10))
             operations.tap()
@@ -1554,6 +2155,11 @@ final class RuleEditorUITests: XCTestCase {
         let secondChapter = reader.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "目录锚点跳转成功")).firstMatch
         XCTAssertTrue(secondChapter.waitForExistence(timeout: 10))
         attach(app, name: "EPUB original layout after TOC navigation")
+        app.buttons["EPUB 更多"].tap()
+        app.buttons["书籍详情"].tap()
+        XCTAssertTrue(app.navigationBars["书籍详情"].staticTexts["page.heading"].waitForExistence(timeout: 5))
+        app.buttons["继续阅读"].tap()
+        XCTAssertTrue(secondChapter.waitForExistence(timeout: 10))
         if !fromFileManagement {
             app.buttons["排版"].tap()
             setEPUBMode("文字阅读与朗读", in: app, finish: app.navigationBars["EPUB 排版"].buttons["关闭"])
@@ -1767,7 +2373,7 @@ final class RuleEditorUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["（正文为空）"].exists)
         attach(app, name: "Purification test result")
         app.buttons["保存"].tap()
-        XCTAssertTrue(app.navigationBars["净化规则"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.navigationBars["替换净化"].waitForExistence(timeout: 10))
         XCTAssertTrue(app.staticTexts["UI Rule"].exists)
     }
 
@@ -1848,6 +2454,26 @@ final class RuleEditorUITests: XCTestCase {
         XCTAssertFalse(app.keyboards.firstMatch.exists)
     }
 
+    func testSearchOptionsCanTogglePrecisionSearch() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["-uiDemo", "-uiDemoTab", "search", "-uiAutomationSearch", "precision-menu-probe"]
+        app.launch()
+
+        XCTAssertTrue(app.buttons["修改关键词"].waitForExistence(timeout: 30))
+        let preciseHint = app.staticTexts["可以缩短关键词，或在搜索选项中关闭精准搜索。"]
+        let normalHint = app.staticTexts["试试书名中的几个字，或用作者名搜索。"]
+        let initiallyPrecise = preciseHint.exists
+        for expectedPrecise in [!initiallyPrecise, initiallyPrecise] {
+            app.buttons["search.options"].tap()
+            let option = app.buttons["精准搜索"]
+            XCTAssertTrue(option.waitForExistence(timeout: 5))
+            XCTAssertTrue(option.isEnabled)
+            option.tap()
+            XCTAssertTrue((expectedPrecise ? preciseHint : normalHint).waitForExistence(timeout: 5))
+        }
+    }
+
     func testLegacySearchSubmitsAndFiltersSources() throws {
         continueAfterFailure = false
         let app = XCUIApplication()
@@ -1894,7 +2520,7 @@ final class RuleEditorUITests: XCTestCase {
         let app = XCUIApplication()
         app.launchArguments = ["-uiDemo", "-uiDemoTab", "settings", "-uiDemoRules", "-uiLegacyCompatibility"]
         app.launch()
-        XCTAssertTrue(app.navigationBars["净化规则"].waitForExistence(timeout: 20))
+        XCTAssertTrue(app.navigationBars["替换净化"].waitForExistence(timeout: 20))
         app.buttons["更多"].tap()
         app.buttons["导出全部规则"].tap()
         let copy = app.descendants(matching: .any).matching(NSPredicate(format: "label IN %@", ["Copy", "拷贝", "复制"])).firstMatch

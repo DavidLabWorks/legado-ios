@@ -56,6 +56,11 @@ final class SearchViewModel: ObservableObject {
     private var searchTask: Task<Void, Never>?
     private var currentKeyword = ""
     private var pagedSources: [BookSource] = []
+    private var nextPageBySource: [String: Int] = [:]
+    private var availablePagedSources: [BookSource] {
+        let waiting = Set(browserPages.map { $0.source.id })
+        return pagedSources.filter { !waiting.contains($0.id) }
+    }
     private var currentPrecision = false
     private var page = 1
     private var activePage = 1
@@ -91,6 +96,7 @@ final class SearchViewModel: ObservableObject {
         currentPrecision = precision
         page = 1
         activePage = 1
+        nextPageBySource = [:]
         pendingSources = eligible(sources)
         pendingSourceIDs = Set(pendingSources.map(\.id))
         pagedSources = pendingSources.filter {
@@ -130,6 +136,7 @@ final class SearchViewModel: ObservableObject {
     private func startWorker(loadCache: Bool = false) {
         let generation = searchGeneration
         let requestedPage = activePage
+        let sourcePages = nextPageBySource
         let keyword = currentKeyword
         let sources = pendingSources.filter { pendingSourceIDs.contains($0.id) }
         searchTask = Task { [service, searchBookRepository] in
@@ -150,8 +157,10 @@ final class SearchViewModel: ObservableObject {
                 publishResults()
             }
             var lastVisibleUpdate = ProcessInfo.processInfo.systemUptime - 1
-            for await outcome in service.searchOutcomes(keyword: keyword, page: requestedPage, sources: sources, preferredSourceIDs: preferred) {
+            for await outcome in service.searchOutcomes(keyword: keyword, sources: sources, pagesBySource: sourcePages, preferredSourceIDs: preferred) {
                 guard !Task.isCancelled, generation == searchGeneration else { return }
+                let sourcePage = sourcePages[outcome.sourceID] ?? 1
+                nextPageBySource[outcome.sourceID] = sourcePage + 1
                 pendingSourceIDs.remove(outcome.sourceID)
                 completedCount += 1
                 if outcome.books.isEmpty, outcome.diagnostics.contains(where: { $0.code == "rule.unsupported" && $0.severity == .error }) {
@@ -162,7 +171,7 @@ final class SearchViewModel: ObservableObject {
                 if (outcome.manualVerification != nil || outcome.forbiddenGETURL != nil),
                    !browserPages.contains(where: { $0.source.id == outcome.sourceID }),
                    let source = sources.first(where: { $0.id == outcome.sourceID }),
-                   let recovery = BrowserSearchPage(outcome: outcome, source: source, keyword: keyword, page: requestedPage, diagnostics: named) {
+                   let recovery = BrowserSearchPage(outcome: outcome, source: source, keyword: keyword, page: sourcePage, diagnostics: named) {
                     browserPages.append(recovery)
                 }
                 addLiveBooks(outcome.books, on: requestedPage)
@@ -176,7 +185,7 @@ final class SearchViewModel: ObservableObject {
             guard !Task.isCancelled, generation == searchGeneration else { return }
             publishResults()
             page = requestedPage
-            hasMore = requestedPage == 1 ? !books.isEmpty && !pagedSources.isEmpty : foundMoreOnActivePage
+            updateHasMore()
             isLoadingMore = false
             state = books.isEmpty ? .empty : .finished
         }
@@ -191,6 +200,10 @@ final class SearchViewModel: ObservableObject {
         }
     }
 
+    private func updateHasMore() {
+        hasMore = !availablePagedSources.isEmpty && (activePage == 1 ? !books.isEmpty : foundMoreOnActivePage)
+    }
+
     func useBrowserResults(_ html: String, for recovery: BrowserSearchPage) async throws {
         guard browserPages.contains(where: { $0.id == recovery.id }) else { throw CancellationError() }
         let response = HTTPResponse(data: Data(html.utf8), statusCode: 200, headers: [:], finalURL: recovery.url,
@@ -200,16 +213,21 @@ final class SearchViewModel: ObservableObject {
                                                          verifiedListRule: recovery.manualVerification?.listRule)
         try Task.checkCancellation()
         guard browserPages.contains(where: { $0.id == recovery.id }) else { throw CancellationError() }
+        DiagnosticLog.shared.record(outcome.books.isEmpty ? .warning : .info, category: "网页搜索",
+            message: "\(DiagnosticLog.safeURL(recovery.url)) · 从本页识别到 \(outcome.books.count) 本书")
         guard !outcome.books.isEmpty else {
             throw NSError(domain: "BrowserSearch", code: 1, userInfo: [NSLocalizedDescriptionKey: "当前书源规则未能识别网页中的书籍。"])
         }
         browserPages.removeAll { $0.id == recovery.id }
         collectedDiagnostics.removeAll { recovery.diagnostics.contains($0) }
         collectedDiagnostics += namedDiagnostics(outcome)
-        addLiveBooks(outcome.books, on: recovery.page)
+        addLiveBooks(outcome.books, on: activePage)
+        if recovery.page == 1, pagedSources.contains(where: { $0.id == recovery.source.id }) {
+            foundMoreOnActivePage = true
+        }
         publishResults()
         if state != .searching && !isLoadingMore {
-            if page == recovery.page { hasMore = page == 1 ? !books.isEmpty && !pagedSources.isEmpty : foundMoreOnActivePage }
+            updateHasMore()
             state = books.isEmpty ? .empty : .finished
         }
         try? await searchBookRepository.put(outcome.books)
@@ -234,7 +252,7 @@ final class SearchViewModel: ObservableObject {
         isLoadingMore = true
         searchGeneration &+= 1
         activePage = page + 1
-        pendingSources = eligible(pagedSources)
+        pendingSources = availablePagedSources
         pendingSourceIDs = Set(pendingSources.map(\.id))
         foundMoreOnActivePage = false
         startWorker()

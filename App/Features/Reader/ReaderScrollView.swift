@@ -181,7 +181,7 @@ struct ReaderScrollView: UIViewRepresentable {
                 seek(chapter: chapter.chapter.id, position: config.requestedPosition, includeHeading: config.requestedPosition == 0)
             }
             if let position = config.jumpPosition {
-                let key = "\(parent.activeIndex):\(position)"
+                let key = "\(parent.activeIndex):\(position):\(config.jumpRevision)"
                 if jumpKey != key {
                     jumpKey = key
                     seek(chapter: parent.activeIndex, position: position, includeHeading: position == 0)
@@ -189,8 +189,8 @@ struct ReaderScrollView: UIViewRepresentable {
             } else { jumpKey = nil }
             var repaint = false
             for (index, chapter) in chapterLayouts {
-                if chapter.highlight.apply(to: chapter.storage, bodyStart: chapter.bodyStart, bodyLength: chapter.chapter.content.utf16.count,
-                                           sentence: index == parent.activeIndex ? config.spokenRange : nil, tint: config.speechColor) {
+                if chapter.manager.highlight(index == parent.activeIndex ? config.spokenText : nil, sectionStart: 0,
+                                             bodyStart: chapter.bodyStart, bodyEnd: chapter.storage.length, tint: config.speechColor) {
                     repaint = true
                 }
             }
@@ -493,9 +493,8 @@ struct ReaderScrollBlock {
 final class ReaderScrollChapterLayout {
     let chapter: ReaderScrollChapter
     let storage: NSTextStorage
-    let manager = NSLayoutManager()
+    let manager = ReaderLayoutManager()
     let container: NSTextContainer
-    var highlight = ReaderSpeechHighlight()
     let bodyStart: Int
     let left: CGFloat
     static let commentsHeight: CGFloat = 44

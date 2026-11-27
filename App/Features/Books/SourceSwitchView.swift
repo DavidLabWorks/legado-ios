@@ -54,6 +54,8 @@ final class SourceSwitchViewModel: ObservableObject {
 }
 
 struct SourceSwitchView: View {
+    static let symbol = "rectangle.2.swap"
+
     @Environment(\.dismiss) private var dismiss
     @StateObject private var model: SourceSwitchViewModel
     @State private var isSaving = false
@@ -85,7 +87,7 @@ struct SourceSwitchView: View {
                     description: Text("仅显示书名一致的候选，并优先匹配作者。请确认其他书源已启用且支持搜索。")
                 )
             } else {
-                List {
+                ReadingSheetList {
                     if model.state == .searching {
                         HStack(spacing: 10) {
                             RagdollLoading()
@@ -96,12 +98,9 @@ struct SourceSwitchView: View {
                     ForEach(model.candidates) { candidate in candidateRow(candidate) }
                 }
                 .listStyle(.insetGrouped)
-                .readingScrollContentBackgroundHidden()
-                .background(ReadingTheme.canvas)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(ReadingTheme.canvas)
         .readingSheetTitle("为《\(model.bookName)》换源")
         .toolbar {
             ReadingSheetActions {

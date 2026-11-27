@@ -22,6 +22,37 @@ struct ApplicationSettingsTests {
         #expect(store.settings.userAgent == "Test Browser")
     }
 
+    @Test func eachPageResetsOnlyItsOwnFields() {
+        var current = ApplicationSettings()
+        current.chapterCacheMB = 1024
+        current.prefetchChapters = 12
+        current.concurrentSources = 7
+        current.timeoutSeconds = 45
+        current.ignoreCertificateErrors = false
+        current.userAgent = "Custom Reader"
+        current.proxy = "http://localhost:8080"
+        current.hosts = "127.0.0.1 reader.local"
+        current.recordLog = true
+        let defaults = ApplicationSettings()
+
+        var expected = current
+        expected.chapterCacheMB = defaults.chapterCacheMB
+        expected.prefetchChapters = defaults.prefetchChapters
+        #expect(ApplicationSettings.Page.chapterCache.applying(defaults, to: current) == expected)
+
+        expected = current
+        expected.timeoutSeconds = defaults.timeoutSeconds
+        expected.concurrentSources = defaults.concurrentSources
+        expected.ignoreCertificateErrors = defaults.ignoreCertificateErrors
+        #expect(ApplicationSettings.Page.connection.applying(defaults, to: current) == expected)
+
+        expected = current
+        expected.userAgent = defaults.userAgent
+        expected.proxy = defaults.proxy
+        expected.hosts = defaults.hosts
+        #expect(ApplicationSettings.Page.advancedNetwork.applying(defaults, to: current) == expected)
+    }
+
     @Test(arguments: [0, 1, 7]) func prefetchUpgradeKeepsOtherNetworkSettings(oldCount: Int) throws {
         let suite = UUID().uuidString
         let defaults = try #require(UserDefaults(suiteName: suite))

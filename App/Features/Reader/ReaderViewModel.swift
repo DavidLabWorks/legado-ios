@@ -43,6 +43,8 @@ struct ReaderChapterDirectory {
         let title: String
         let number: Int?
         let chapterURL: String
+        let wordCount: String?
+        let updateInfo: String?
     }
 
     let rows: [Row]
@@ -52,7 +54,8 @@ struct ReaderChapterDirectory {
         var indices: [Int] = []
         rows = chapters.enumerated().map { index, chapter in
             if !chapter.isVolume { indices.append(index) }
-            return Row(id: index, title: chapter.title, number: chapter.isVolume ? nil : indices.count, chapterURL: chapter.url)
+            return Row(id: index, title: chapter.title, number: chapter.isVolume ? nil : indices.count,
+                       chapterURL: chapter.url, wordCount: chapter.wordCount, updateInfo: chapter.tag)
         }
         readableIndices = indices
     }
@@ -357,7 +360,40 @@ final class ReaderViewModel: ObservableObject {
         title = chapters.indices.contains(resolvedIndex) ? chapters[resolvedIndex].title : book.name
     }
 
+    // Playback navigates independently of the reader's scroll position and view tasks.
+    init(copying reader: ReaderViewModel, position: Int) {
+        book = reader.book
+        chapters = reader.chapters
+        currentIndex = reader.currentIndex
+        title = reader.title
+        requestedPosition = position
+        source = reader.source
+        localService = reader.localService
+        chapterCache = reader.chapterCache
+        contentCoordinator = reader.contentCoordinator
+        settingsStore = reader.settingsStore
+        demoChapterContent = reader.demoChapterContent
+        readingRules = reader.readingRules
+        content = reader.content
+        hasLoadedCurrentChapter = reader.hasLoadedCurrentChapter
+        loadedFromCache = reader.loadedFromCache
+        diagnostics = reader.diagnostics
+        initialContentStamp = reader.initialContentStamp
+        // Property observers do not run while initializing the copied chapter.
+        imageBlocks = reader.imageBlocks
+    }
+
     var currentChapter: BookChapter? { chapters.indices.contains(currentIndex) ? chapters[currentIndex] : nil }
+
+    var browserRecoveryChapter: BookChapter? {
+        guard currentChapterError != nil, let chapter = currentChapter, let source, source.id == book.origin,
+              let rule = source.ruleContent?.content, !rule.isEmpty else { return nil }
+        if rule.contains("source.bookSourceComment") { return chapter }
+        guard let directory = book.browserDirectoryURL,
+              let address = currentChapterWebPageURL?.absoluteString,
+              Book.isBrowserChapterAddress(address, in: directory) else { return nil }
+        return chapter
+    }
 
     var currentChapterWebPageURL: URL? {
         guard book.origin != "local", let chapter = currentChapter, !chapter.isVolume else { return nil }
@@ -402,6 +438,13 @@ final class ReaderViewModel: ObservableObject {
         current.durChapterPos = max(position, 0)
         current.totalChapterNum = chapters.count
         return current
+    }
+
+    func cacheChapter(at index: Int) async -> Bool {
+        guard let source, chapters.indices.contains(index), !chapters[index].isVolume else { return false }
+        let job = ChapterCacheJob(chapter: chapters[index], nextChapterURL: nextReadableChapter(after: index)?.url)
+        let result = await upcomingContent(for: job, source: source, priority: .userInitiated)
+        return result.stamp != nil
     }
 
     func cacheChapters() {

@@ -202,9 +202,8 @@ struct TxtTocRuleManagementView: View {
                 .environment(\.editMode, $editMode)
             }
         }
-        .background(ReadingTheme.managementCanvas)
-        .navigationTitle("TXT 目录规则")
-        .navigationBarTitleDisplayMode(.large)
+        .background(ReadingTheme.settingsCanvas)
+        .readingPageTitle("TXT 目录规则")
         .toolbar {
             ToolbarItemGroup(placement: .topBarTrailing) {
                 if editMode.isEditing {
@@ -289,14 +288,13 @@ private struct TxtTocRuleEditView: View {
                             codeField("标题处理 JavaScript（可选）", text: $value.replacement)
                             Toggle("启用", isOn: $value.enable).tint(ReadingTheme.toggleTint)
                         }
-                        .listRowBackground(ReadingTheme.surface)
+                        .listRowBackground(ReadingTheme.sheetCard)
                     }
                 }
                 .listStyle(.insetGrouped)
                 .readingListTopMargin(8)
                 .readingScrollContentBackgroundHidden()
             }
-            .background(ReadingTheme.canvas)
             .readingSheetTitle("编辑目录规则")
             .toolbar {
                 ReadingSheetActions {
@@ -375,7 +373,7 @@ private struct TxtTocRuleEditView: View {
                     .font(.subheadline)
             }
         }
-        .listRowBackground(ReadingTheme.surface)
+        .listRowBackground(ReadingTheme.sheetCard)
         Section {
             if let message = preview.message {
                 Text(value.id == -100 && value.rule.isEmpty ? "默认分章规则没有可测试的正则。" : message)
@@ -398,7 +396,7 @@ private struct TxtTocRuleEditView: View {
                 }
             }
         }
-        .listRowBackground(ReadingTheme.surface)
+        .listRowBackground(ReadingTheme.sheetCard)
     }
 }
 

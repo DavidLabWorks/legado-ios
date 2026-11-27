@@ -290,8 +290,7 @@ private struct ExploreSourceView: View {
             }
         }
         .background(ReadingTheme.canvas)
-        .navigationTitle(model.source.bookSourceName)
-        .navigationBarTitleDisplayMode(.inline)
+        .readingPageTitle(model.source.bookSourceName)
         .task { await model.load() }
     }
 

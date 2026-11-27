@@ -6,6 +6,64 @@ import XCTest
 
 @MainActor
 final class ReaderPagingGeometryTests: XCTestCase {
+    func testSpeechHighlightsTheTitleThenSeparateCenteredBodyLines() throws {
+        let title = "第一章"
+        let text = "他的面前是一杯早已没有气泡的乌龙茶。"
+        var reader = pagedReader(text: text, title: title)
+        reader.speechColor = .red
+        reader.spokenText = .chapterTitle
+        let host = UIHostingController(rootView: reader)
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 320, height: 400))
+        window.rootViewController = host
+        window.makeKeyAndVisible()
+        defer { window.isHidden = true }
+        host.view.layoutIfNeeded()
+        let view = try XCTUnwrap(findTextView(host.view))
+        let manager = try XCTUnwrap(view.layoutManager as? ReaderLayoutManager)
+        let coordinator = try XCTUnwrap(view.delegate as? ReaderTextView.Coordinator)
+        defer { coordinator.invalidate() }
+
+        // Sample the background actually drawn by the text view, including its insets.
+        func highlightedRows() throws -> IndexSet {
+            let width = Int(view.bounds.width), height = Int(view.bounds.height)
+            let bitmap = try XCTUnwrap(CGContext(data: nil, width: width, height: height, bitsPerComponent: 8,
+                bytesPerRow: width * 4, space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+            bitmap.translateBy(x: 0, y: CGFloat(height))
+            bitmap.scaleBy(x: 1, y: -1)
+            view.layer.render(in: bitmap)
+            let bytes = try XCTUnwrap(bitmap.data).assumingMemoryBound(to: UInt8.self)
+            var rows = IndexSet()
+            for y in 0..<height {
+                if (0..<width).contains(where: { x in
+                    let i = (y * width + x) * 4
+                    return bytes[i] > 220 && bytes[i + 1] < 30 && bytes[i + 2] < 30
+                }) { rows.insert(y) }
+            }
+            return rows
+        }
+
+        let heading = try highlightedRows()
+        XCTAssertEqual(heading.rangeView.count, 1)
+        coordinator.parent.spokenText = .body(NSRange(location: 0, length: text.utf16.count))
+        coordinator.highlightSpeech(in: view)
+        let rows = try highlightedRows()
+        XCTAssertTrue(heading.isDisjoint(with: rows))
+        let bands = Array(rows.rangeView)
+        XCTAssertGreaterThan(bands.count, 1)
+        let body = (view.text as NSString).range(of: text)
+        let glyphs = manager.glyphRange(forCharacterRange: body, actualCharacterRange: nil)
+        var centers: [CGFloat] = []
+        manager.enumerateLineFragments(forGlyphRange: glyphs) { rect, _, _, line, _ in
+            let font = view.textStorage.attribute(.font, at: manager.characterIndexForGlyph(at: line.location), effectiveRange: nil) as! UIFont
+            let baseline = rect.minY + manager.location(forGlyphAt: line.location).y + view.textContainerInset.top - view.contentOffset.y
+            centers.append(baseline - (font.ascender + font.descender) / 2)
+        }
+        XCTAssertEqual(bands.count, centers.count)
+        for (band, center) in zip(bands, centers) {
+            XCTAssertEqual(CGFloat(band.lowerBound + band.upperBound) / 2, center, accuracy: 1.5)
+        }
+    }
+
     func testSelectedSimplifiedTextMatchesTheOriginalBodyAcrossParagraphs() throws {
         let body = "閱讀📖。\n頭髮 [a.b]"
         let heading = "章節\n"

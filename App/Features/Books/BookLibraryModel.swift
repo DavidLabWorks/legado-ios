@@ -63,6 +63,7 @@ extension BookGroup {
 @MainActor
 final class BookLibraryModel: ObservableObject {
     @Published private(set) var books: [Book] = []
+    @Published private(set) var hasLoadedShelf = false
     @Published private(set) var groups: [BookGroup] = []
     @Published private(set) var errorMessage: String?
     @Published private(set) var updateMessage: String?
@@ -91,6 +92,7 @@ final class BookLibraryModel: ObservableObject {
     private var deletingGroupIDs: Set<Int64> = []
     private var sourceSwitchSaveTask: Task<Bool, Never>?
     private var loadGeneration = 0
+    private var initialShelfTask: Task<Void, Never>?
 
     init(
         repository: any BookRepository,
@@ -159,6 +161,18 @@ final class BookLibraryModel: ObservableObject {
         await load()
     }
 
+    func loadInitialShelf() async {
+        if let initialShelfTask {
+            await initialShelfTask.value
+            return
+        }
+        guard !hasLoadedShelf else { return }
+        let task = Task { await load() }
+        initialShelfTask = task
+        await task.value
+        initialShelfTask = nil
+    }
+
     func load() async {
         loadGeneration &+= 1
         let generation = loadGeneration
@@ -185,6 +199,7 @@ final class BookLibraryModel: ObservableObject {
                     await persistGroups([.init(groupId: BookGroup.idAll, groupName: "全部", order: 0)])
                 }
             }
+            if !hasLoadedShelf { hasLoadedShelf = true }
             for book in books where book.origin == "local" && book.coverUrl?.isEmpty != false {
                 guard !Task.isCancelled, let url = URL(string: book.bookUrl),
                       url.isFileURL, url.pathExtension.lowercased() == "epub" else { continue }
@@ -195,6 +210,7 @@ final class BookLibraryModel: ObservableObject {
                 }
             }
         } catch {
+            if generation == loadGeneration && !Task.isCancelled && !hasLoadedShelf { hasLoadedShelf = true }
             if generation == loadGeneration, booksGeneration == bookSaveGeneration, groupsGeneration == groupSaveGeneration {
                 errorMessage = error.localizedDescription
             }

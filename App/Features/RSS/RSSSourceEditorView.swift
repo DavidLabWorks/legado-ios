@@ -1,8 +1,14 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct RSSSourceEditorView: View {
     @EnvironmentObject private var library: RSSLibraryModel
     @State private var isSaving = false
+    @State private var choosingGroups = false
+    @State private var confirmsDeletion = false
+    @State private var isDeleting = false
+    @State private var showsExport = false
+    @State private var exportError: String?
     @Environment(\.dismiss) private var dismiss
     @State private var draft: RssSource
     private enum Detail: String, CaseIterable, Identifiable {
@@ -21,23 +27,24 @@ struct RSSSourceEditorView: View {
     }
     @State private var originalDetail: RssSource?
     @State private var detail: Detail?
-    private let originalURL: String?
+    private let originalSource: RssSource?
 
-    init(source: RssSource? = nil) {
-        let value = source ?? RssSource()
+    init(source: RssSource? = nil, initialGroup: String? = nil) {
+        var value = source ?? RssSource()
+        if source == nil { value.sourceGroup = BookSource.joinGroups([initialGroup ?? ""]) }
         _draft = State(initialValue: value)
-        originalURL = source?.sourceUrl
+        originalSource = source
     }
 
     var body: some View {
         List {
             sourceSummary
-                .listRowBackground(ReadingTheme.groupedCanvas)
+                .listRowBackground(ReadingTheme.surface)
             Section("基本信息") {
                 basicField("名称", placeholder: "网站名称", text: $draft.sourceName)
                 basicField("源地址", placeholder: "https://", text: $draft.sourceUrl)
                     .keyboardType(.URL)
-                basicField("分组", placeholder: "未分组", text: optionalText(\.sourceGroup))
+                groupButton
                 Toggle("启用此源", isOn: $draft.enabled).tint(ReadingTheme.toggleTint)
             }
             .listRowBackground(ReadingTheme.surface)
@@ -55,18 +62,42 @@ struct RSSSourceEditorView: View {
                 }
             }
             .listRowBackground(ReadingTheme.surface)
+            if let originalSource {
+                Section {
+                    Button(role: .destructive) { confirmsDeletion = true } label: {
+                        Label("删除网站源", systemImage: "trash")
+                    }
+                    .alert("删除「\(originalSource.sourceName)」？", isPresented: $confirmsDeletion) {
+                        Button("取消", role: .cancel) {}
+                        Button("删除", role: .destructive) {
+                            isDeleting = true
+                            Task {
+                                if await library.remove(originalSource) { dismiss() }
+                                isDeleting = false
+                            }
+                        }
+                    } message: {
+                        Text("此网站源的文章缓存也会一并删除。")
+                    }
+                }
+                .listRowBackground(ReadingTheme.surface)
+            }
         }
         .listStyle(.insetGrouped)
         .readingListTopMargin(8)
         .readingScrollContentBackgroundHidden()
         .background(ReadingTheme.canvas)
-        .navigationTitle(originalURL == nil ? "新建网站源" : "编辑网站源")
-        .navigationBarTitleDisplayMode(.large)
+        .readingPageTitle(originalSource == nil ? "新建网站源" : "编辑网站源")
+        .sheet(isPresented: $choosingGroups) {
+            WebsiteGroupSelectionSheet(groups: library.groups, selected: draft.groups) { groups in
+                draft.sourceGroup = BookSource.joinGroups(groups)
+            }
+        }
         .sheet(item: $detail, onDismiss: {
             if let originalDetail { draft = originalDetail; self.originalDetail = nil }
         }) { item in
             ReadingNavigationStack {
-                Form {
+                ReadingSheetForm {
                     switch item {
                     case .appearance:
                         requiredField("图标", \.sourceIcon)
@@ -86,20 +117,43 @@ struct RSSSourceEditorView: View {
                 }
             }
         }
+        .fileExporter(isPresented: $showsExport, document: SourceExportDocument(sources: [draft]), contentType: .json,
+                      defaultFilename: sourceExportFilename(draft.sourceName, fallback: "网站源")) { result in
+            if case .failure(let error) = result { exportError = error.localizedDescription }
+        }
+        .alert("导出失败", isPresented: Binding(get: { exportError != nil }, set: { if !$0 { exportError = nil } })) {
+            Button("好", role: .cancel) {}
+        } message: { Text(exportError ?? "") }
         .toolbar {
-            ToolbarItem(placement: .confirmationAction) {
+            ReadingSheetActions {
                 if detail == nil {
+                    Button("导出") { showsExport = true }
                     ReadingSheetActionButton(isWorking: isSaving) {
                         isSaving = true
                         Task {
-                            if await library.save(draft, replacing: originalURL) { dismiss() }
+                            if await library.save(draft, replacing: originalSource?.sourceUrl) { dismiss() }
                             isSaving = false
                         }
                     }
                 }
             }
         }
-        .disabled(isSaving)
+        .disabled(isSaving || isDeleting)
+    }
+
+    private var groupButton: some View {
+        Button { choosingGroups = true } label: {
+            HStack {
+                Text("分组").foregroundStyle(ReadingTheme.ink)
+                Spacer()
+                Text(draft.groups.isEmpty ? "未分组" : draft.groups.joined(separator: "、"))
+                    .foregroundStyle(.secondary)
+                Image(systemName: "chevron.right").font(.caption).foregroundStyle(.secondary)
+            }
+        }
+        .accessibilityIdentifier("websiteEditor.groups")
+        .accessibilityLabel("分组")
+        .accessibilityValue(draft.groups.isEmpty ? "未分组" : draft.groups.joined(separator: "、"))
     }
 
     private var sourceSummary: some View {
@@ -208,5 +262,125 @@ struct RSSSourceEditorView: View {
     }
     private func optionalBool(_ keyPath: WritableKeyPath<RssSource, Bool?>, default defaultValue: Bool) -> Binding<Bool> {
         Binding(get: { draft[keyPath: keyPath] ?? defaultValue }, set: { draft[keyPath: keyPath] = $0 })
+    }
+}
+
+private struct WebsiteGroupSelectionSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @State private var choices: [String]
+    @State private var selected: [String]
+    @State private var creatingGroup = false
+    let apply: ([String]) -> Void
+
+    init(groups: [String], selected: [String], apply: @escaping ([String]) -> Void) {
+        _choices = State(initialValue: groups + selected.filter { !groups.contains($0) })
+        _selected = State(initialValue: selected)
+        self.apply = apply
+    }
+
+    var body: some View {
+        ReadingNavigationStack {
+            ReadingSheetList {
+                Section {
+                    WebsiteGroupChoice(group: "", isSelected: selected.isEmpty) { selected.removeAll() }
+                    ForEach(choices, id: \.self) { group in
+                        WebsiteGroupChoice(group: group, isSelected: selected.contains(group)) {
+                            if selected.contains(group) { selected.removeAll { $0 == group } }
+                            else { selected.append(group) }
+                        }
+                    }
+                }
+                Section {
+                    Button("新建分组", systemImage: "folder.badge.plus") { creatingGroup = true }
+                }
+            }
+            .readingSheetTitle("选择分组")
+            .toolbar {
+                ReadingSheetActions {
+                    Button("取消") { dismiss() }
+                    ReadingSheetActionButton("完成") { apply(selected); dismiss() }
+                }
+            }
+            .sheet(isPresented: $creatingGroup) {
+                WebsiteGroupNameSheet(original: nil, groups: choices) { name in
+                    choices.append(name)
+                    selected.append(name)
+                }
+            }
+        }
+        .readingPresentationDetents([.medium, .large])
+        .readingPresentationDragIndicator()
+    }
+}
+
+struct WebsiteGroupNameSheet: View {
+    let original: String?
+    let groups: [String]
+    let save: (String) async throws -> Void
+
+    var body: some View {
+        WebsiteNameSheet(title: original == nil ? "新建分组" : "重命名分组", field: "分组名称",
+                         original: original ?? "", validate: { name in
+            if BookSource.parseGroups(name) != [name] { return "组名中不能包含逗号或分号" }
+            if ["全部", "全部分组", "未分组"].contains(name) { return "此名称已用于分组筛选" }
+            if name != original && groups.contains(name) { return "已有同名分组" }
+            return nil
+        }, save: save)
+    }
+}
+
+struct WebsiteNameSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    let title: String
+    let field: String
+    let original: String
+    let validate: (String) -> String?
+    let save: (String) async throws -> Void
+    @State private var name: String
+    @State private var saving = false
+    @State private var error: String?
+
+    init(title: String, field: String, original: String, validate: @escaping (String) -> String? = { _ in nil },
+         save: @escaping (String) async throws -> Void) {
+        self.title = title
+        self.field = field
+        self.original = original
+        self.validate = validate
+        self.save = save
+        _name = State(initialValue: original)
+    }
+
+    private var trimmed: String { name.trimmingCharacters(in: .whitespacesAndNewlines) }
+
+    var body: some View {
+        ReadingNavigationStack {
+            ReadingSheetForm {
+                Section {
+                    TextField(field, text: $name)
+                } footer: {
+                    if !trimmed.isEmpty, let message = validate(trimmed) { Text(message) }
+                }
+            }
+            .readingSheetTitle(title)
+            .toolbar {
+                ReadingSheetActions {
+                    Button("取消") { dismiss() }.disabled(saving)
+                    ReadingSheetActionButton(isWorking: saving) {
+                        let value = trimmed
+                        saving = true
+                        Task {
+                            do { try await save(value); dismiss() }
+                            catch { self.error = error.localizedDescription }
+                            saving = false
+                        }
+                    }.disabled(trimmed.isEmpty || validate(trimmed) != nil || trimmed == original || saving)
+                }
+            }
+            .alert("保存失败", isPresented: Binding(get: { error != nil }, set: { if !$0 { error = nil } })) {
+                Button("好", role: .cancel) {}
+            } message: { Text(error ?? "") }
+        }
+        .readingPresentationDetents([.medium, .large])
+        .interactiveDismissDisabled(saving)
     }
 }

@@ -171,6 +171,7 @@ public struct BookSearchService: Sendable {
         keyword: String,
         page: Int = 1,
         sources: [BookSource],
+        pagesBySource: [String: Int] = [:],
         maximumConcurrentSources: Int = ApplicationSettingsStore.shared.settings.concurrentSources,
         includeDisabled: Bool = false,
         preferredSourceIDs: Set<String> = []
@@ -212,7 +213,7 @@ public struct BookSearchService: Sendable {
                             normalIndex += 1
                         }
                         group.addTask {
-                            await search(keyword: keyword, page: page, source: source,
+                            await search(keyword: keyword, page: pagesBySource[source.id] ?? page, source: source,
                                          timeoutLimit: enabled.count > 1 ? 8 : 30)
                         }
                         return true

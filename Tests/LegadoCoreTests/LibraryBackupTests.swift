@@ -3,8 +3,12 @@ import Testing
 @testable import LegadoCore
 
 struct LibraryBackupTests {
-    @Test func retiredTapSettingsDoNotBlockRestoringOlderBackups() throws {
-        let values: [String: JSONValue] = ["clickActionMiddleLeft": .number(8), "textSize": .number(24)]
+    @Test func retiredSettingsDoNotBlockRestoringOlderBackups() throws {
+        let values: [String: JSONValue] = [
+            "clickActionMiddleLeft": .number(8), "textSize": .number(24),
+            "ttsTimer": .number(45), "readAloudByPage": .bool(true),
+            "appTtsEngine": .string("retired"), "offlineVoicePack.v1": .string("retired")
+        ]
         let suite = UUID().uuidString
         let defaults = try #require(UserDefaults(suiteName: suite))
         defer { defaults.removePersistentDomain(forName: suite) }
@@ -12,6 +16,14 @@ struct LibraryBackupTests {
         BackupPreferences.apply(values, to: defaults)
         #expect(defaults.integer(forKey: "textSize") == 24)
         #expect(defaults.object(forKey: "clickActionMiddleLeft") == nil)
+        #expect(defaults.object(forKey: "appTtsEngine") == nil)
+        #expect(defaults.object(forKey: "offlineVoicePack.v1") == nil)
+        #expect(defaults.object(forKey: "readAloudByPage") == nil)
+        #expect(defaults.object(forKey: "ttsTimer") == nil)
+        defaults.set(true, forKey: "readAloudByPage")
+        #expect(BackupPreferences.read(defaults)["readAloudByPage"] == nil)
+        defaults.set(45, forKey: "ttsTimer")
+        #expect(BackupPreferences.read(defaults)["ttsTimer"] == nil)
         let config = try JSONDecoder().decode(BookReadConfig.self, from: Data(#"{"reSegment":true,"pageAnim":3}"#.utf8))
         #expect(config.pageAnim == 3)
     }
@@ -84,9 +96,12 @@ struct LibraryBackupTests {
         try ApplicationSettingsStore(defaults: sourceDefaults).save(network)
         sourceDefaults.set("2", forKey: "themeMode")
         sourceDefaults.set("wechat", forKey: "readerTheme")
-        sourceDefaults.set("qwen.serena", forKey: "appTtsEngine")
+        sourceDefaults.set("edgeOne", forKey: "listeningEngine")
+        sourceDefaults.set("zh-CN-YunxiNeural", forKey: "libreTTSVoice")
+        sourceDefaults.set("zh-CN-XiaoyiNeural", forKey: "edgeOneVoice")
+        sourceDefaults.set("en-US-JennyNeural", forKey: "pptBoardVoice")
         sourceDefaults.set("fixture.ttf", forKey: "textFont")
-        sourceDefaults.set(true, forKey: "readAloudByPage")
+        sourceDefaults.set(true, forKey: "readAloudWakeLock")
         sourceDefaults.set(false, forKey: "recordWebsiteBrowsingHistory")
         sourceDefaults.set(7, forKey: "ttsSpeechRate")
         sourceDefaults.set(24, forKey: "textSize")
@@ -120,6 +135,9 @@ struct LibraryBackupTests {
             #expect(result.subscriptions == backup.subscriptions)
             #expect(result.fonts == backup.fonts)
             #expect(result.preferences == backup.preferences)
+            #expect(targetDefaults.string(forKey: "listeningEngine") == "edgeOne")
+            #expect(targetDefaults.string(forKey: "edgeOneVoice") == "zh-CN-XiaoyiNeural")
+            #expect(targetDefaults.string(forKey: "pptBoardVoice") == "en-US-JennyNeural")
             let chapter = try #require(result.shelf.chapters[restored.bookUrl]?.first)
             #expect(chapter.baseUrl == restored.bookUrl)
             #expect(try LocalBookService().loadContent(book: restored, chapter: chapter).content.contains("在新设备上继续读"))

@@ -46,8 +46,7 @@ struct SourceDebugView: View {
             .padding(.bottom, 30)
         }
         .background(ReadingTheme.canvas)
-        .navigationTitle("书源调试")
-        .navigationBarTitleDisplayMode(.inline)
+        .readingPageTitle("书源调试")
     }
 
     private var introCard: some View {
@@ -242,7 +241,7 @@ struct SourceBatchTestView: View {
     }
 
     var body: some View {
-        List {
+        ReadingPageList {
             Section {
                 TextField("校验搜索词", text: $keyword)
                     .textInputAutocapitalization(.never)
@@ -278,8 +277,7 @@ struct SourceBatchTestView: View {
                 }
             }
         }
-        .navigationTitle("书源测试")
-        .navigationBarTitleDisplayMode(.inline)
+        .readingPageTitle("书源测试")
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 if model.isTesting {
@@ -416,8 +414,7 @@ private struct DebugStepCard: View {
             }
         }
         .padding(14)
-        .background(.background, in: RoundedRectangle(cornerRadius: 17, style: .continuous))
-        .overlay { RoundedRectangle(cornerRadius: 17, style: .continuous).stroke(.primary.opacity(0.06)) }
+        .background { ReadingCardBackground(cornerRadius: 17) }
     }
 
     private var color: Color {

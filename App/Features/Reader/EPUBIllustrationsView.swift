@@ -30,7 +30,6 @@ struct EPUBIllustrationsView: View {
                     }
                 }.padding()
             }
-            .background(ReadingTheme.canvas)
             .readingSheetTitle("本章插图")
             .toolbar {
                 ReadingSheetActions {

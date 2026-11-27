@@ -9,6 +9,7 @@ public struct LibraryBackup: Codable, Sendable {
     public var shelf: Shelf
     public var bookSources: [BookSource]
     public var websiteSources: [RssSource]
+    public var websiteSourceGroups: [String]?
     public var bookmarks: [Bookmark]
     public var readingHistory: [ReadRecord]
     public var websiteFavorites: [RssStar]
@@ -98,6 +99,12 @@ public struct LibraryBackup: Codable, Sendable {
         try checkIDs(shelf.books.map(\.bookUrl))
         try checkIDs(bookSources.map(\.bookSourceUrl))
         try checkIDs(websiteSources.map(\.sourceUrl))
+        if let websiteSourceGroups {
+            try checkIDs(websiteSourceGroups)
+            guard websiteSourceGroups.allSatisfy({ BookSource.parseGroups($0) == [$0] }) else {
+                throw BackupError.invalid("备份中的网站源分组名称无效。")
+            }
+        }
         guard Set(replaceRules.map(\.id)).count == replaceRules.count,
               Set(shelf.chapters.keys).isSubset(of: Set(shelf.books.map(\.bookUrl))) else {
             throw BackupError.invalid("备份中的规则或章节关联无效。")
@@ -146,12 +153,13 @@ enum BackupPreferences {
     static let strings: Set<String> = [
         "themeMode", "bookSourceSort", "bookshelfLayout", "defaultHomePage", "epubTheme",
         "paragraphIndent", "readerPreviousDayTheme", "readerTheme", "screenOrientation",
-        "sourceTestKeyword", "systemTtsVoice", "textFont", "defaultEPUBReadingMode", "appTtsEngine", "offlineVoicePack.v1"
+        "sourceTestKeyword", "systemTtsVoice", "textFont", "defaultEPUBReadingMode", "listeningEngine", "libreTTSVoice",
+        "edgeOneVoice", "pptBoardVoice"
     ]
     static let flags: Set<String> = [
         "auto_refresh", "bookSourceSortDescending", "enableReadRecord", "epubPublisherStyles", "epubScroll",
         "ignoreAudioFocus", "mediaButtonPerNext", "onlyUpdateRead", "pauseReadAloudWhilePhoneCalls",
-        "precisionSearch", "readAloudByPage", "readAloudWakeLock", "readerFullJustify", "readerHideHomeIndicator",
+        "precisionSearch", "readAloudWakeLock", "readerFullJustify", "readerHideHomeIndicator",
         "readerHideStatusBar", "readerKeepScreenOn", "readerSimplifiedChinese",
         "readerUseBackgroundImage", "showFooterLine", "showHeaderLine", "recordWebsiteBrowsingHistory"
     ]
@@ -162,7 +170,7 @@ enum BackupPreferences {
         "letterSpacing", "lineSpacingExtra", "paddingBottom", "paddingLeft", "paddingRight", "paddingTop",
         "paragraphSpacing", "readRecordSort", "readerBrightness", "textBold", "textSize",
         "tipFooterLeft", "tipFooterMiddle", "tipFooterRight", "tipHeaderLeft", "tipHeaderMiddle", "tipHeaderRight",
-        "titleBottomSpacing", "titleMode", "titleSize", "titleTopSpacing", "ttsSpeechRate", "ttsTimer", "underlineMode", "pageAnim"
+        "titleBottomSpacing", "titleMode", "titleSize", "titleTopSpacing", "ttsSpeechRate", "underlineMode", "pageAnim"
     ]
     static func read(_ defaults: UserDefaults) -> [String: JSONValue] {
         var values: [String: JSONValue] = [:]
@@ -171,9 +179,10 @@ enum BackupPreferences {
         for key in numbers where defaults.object(forKey: key) != nil { values[key] = .number(defaults.double(forKey: key)) }
         return values
     }
-    // Older backups may contain the retired tap assignments. Accept them on
+    // Older backups may contain retired numeric preferences. Accept them on
     // import without applying them or writing them into new backups.
-    private static let legacyTapKeys: Set<String> = [
+    private static let legacyNumericKeys: Set<String> = [
+        "ttsTimer",
         "clickActionTopLeft", "clickActionTopCenter", "clickActionTopRight", "clickActionMiddleLeft",
         "clickActionMiddleRight", "clickActionBottomLeft", "clickActionBottomCenter", "clickActionBottomRight"
     ]
@@ -181,8 +190,9 @@ enum BackupPreferences {
     static func validate(_ values: [String: JSONValue]) throws {
         for (key, value) in values {
             switch value {
-            case .string where strings.contains(key), .bool where flags.contains(key) || key == "readerShowBrightness": continue
-            case .number(let n) where (numbers.contains(key) || legacyTapKeys.contains(key)) && n.isFinite && abs(n) <= 100000: continue
+            case .string where strings.contains(key) || key == "appTtsEngine" || key == "offlineVoicePack.v1": continue
+            case .bool where flags.contains(key) || key == "readerShowBrightness" || key == "readAloudByPage": continue
+            case .number(let n) where (numbers.contains(key) || legacyNumericKeys.contains(key)) && n.isFinite && abs(n) <= 100000: continue
             default: throw BackupError.invalid("备份中的设置无效：" + key)
             }
         }

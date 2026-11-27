@@ -7,6 +7,36 @@ import XCTest
 
 @MainActor
 final class WebReaderBridgeTests: XCTestCase {
+    func testSearchImportReadsVisibleBookLinksAroundInvalidLinks() async throws {
+        let page = URL(string: "https://101kks.com")!.appendingPathComponent("search/从武林门派/1.html")
+        let browser = BrowserBookDocument(manualVerification: false, searchURL: page)
+        let web = browser.webView
+        web.frame = CGRect(x: 0, y: 0, width: 390, height: 844)
+        let html = """
+            <meta charset="utf-8"><a href="http://[">无关链接</a>
+            <a href="/book/21828.html"><img width="60" height="80" alt="從武林門派到長生仙門"></a>
+            <a href="https://other.example/book/12.html">站外书籍</a>
+            <a hidden href="/book/17.html">隐藏书名</a>
+            """
+        let response = try XCTUnwrap(HTTPURLResponse(url: page, statusCode: 200, httpVersion: nil, headerFields: ["Content-Type": "text/html; charset=utf-8"]))
+        web.loadSimulatedRequest(URLRequest(url: page), response: response, responseData: Data(html.utf8))
+        let loaded = expectation(for: NSPredicate(format: "estimatedProgress == 1 AND loading == NO"), evaluatedWith: web)
+        await fulfillment(of: [loaded], timeout: 10)
+        XCTAssertEqual(web.url, page)
+        XCTAssertTrue(browser.ready)
+        let result = try await browser.bookLinks(at: page)
+        XCTAssertTrue(result.contains("https://101kks.com/book/21828.html"))
+        XCTAssertTrue(result.contains("從武林門派到長生仙門"))
+        XCTAssertFalse(result.contains("站外书籍"))
+        XCTAssertFalse(result.contains("隐藏书名"))
+        var source = BookSource(bookSourceUrl: "https://101kks.com", bookSourceName: "101 看书")
+        source.ruleSearch = .init(bookList: "//a", name: "text", bookUrl: "href")
+        let imported = try await BookSearchService().analyzeSearchPage(
+            .init(data: Data(result.utf8), statusCode: 200, headers: [:], finalURL: page),
+            detailURL: page.absoluteString, keyword: "从武林门派", page: 1, source: source)
+        XCTAssertEqual(imported.books.map(\.bookURL), ["https://101kks.com/book/21828.html"])
+    }
+
     func testPlayerKeepsNativeVideoAndAudioFilters() {
         var iterator: UnsafeMutableRawPointer?
         var names = Set<String>()
@@ -27,6 +57,54 @@ final class WebReaderBridgeTests: XCTestCase {
         }
         XCTAssertTrue(Set(["http", "https", "httpproxy", "tcp", "tls", "crypto"]).isSubset(of: names))
         XCTAssertFalse(names.contains("smb"))
+    }
+
+    func testArticleVideoUsesSourceSelectedAtTapTime() async throws {
+        let base = "https://article.test/episodes/1.html"
+        var source = RssSource(sourceUrl: "https://article.test/", sourceName: "视频")
+        source.enableJs = true
+        let html = """
+            <video id="player"><source id="selected" src=""></video>
+            <video src="static.mp4"></video>
+            """
+        let surface = RSSWebReaderView(mode: .html(content: html, baseURL: base), source: source)
+        let coordinator = surface.makeCoordinator()
+        let web = WKWebView()
+        web.navigationDelegate = coordinator
+        defer { RSSWebReaderView.dismantleUIView(web, coordinator: coordinator) }
+        coordinator.installRulesAndLoad(mode: surface.mode, in: web)
+        let loaded = expectation(for: NSPredicate(format: "estimatedProgress == 1 AND loading == NO"), evaluatedWith: web)
+        await fulfillment(of: [loaded], timeout: 10)
+
+        source.contentBlacklist = "https://blocked.test/"
+        coordinator.update(source: source)
+        var played: [URL] = []
+        coordinator.onPlayVideo = { played.append($0) }
+        for (path, hint) in [("  ", "视频地址尚未加载"), ("https://blocked.test/a.m3u8", "视频地址不可用")] {
+            let shown = try await web.callAsyncJavaScript("""
+                document.getElementById('selected').setAttribute('src', path);
+                document.querySelector('a').click();
+                for (let i = 0; i < 30; i++) {
+                    if (document.body.innerText.includes(hint)) return true;
+                    await new Promise(resolve => setTimeout(resolve, 50));
+                }
+                return false;
+                """, arguments: ["path": path, "hint": hint], in: nil, contentWorld: .page)
+            XCTAssertEqual(shown as? Bool, true)
+            XCTAssertTrue(played.isEmpty)
+        }
+
+        for (index, path) in [(0, "first.m3u8"), (0, "second.m3u8"), (1, "static.mp4")] {
+            let opened = expectation(description: path)
+            coordinator.onPlayVideo = { played.append($0); opened.fulfill() }
+            _ = try await web.callAsyncJavaScript("""
+                document.getElementById('selected').src = path;
+                document.getElementById('player').load();
+                document.querySelectorAll('a')[index].click();
+                """, arguments: ["path": path, "index": index], in: nil, contentWorld: .page)
+            await fulfillment(of: [opened], timeout: 3)
+            XCTAssertEqual(played.last?.absoluteString, "https://article.test/episodes/" + path)
+        }
     }
 
     private func webPrepared(script: String?, resource: String? = nil) throws -> PreparedRequest {
@@ -321,7 +399,12 @@ final class RSSLibraryRegressionTests: XCTestCase {
         XCTAssertNotNil(model.errorMessage)
         let saved = await model.save(source(), replacing: nil)
         XCTAssertFalse(saved)
-        await model.importText(#"{"sourceUrl":"https://feed.test","sourceName":"未保存的订阅"}"#)
+        let preview = await model.previewText(#"{"sourceUrl":"https://feed.test","sourceName":"未保存的订阅"}"#)
+        let incoming = try XCTUnwrap(preview)
+        do {
+            try await model.importSources(incoming.sources)
+            XCTFail("数据库不可用时导入应当失败")
+        } catch { }
         XCTAssertTrue(model.sources.isEmpty)
         XCTAssertFalse(model.isWorking)
         XCTAssertEqual(try Data(contentsOf: blocked), Data("existing file".utf8))

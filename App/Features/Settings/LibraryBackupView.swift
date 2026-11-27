@@ -41,7 +41,7 @@ struct LibraryBackupView: View {
                 }
                 VStack(alignment: .leading, spacing: 6) {
                     Label("备份可能包含请求头与服务器配置中的账号或密钥，分享前请检查。", systemImage: "lock.shield")
-                    Text("章节缓存和离线语音包需重新下载，网站需重新登录。也可从“文件”或分享菜单打开备份 JSON。")
+                    Text("章节缓存需重新下载，网站需重新登录。也可从“文件”或分享菜单打开备份 JSON。")
                 }
                 .font(.footnote).foregroundStyle(.secondary)
             }
@@ -50,9 +50,8 @@ struct LibraryBackupView: View {
             .frame(maxWidth: 680)
         }
         .frame(maxWidth: .infinity)
-        .background(ReadingTheme.canvas)
-        .navigationTitle("备份与恢复")
-        .navigationBarTitleDisplayMode(.large)
+        .background(ReadingTheme.settingsCanvas)
+        .readingPageTitle("数据备份与恢复")
         .disabled(working)
         .modifier(JSONImportPicker(isPresented: $picking))
         .fileExporter(isPresented: $exporting, document: document, contentType: .json,
@@ -64,8 +63,6 @@ struct LibraryBackupView: View {
             }
         }
     }
-
-    @Environment(\.colorScheme) private var colorScheme
 
     private var exportCard: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -92,7 +89,7 @@ struct LibraryBackupView: View {
         }
         .padding(16)
         .foregroundStyle(.primary)
-        .background(colorScheme == .dark ? ReadingTheme.surface : ReadingTheme.paper, in: RoundedRectangle(cornerRadius: 18))
+        .background { ReadingCardBackground(cornerRadius: 18) }
     }
 
     private func backupRow(_ title: String, _ detail: String, icon: String) -> some View {
@@ -149,7 +146,7 @@ struct BackupRestoreView: View {
 
     var body: some View {
         ReadingNavigationStack {
-            List {
+            ReadingSheetList {
                 Section("备份内容") {
                     ReadingLabeledContent("备份时间", value: backup.createdAt.formatted())
                     ReadingLabeledContent("书架书籍", value: String(backup.shelf.books.count))

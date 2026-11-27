@@ -4,10 +4,19 @@ import UIKit
 
 struct RSSHomeView: View {
     @EnvironmentObject private var library: RSSLibraryModel
-    private var enabledSources: [RssSource] { library.sources.filter(\.enabled) }
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @AppStorage("websiteShowsCards") private var showsCards = false
+    @AppStorage("websiteSelectedGroup") private var selectedGroup: String?
+    @State private var showsGroupMenu = false
+    @State private var showsCustomOrder = false
+    @State private var movingWebsite: RssSource?
+    @State private var editingWebsite: RssSource?
+    @State private var removingWebsite: RssSource?
+    @ScaledMetric(relativeTo: .body) private var groupFontSize: CGFloat = 17
 
     var body: some View {
-        SourceBrowsePage() {
+        let sources = library.websites(in: selectedGroup)
+        return SourceBrowsePage() {
             ReadingPageHeader(title: "网站", subtitle: "在喜欢的网站，读点新鲜事", artwork: .websites) {
                 HStack(spacing: 4) {
                     NavigationLink { WebsiteActivityList(showsStars: true) } label: { ReadingToolbarIcon(systemName: "star") }
@@ -21,14 +30,49 @@ struct RSSHomeView: View {
                 }
             }
             VStack(spacing: 0) {
-                SourceBrowseSectionHeading(title: "我的网站", countText: "已启用 \(enabledSources.count) 个网站",
-                                           hasSources: !enabledSources.isEmpty, countIdentifier: "websites.sourceCount") {
-                    WebsiteSourceManagementView()
+                let heading = HStack(spacing: 2) {
+                    Text("网站").font(.title3.bold())
+                    Text("（\(sources.count)）")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
                 }
-                sourceList
+                .lineLimit(1)
+                .minimumScaleFactor(0.75)
+                .layoutPriority(1)
+                .frame(minHeight: 44, alignment: .leading)
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("网站，已启用 \(sources.count) 个网站")
+                .accessibilityAddTraits(.isHeader)
+                .accessibilityIdentifier("websites.sourceCount")
+                let controls = HStack(spacing: 4) {
+                    groupMenu
+                    if !sources.isEmpty {
+                        ReadingLayoutPicker(showsGrid: $showsCards, gridLabel: "卡片布局") {
+                            sortMenu(count: sources.count)
+                        }
+                    }
+                }
+                Group {
+                    if dynamicTypeSize.isAccessibilitySize {
+                        VStack(alignment: .leading, spacing: 4) {
+                            heading
+                            controls
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    } else {
+                        HStack(spacing: 4) {
+                            heading
+                            Spacer(minLength: 0)
+                            controls
+                        }
+                    }
+                }
+                .padding(.bottom, 12)
+                sourceList(sources)
             }
-            .padding(.horizontal, enabledSources.isEmpty ? 24 : 20)
+            .padding(.horizontal, 20)
             .padding(.bottom, 28)
+            .background(WebsiteHomeScrollRestoration())
         }
         .safeAreaInset(edge: .top, spacing: 0) {
             Color.clear.frame(height: 0)
@@ -36,19 +80,166 @@ struct RSSHomeView: View {
                 .accessibilityHidden(true)
         }
         .accessibilityIdentifier("websites.scroll")
-        .refreshable { await library.load() }
+        .accessibilityHidden(showsGroupMenu)
+        .overlayPreferenceValue(WebsiteGroupButtonBounds.self) { anchor in
+            if showsGroupMenu, let anchor {
+                GeometryReader { geometry in
+                    let button = geometry[anchor]
+                    let width = groupMenuWidth(available: geometry.size.width)
+                    let top = max(0, button.maxY)
+                    let below = geometry.size.height - top
+                    let above = max(0, button.minY)
+                    let idealHeight = CGFloat(library.groups.count + 1) * max(44, groupFontSize + 16) + 8
+                    let opensBelow = below >= idealHeight || below >= above
+                    let height = max(0, min(idealHeight, 360, (opensBelow ? below : above) - 4))
+                    Color.clear.contentShape(Rectangle())
+                        .onTapGesture { showsGroupMenu = false }
+                        .accessibilityHidden(true)
+                    groupOptions
+                        .frame(width: width, height: height)
+                        .background(ReadingTheme.surface, in: RoundedRectangle(cornerRadius: 14))
+                        .clipShape(RoundedRectangle(cornerRadius: 14))
+                        .shadow(color: .black.opacity(0.16), radius: 9, y: 3)
+                        .position(x: min(max(button.maxX - width / 2, width / 2 + 8),
+                                         geometry.size.width - width / 2 - 8),
+                                  y: opensBelow ? top + height / 2 : above - height / 2)
+                        .accessibilityAction(.escape) { showsGroupMenu = false }
+                }
+            }
+        }
+        .onDisappear {
+            showsGroupMenu = false
+        }
+        .sheet(isPresented: $showsCustomOrder) { WebsiteOrderView(group: selectedGroup) }
+        .sheet(item: $movingWebsite) { source in
+            WebsiteSourceMoveSheet(groups: library.groups, count: 1) { group in
+                try await library.moveSources([source.id], toGroup: group)
+            }
+        }
+        .readingNavigationDestination(isPresented: Binding(
+            get: { editingWebsite != nil }, set: { if !$0 { editingWebsite = nil } }
+        )) {
+            if let editingWebsite { RSSSourceEditorView(source: editingWebsite) }
+        }
+        .alert("移除网站？", isPresented: Binding(
+            get: { removingWebsite != nil }, set: { if !$0 { removingWebsite = nil } }
+        ), presenting: removingWebsite) { source in
+            Button("取消", role: .cancel) {}
+            Button("移除", role: .destructive) { Task { await library.remove(source) } }
+        } message: { source in
+            Text("将移除「\(source.sourceName)」及其文章缓存。")
+        }
         .navigationTitle("网站")
+        // The page draws its own heading. A native large title leaves an extra spring target after a pop.
+        .navigationBarTitleDisplayMode(.inline)
+        .task(id: library.hasLoadedSources ? library.groups : nil) {
+            if library.hasLoadedSources, library.errorMessage == nil,
+               let selectedGroup, !library.groups.contains(selectedGroup) {
+                self.selectedGroup = nil
+            }
+        }
         .modifier(WebsiteOperationStatus())
     }
 
-    @ViewBuilder private var sourceList: some View {
-        let sources = enabledSources
+    private func sortMenu(count: Int) -> some View {
+        let selected = library.sort(for: selectedGroup)
+        return Menu {
+            Section("「\(selectedGroup ?? "全部")」的排序方式") {
+                ForEach(WebsiteSort.allCases, id: \.self) { sort in
+                    Button {
+                        library.setSort(sort, for: selectedGroup)
+                        if sort == .custom && count > 1 { showsCustomOrder = true }
+                    } label: {
+                        if selected == sort { Label(sort.title, systemImage: "checkmark") }
+                        else { Text(sort.title) }
+                    }
+                    .accessibilityAddTraits(selected == sort ? .isSelected : [])
+                }
+            }
+        } label: {
+            Image(systemName: "arrow.up.arrow.down")
+                .font(.subheadline.weight(.semibold))
+                .frame(width: 44, height: 44).contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("排序方式")
+        .accessibilityValue(selected.title)
+    }
+
+    private var groupMenu: some View {
+        Button { showsGroupMenu.toggle() } label: {
+            HStack(spacing: 4) {
+                Text(selectedGroup ?? "全部").font(.subheadline).lineLimit(1)
+                Image(systemName: "chevron.down").font(.caption2)
+            }
+            .frame(maxWidth: dynamicTypeSize.isAccessibilitySize ? nil : 96)
+            .padding(.horizontal, 10)
+            .frame(minHeight: 32)
+            .background(ReadingTheme.groupedCanvas, in: Capsule())
+            .frame(minHeight: 44)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .fixedSize(horizontal: !dynamicTypeSize.isAccessibilitySize, vertical: false)
+        .foregroundStyle(ReadingTheme.ink)
+        .accessibilityLabel("网站分组")
+        .accessibilityValue(selectedGroup ?? "全部")
+        .background {
+            if showsGroupMenu {
+                Color.clear.anchorPreference(key: WebsiteGroupButtonBounds.self, value: .bounds) { $0 }
+            }
+        }
+    }
+
+    private func groupMenuWidth(available: CGFloat) -> CGFloat {
+        let attributes: [NSAttributedString.Key: Any] = [.font: UIFont.systemFont(ofSize: groupFontSize)]
+        let textWidth = library.groups.reduce(("全部" as NSString).size(withAttributes: attributes).width) {
+            max($0, ($1 as NSString).size(withAttributes: attributes).width)
+        }
+        // Horizontal padding, checkmark space and the gap before the title.
+        return min(max(96, ceil(textWidth) + 24 + 16 + 6), 260, max(0, available - 16))
+    }
+
+    private var groupOptions: some View {
+        ScrollView {
+            LazyVStack(spacing: 0) {
+                groupOption(nil)
+                ForEach(library.groups, id: \.self) { group in groupOption(group) }
+            }
+            .padding(.vertical, 4)
+        }
+    }
+
+    private func groupOption(_ group: String?) -> some View {
+        Button {
+            selectedGroup = group
+            showsGroupMenu = false
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "checkmark").font(.caption.bold())
+                    .frame(width: 16).opacity(group == selectedGroup ? 1 : 0)
+                    .accessibilityHidden(true)
+                Text(verbatim: group ?? "全部").font(.system(size: groupFontSize))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 4)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .frame(minHeight: max(44, groupFontSize + 16))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityAddTraits(group == selectedGroup ? .isSelected : [])
+    }
+
+    @ViewBuilder private func sourceList(_ sources: [RssSource]) -> some View {
         if sources.isEmpty, !library.hasLoadedSources {
             RagdollLoading("正在加载网站", width: 72, axis: .vertical)
                 .frame(maxWidth: .infinity).padding(.top, 54)
         } else if sources.isEmpty {
             VStack(spacing: 16) {
-                ReadingUnavailableView("暂无已启用的网站", systemImage: "globe",
+                ReadingUnavailableView(selectedGroup == nil ? "暂无已启用的网站" : "此分组暂无已启用的网站", systemImage: "globe",
                                        description: Text("在网站源管理中添加或启用站点。"))
                 NavigationLink { WebsiteSourceManagementView() } label: {
                     Label("添加网站源", systemImage: "plus")
@@ -62,16 +253,160 @@ struct RSSHomeView: View {
             .frame(maxWidth: .infinity)
             .padding(.top, 54)
         } else {
-            LazyVStack(spacing: 8) {
+            let columnCount = showsCards && !dynamicTypeSize.isAccessibilitySize ? 2 : 1
+            let columns = Array(repeating: GridItem(.flexible(), spacing: 10), count: columnCount)
+            LazyVGrid(columns: columns, spacing: showsCards ? 10 : 8) {
                 ForEach(sources) { source in
-                    NavigationLink { RSSSourceDestinationView(sourceURL: source.sourceUrl) } label: {
-                        SourceBrowseRow(title: source.sourceName, detail: source.groups.isEmpty ? (URL(string: source.sourceUrl)?.host ?? source.sourceUrl) : source.groups.joined(separator: " · ")) {
-                            Image(systemName: "globe").font(.system(size: 25, weight: .light))
+                    let detail = source.groups.isEmpty
+                        ? (URL(string: source.sourceUrl)?.host ?? source.sourceUrl)
+                        : source.groups.joined(separator: " · ")
+                    NavigationLink {
+                        RSSSourceDestinationView(sourceURL: source.sourceUrl)
+                            .onAppear { library.visitWebsite(source.id) }
+                    } label: {
+                        if showsCards {
+                            WebsiteSourceCard(source: source, detail: detail)
+                        } else {
+                            SourceBrowseRow(title: source.sourceName, detail: detail) {
+                                WebsiteSourceIcon(source: source)
+                            }
                         }
                     }
                     .buttonStyle(.plain)
                     .accessibilityIdentifier("websites.source.\(source.sourceUrl)")
+                    .contextMenu {
+                        Button("移动到分组", systemImage: "folder") { movingWebsite = source }
+                        Button("编辑网站", systemImage: "square.and.pencil") { editingWebsite = source }
+                        Button("停用网站", systemImage: "pause.circle") {
+                            Task { await library.setEnabled(false, source: source) }
+                        }
+                        Button("移除网站", systemImage: "trash", role: .destructive) { removingWebsite = source }
+                    }
                 }
+            }
+        }
+    }
+}
+
+private struct WebsiteHomeScrollRestoration: UIViewControllerRepresentable {
+    func makeUIViewController(context: Context) -> Controller { Controller() }
+    func updateUIViewController(_ controller: Controller, context: Context) {}
+
+    final class Controller: UIViewController {
+        private var savedPosition: (y: CGFloat, bottomInset: CGFloat, viewport: CGSize)?
+
+        private var scrollView: UIScrollView? {
+            sequence(first: view as UIView, next: { $0.superview })
+                .lazy.compactMap { $0 as? UIScrollView }.first
+        }
+
+        override func loadView() {
+            view = UIView()
+            view.isUserInteractionEnabled = false
+        }
+
+        override func viewWillDisappear(_ animated: Bool) {
+            super.viewWillDisappear(animated)
+            guard let scroll = scrollView else { return }
+            let insets = scroll.adjustedContentInset
+            savedPosition = (scroll.contentOffset.y + insets.top, insets.bottom, scroll.bounds.size)
+        }
+
+        override func viewDidAppear(_ animated: Bool) {
+            super.viewDidAppear(animated)
+            defer { savedPosition = nil }
+            guard let savedPosition, let scroll = scrollView, scroll.bounds.size == savedPosition.viewport else { return }
+            // The tab bar's bottom inset can return one layout pass after the home page appears.
+            let minY = -scroll.adjustedContentInset.top
+            let maxY = scroll.contentSize.height - scroll.bounds.height + savedPosition.bottomInset
+            scroll.contentOffset.y = max(minY, min(savedPosition.y + minY, maxY))
+        }
+    }
+}
+
+private struct WebsiteOrderView: View {
+    @EnvironmentObject private var library: RSSLibraryModel
+    @Environment(\.dismiss) private var dismiss
+    let group: String?
+
+    var body: some View {
+        let sources = library.websites(in: group)
+        ReadingNavigationStack {
+            ReadingSheetList {
+                Section {
+                    ForEach(sources) { source in
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(source.sourceName)
+                            Text(source.sourceUrl).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                        }
+                    }
+                    .onMove { offsets, destination in
+                        Task { await library.moveSources(sources, from: offsets, to: destination) }
+                    }
+                } footer: {
+                    Text("拖动调整网站顺序。同一网站在各分组间共用自定义顺序。")
+                }
+            }
+            .environment(\.editMode, .constant(.active))
+            .readingSheetTitle("\(group ?? "全部") · 自定义顺序")
+            .toolbar { ReadingSheetActions { ReadingSheetCloseButton { dismiss() } } }
+            .modifier(WebsiteOperationStatus())
+        }
+    }
+}
+
+private enum WebsiteGroupButtonBounds: PreferenceKey {
+    static var defaultValue: Anchor<CGRect>? { nil }
+    static func reduce(value: inout Anchor<CGRect>?, nextValue: () -> Anchor<CGRect>?) {
+        value = nextValue() ?? value
+    }
+}
+
+private struct WebsiteSourceCard: View {
+    let source: RssSource
+    let detail: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            WebsiteSourceIcon(source: source)
+            .frame(width: 36, height: 36)
+            .background(ReadingTheme.accentSoft)
+            .clipShape(RoundedRectangle(cornerRadius: 11))
+            .accessibilityHidden(true)
+            .padding(.bottom, 12)
+            Text(source.sourceName)
+                .font(.headline)
+                .lineLimit(2)
+            Text(detail)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .padding(.top, 3)
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background { ReadingCardBackground(cornerRadius: 16) }
+        .contentShape(Rectangle())
+    }
+}
+
+struct WebsiteSourceIcon: View {
+    let source: RssSource
+
+    private var iconURL: URL? {
+        let baseURL = URL(string: source.sourceUrl)
+        let path = source.sourceIcon.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !path.isEmpty { return URL(string: path, relativeTo: baseURL)?.absoluteURL }
+        guard let baseURL, ["http", "https"].contains(baseURL.scheme?.lowercased()), baseURL.host != nil else { return nil }
+        return URL(string: "/favicon.ico", relativeTo: baseURL)?.absoluteURL
+    }
+
+    var body: some View {
+        AsyncImage(url: iconURL) { phase in
+            if let image = phase.image {
+                image.resizable().scaledToFit()
+            } else {
+                Text(String(source.sourceName.prefix(1))).font(.headline)
             }
         }
     }
@@ -86,22 +421,21 @@ private struct WebsiteActivityList: View {
     @State private var editingStar: RssStar?
 
     var body: some View {
-        Group {
+        VStack(spacing: 0) {
+            ReadingPillSearchField(placeholder: "搜索文章", text: $searchText)
             if showsStars {
-                VStack(spacing: 0) {
-                    ReadingPillSearchField(placeholder: "搜索文章", text: $searchText)
-                    if !library.stars.isEmpty {
-                        Text("共 \(library.stars.count) 条收藏").font(.footnote).foregroundStyle(.secondary)
-                            .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal)
-                    }
-                    starList
+                if !library.stars.isEmpty {
+                    Text("共 \(library.stars.count) 条收藏").font(.footnote).foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal)
                 }
-                .navigationBarTitleDisplayMode(.large)
+                starList
             } else {
-                recordList.searchable(text: $searchText, prompt: "搜索文章")
+                recordList
             }
         }
-        .navigationTitle(showsStars ? "网页收藏" : "网站阅读记录")
+        .readingScrollContentBackgroundHidden()
+        .background(ReadingTheme.canvas)
+        .readingPageTitle(showsStars ? "网页收藏" : "网站阅读记录")
         .toolbar {
             if showsStars ? !library.stars.isEmpty : !library.records.isEmpty {
                 Button { confirmsClear = true } label: { Image(systemName: "trash") }
@@ -120,7 +454,7 @@ private struct WebsiteActivityList: View {
 
     private var starList: some View {
         let stars = searchText.isEmpty ? library.stars : library.stars.filter { $0.title.localizedCaseInsensitiveContains(searchText) }
-        return List {
+        return ReadingPageList {
             ForEach(stars) { star in
                 Group {
                     if let source = library.sources.first(where: { $0.sourceUrl == star.origin }) {
@@ -143,7 +477,7 @@ private struct WebsiteActivityList: View {
         } }.listStyle(.plain)
     }
     private var recordList: some View {
-        List {
+        ReadingPageList {
             Section {
                 Toggle("记录网页浏览历史", isOn: $recordsHistory)
             } footer: {
@@ -166,6 +500,9 @@ private struct WebsiteActivityList: View {
 
 struct WebsiteSourceManagementView: View {
     @EnvironmentObject private var library: RSSLibraryModel
+    @EnvironmentObject private var sourceLibrary: SourceLibraryModel
+    @AppStorage("websiteSourceManagementSort") private var sortMode = WebsiteSort.name
+    @State private var textPreview: RSSSourceImportPayload?
     @State private var searchText = ""
     @State private var showsFiles = false
     @State private var showsTextImport = false
@@ -173,28 +510,32 @@ struct WebsiteSourceManagementView: View {
 
     @State private var selectedGroup: String?
     @State private var editMode = EditMode.inactive
+    @State private var selectedSourceIDs = Set<String>()
+    @State private var showsMoveSheet = false
+    @State private var confirmsDeletion = false
+    @State private var isDeleting = false
 
-    private var groups: [String] {
-        Set(library.sources.flatMap(\.groups)).sorted { $0.localizedStandardCompare($1) == .orderedAscending }
-    }
+    @State private var showsGroupManager = false
 
     private var sources: [RssSource] {
         let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
-        return library.sources.filter { source in
+        let matches = library.sources.filter { source in
             guard source.matchesWebsiteSearch(query) else { return false }
             guard let selectedGroup else { return true }
             return selectedGroup.isEmpty ? source.groups.isEmpty : source.groups.contains(selectedGroup)
         }
+        return library.sortedWebsites(matches, by: sortMode)
     }
 
     var body: some View {
-        VStack(spacing: 0) {
+        let displayed = sources
+        return VStack(spacing: 0) {
             SourceManagementSearchHeader(total: library.sources.count, enabled: library.sources.filter(\.enabled).count,
                                          searchText: $searchText)
             if library.sources.isEmpty, !library.hasLoadedSources {
                 RagdollLoading("正在加载网站源", width: 72, axis: .vertical)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else if library.sources.isEmpty {
+            } else if library.sources.isEmpty && library.groups.isEmpty {
                 ReadingIllustratedEmptyState(artwork: "SourceEmptyArtwork", title: "还没有网站源",
                                              message: "新建网站源，或从文件、链接、JSON 导入", bottomBalance: 116) {
                     Menu {
@@ -210,30 +551,51 @@ struct WebsiteSourceManagementView: View {
                     .padding(.top, 26)
                 }
             } else {
-                List {
+                List(selection: editMode.isEditing ? $selectedSourceIDs : nil) {
                     Section {
-                        ForEach(sources) { source in
-                            NavigationLink { RSSSourceEditorView(source: source) } label: {
-                                SourceManagementRow(name: source.sourceName, url: source.sourceUrl, groups: source.groups,
-                                                    systemImage: "globe", enabled: source.enabled, showsToggle: !editMode.isEditing) { enabled in
-                                    Task { await library.setEnabled(enabled, source: source) }
+                        ForEach(displayed) { source in
+                            Group {
+                                if editMode.isEditing {
+                                    sourceRow(source)
+                                } else {
+                                    NavigationLink { RSSSourceEditorView(source: source) } label: {
+                                        sourceRow(source)
+                                    }
+                                    .swipeActions(edge: .leading) {
+                                        Button(source.enabled ? "停用" : "启用") { Task { await library.setEnabled(!source.enabled, source: source) } }.tint(.orange)
+                                    }
+                                    .swipeActions {
+                                        Button("删除", role: .destructive) { Task { await library.remove(source) } }
+                                    }
                                 }
                             }
-                            .swipeActions(edge: .leading) {
-                                Button(source.enabled ? "停用" : "启用") { Task { await library.setEnabled(!source.enabled, source: source) } }.tint(.orange)
-                            }
-                            .swipeActions {
-                                Button("删除", role: .destructive) { Task { await library.remove(source) } }
-                            }
-                            .moveDisabled(!searchText.isEmpty || selectedGroup != nil)
+                            .tag(source.id)
                         }
-                        .onMove { offsets, destination in Task { await library.moveSources(from: offsets, to: destination) } }
-                        if sources.isEmpty {
-                            Text("未找到网站源").foregroundStyle(.secondary)
+                        if displayed.isEmpty {
+                            Text(searchText.isEmpty && selectedGroup != nil ? "此分组暂无网站源" : "未找到网站源").foregroundStyle(.secondary)
                         }
                     } header: {
-                        SourceGroupPicker(title: searchText.isEmpty && selectedGroup == nil ? "网站源" : "网站源 · \(sources.count)",
-                                          groups: groups, selection: $selectedGroup)
+                        HStack(spacing: 4) {
+                            SourceGroupPicker(title: searchText.isEmpty && selectedGroup == nil ? "网站源" : "网站源 · \(displayed.count)",
+                                              groups: library.groups, selection: $selectedGroup) {
+                                Divider()
+                                manageGroupsButton
+                            }
+                            Menu {
+                                Picker("排序方式", selection: $sortMode) {
+                                    Text(WebsiteSort.name.title).tag(WebsiteSort.name)
+                                    Text(WebsiteSort.recent.title).tag(WebsiteSort.recent)
+                                }
+                            } label: {
+                                Image(systemName: "arrow.up.arrow.down")
+                                    .font(.subheadline.weight(.semibold))
+                                    .foregroundStyle(ReadingTheme.ink)
+                                    .frame(width: 44, height: 44)
+                                    .contentShape(Rectangle())
+                            }
+                            .accessibilityLabel("排序")
+                            .accessibilityValue(sortMode.title)
+                        }
                     }
                     .listRowBackground(ReadingTheme.surface)
                 }
@@ -241,44 +603,539 @@ struct WebsiteSourceManagementView: View {
                 .environment(\.editMode, $editMode)
             }
         }
-        .onChange(of: groups) { available in
+        .readingTabBarHidden(editMode.isEditing)
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            if editMode.isEditing {
+                selectionBar(visibleIDs: Set(displayed.map(\.id)))
+            }
+        }
+        .onChange(of: displayed.map(\.id)) { visibleIDs in
+            selectedSourceIDs.formIntersection(visibleIDs)
+            if library.sources.isEmpty { editMode = .inactive }
+        }
+        .onChange(of: library.groups) { available in
             if let selectedGroup, !selectedGroup.isEmpty, !available.contains(selectedGroup) { self.selectedGroup = nil }
         }
-        .background(ReadingTheme.managementCanvas)
-        .navigationTitle("网站源管理")
-        .navigationBarTitleDisplayMode(.large)
+        .background(ReadingTheme.settingsCanvas)
+        .readingPageTitle("网站源管理")
         .navigationBarHidden(false)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 Button(editMode.isEditing ? "完成" : "编辑") {
-                    withAnimation { editMode = editMode.isEditing ? .inactive : .active }
+                    withAnimation {
+                        selectedSourceIDs.removeAll()
+                        editMode = editMode.isEditing ? .inactive : .active
+                    }
                 }
                 .disabled(library.sources.isEmpty)
             }
             ToolbarItem(placement: .primaryAction) {
                 Menu("网站源操作", systemImage: "ellipsis") {
                     importActions
+                    manageGroupsButton
                     Button("导出全部网站源", systemImage: "square.and.arrow.up") { showsExport = true }
                 }
             }
         }
+        .readingNavigationDestination(isPresented: $showsGroupManager) {
+            WebsiteGroupManager(filter: $selectedGroup)
+        }
+        .sheet(isPresented: $showsMoveSheet) {
+            WebsiteSourceMoveSheet(groups: library.groups, count: selectedSourceIDs.count) { group in
+                try await library.moveSources(selectedSourceIDs, toGroup: group)
+                selectedSourceIDs.removeAll()
+                editMode = .inactive
+            }
+        }
         .fileImporter(isPresented: $showsFiles, allowedContentTypes: [.json, .text], allowsMultipleSelection: true) { result in
             switch result {
-            case let .success(urls): Task { await library.importFiles(urls) }
+            case let .success(urls):
+                Task {
+                    if let incoming = await library.previewFiles(urls) { review(incoming) }
+                }
             case let .failure(error): library.errorMessage = error.localizedDescription
             }
         }
-        .sheet(isPresented: $showsTextImport) { RSSImportSheet() }
-        .fileExporter(isPresented: $showsExport, document: RSSExportDocument(sources: library.sources), contentType: .json, defaultFilename: "rssSources") { result in
+        .sheet(isPresented: $showsTextImport, onDismiss: {
+            if let incoming = textPreview {
+                textPreview = nil
+                review(incoming)
+            }
+        }) { RSSImportSheet { textPreview = $0 } }
+        .fileExporter(isPresented: $showsExport, document: SourceExportDocument(sources: library.sources), contentType: .json, defaultFilename: "rssSources") { result in
             if case .failure(let error) = result { library.errorMessage = error.localizedDescription }
         }
         .modifier(WebsiteOperationStatus())
+        .disabled(isDeleting)
+    }
+
+    private func sourceRow(_ source: RssSource) -> some View {
+        SourceManagementRow(name: source.sourceName, url: source.sourceUrl, groups: source.groups,
+                            enabled: source.enabled, showsToggle: !editMode.isEditing) { enabled in
+            Task { await library.setEnabled(enabled, source: source) }
+        } icon: {
+            WebsiteSourceIcon(source: source)
+                .padding(4)
+                .frame(width: 36, height: 36)
+                .background(ReadingTheme.accentSoft)
+                .clipShape(RoundedRectangle(cornerRadius: 11))
+                .opacity(source.enabled ? 1 : 0.5)
+                .accessibilityHidden(true)
+        }
+    }
+
+    private func selectionBar(visibleIDs: Set<String>) -> some View {
+        let allSelected = !visibleIDs.isEmpty && selectedSourceIDs == visibleIDs
+        let selectionTitle = allSelected ? "取消全选" : "全选"
+        let selectionCount = Text("已选 \(selectedSourceIDs.count) 项")
+        let deleteColor: Color = selectedSourceIDs.isEmpty ? .secondary : .red
+        return HStack(spacing: 10) {
+            Button {
+                selectedSourceIDs = allSelected ? [] : visibleIDs
+            } label: {
+                HStack(spacing: 10) {
+                    Image(systemName: allSelected ? "checkmark.circle.fill" : (selectedSourceIDs.isEmpty ? "circle" : "minus.circle.fill"))
+                        .font(.title3)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(selectionTitle).font(.subheadline.weight(.semibold))
+                        selectionCount.font(.caption).monospacedDigit().foregroundStyle(.secondary)
+                    }
+                }
+                .frame(minHeight: 44)
+                .contentShape(Rectangle())
+            }
+            .accessibilityLabel(selectionTitle)
+            .accessibilityValue(selectionCount)
+            .disabled(visibleIDs.isEmpty)
+            Spacer(minLength: 0)
+            Button { showsMoveSheet = true } label: {
+                Label("移动到分组", systemImage: "folder")
+                    .font(.subheadline.weight(.semibold))
+                    .padding(.horizontal, 14)
+                    .frame(minHeight: 44)
+                    .background(ReadingTheme.accentSoft, in: Capsule())
+            }
+            .disabled(selectedSourceIDs.isEmpty)
+            Button(role: .destructive) {
+                confirmsDeletion = true
+            } label: {
+                Label("删除", systemImage: "trash")
+                    .labelStyle(.iconOnly)
+                    .font(.subheadline.weight(.semibold))
+                    .frame(minWidth: 44, minHeight: 44)
+                    .foregroundStyle(deleteColor)
+                    .background(deleteColor.opacity(0.1), in: Capsule())
+            }
+            .accessibilityLabel(selectedSourceIDs.isEmpty ? "删除" : "删除（\(selectedSourceIDs.count)）")
+            .disabled(selectedSourceIDs.isEmpty)
+            .alert("删除所选网站源？", isPresented: $confirmsDeletion, presenting: selectedSourceIDs) { ids in
+                Button("删除 \(ids.count) 个", role: .destructive) {
+                    isDeleting = true
+                    Task {
+                        if await library.remove(sourceIDs: ids) { editMode = .inactive }
+                        isDeleting = false
+                    }
+                }
+                Button("取消", role: .cancel) {}
+            } message: { _ in
+                Text("所选网站源的文章缓存也会一并删除。")
+            }
+        }
+        .buttonStyle(.plain)
+        .padding(.horizontal, 20)
+        .padding(.vertical, 8)
+        .background(ReadingTheme.surface)
+        .overlay(alignment: .top) { Divider() }
+    }
+
+    private var manageGroupsButton: some View {
+        Button("管理分组…", systemImage: "folder") { showsGroupManager = true }
+    }
+
+    private func review(_ payload: RSSSourceImportPayload) {
+        sourceLibrary.pendingImport = .init(items: [], invalidItems: [], skippedWebsites: payload.skippedEntries,
+                                            rules: .websites(payload.sources))
     }
 
     @ViewBuilder private var importActions: some View {
-        NavigationLink { RSSSourceEditorView() } label: { Label("新建网站源", systemImage: "plus") }
+        NavigationLink { RSSSourceEditorView(initialGroup: selectedGroup) } label: { Label("新建网站源", systemImage: "plus") }
         Button("导入文件", systemImage: "doc.badge.plus") { showsFiles = true }
         Button("URL或粘贴JSON", systemImage: "link.badge.plus") { showsTextImport = true }
+    }
+}
+
+private struct WebsiteSourceMoveSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    let groups: [String]
+    let count: Int
+    let move: (String?) async throws -> Void
+    @State private var destination: String?
+    @State private var newGroup: String?
+    @State private var creatingGroup = false
+    @State private var moving = false
+    @State private var error: String?
+
+    private var choices: [String] {
+        if let newGroup, !groups.contains(newGroup) { return groups + [newGroup] }
+        return groups
+    }
+
+    var body: some View {
+        ReadingNavigationStack {
+            ReadingSheetList {
+                Section {
+                    ForEach([""] + choices, id: \.self) { group in
+                        WebsiteGroupChoice(group: group, isSelected: destination == group) {
+                            destination = group
+                        }
+                    }
+                } footer: {
+                    Text("所选 \(count) 个网站源的原有分组将替换为所选分组。")
+                }
+                Button("新建分组", systemImage: "folder.badge.plus") { creatingGroup = true }
+            }
+            .readingSheetTitle("移动到分组")
+            .toolbar {
+                ReadingSheetActions {
+                    Button("取消") { dismiss() }
+                    ReadingSheetActionButton("移动", busyTitle: "移动中", isWorking: moving) {
+                        guard let destination, !moving else { return }
+                        moving = true
+                        Task {
+                            do {
+                                try await move(destination.isEmpty ? nil : destination)
+                                dismiss()
+                            } catch { self.error = error.localizedDescription }
+                            moving = false
+                        }
+                    }
+                    .disabled(destination == nil || count == 0)
+                }
+            }
+            .disabled(moving)
+            .sheet(isPresented: $creatingGroup) {
+                WebsiteGroupNameSheet(original: nil, groups: choices) { name in
+                    newGroup = name
+                    destination = name
+                }
+            }
+            .alert("移动失败", isPresented: Binding(get: { error != nil }, set: { if !$0 { error = nil } })) {
+                Button("好", role: .cancel) {}
+            } message: { Text(error ?? "") }
+        }
+        .interactiveDismissDisabled(moving)
+        .readingPresentationDetents([.medium, .large])
+        .readingPresentationDragIndicator()
+    }
+}
+
+private struct WebsiteGroupManager: View {
+    @EnvironmentObject private var library: RSSLibraryModel
+    @Environment(\.dynamicTypeSize) private var typeSize
+    @Binding var filter: String?
+
+    private enum GroupAction: Hashable, Identifiable {
+        case create
+        case rename(String)
+        case delete(Set<String>)
+
+        var id: Self { self }
+    }
+
+    @State private var action: GroupAction?
+    @State private var selecting = false
+    @State private var selected = Set<String>()
+
+    var body: some View {
+        groupList
+            .readingTabBarHidden(selecting)
+            .onChange(of: library.groups) { available in
+                selected.formIntersection(available)
+                if available.isEmpty { endSelection() }
+            }
+            .sheet(item: $action) { action in
+                switch action {
+                case .create:
+                    nameSheet(original: nil)
+                case .rename(let group):
+                    nameSheet(original: group)
+                case .delete(let groups):
+                    ReadingNavigationStack {
+                        WebsiteGroupDeletionView(groups: groups) {
+                            if let filter, groups.contains(filter) { self.filter = nil }
+                            endSelection()
+                        }
+                    }
+                    .readingPresentationDetents(typeSize.isAccessibilitySize ? [.large] : [.medium, .large])
+                    .readingPresentationDragIndicator()
+                }
+            }
+    }
+
+    private var groupList: some View {
+        let counts = library.sources.reduce(into: [String: Int]()) { result, source in
+            for group in source.groups { result[group, default: 0] += 1 }
+        }
+        return ScrollView {
+            LazyVStack(alignment: .leading, spacing: 0) {
+                if !selecting {
+                    HStack {
+                        Text(library.groups.isEmpty ? "暂无分组" : "共 \(library.groups.count) 个分组")
+                            .font(.subheadline).foregroundStyle(.secondary)
+                        Spacer()
+                        Button { action = .create } label: {
+                            Label("新建分组", systemImage: "plus")
+                                .font(.subheadline.weight(.semibold))
+                                .padding(.horizontal, 14).padding(.vertical, 7)
+                                .foregroundStyle(ReadingTheme.onAccent)
+                                .background(ReadingTheme.accentFill, in: Capsule())
+                                .frame(minHeight: 44)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    .padding(.bottom, 6)
+                }
+
+                ForEach(library.groups, id: \.self) { group in
+                    let count = counts[group, default: 0]
+                    if selecting {
+                        Button {
+                            if !selected.insert(group).inserted { selected.remove(group) }
+                        } label: {
+                            groupRow(group, count: count)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel(group)
+                        .accessibilityValue("\(count) 个网站")
+                        .accessibilityAddTraits(selected.contains(group) ? .isSelected : [])
+                    } else {
+                        Menu {
+                            Button("重命名", systemImage: "pencil") { action = .rename(group) }
+                            Button("删除", systemImage: "trash", role: .destructive) { action = .delete([group]) }
+                        } label: {
+                            groupRow(group, count: count)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("\(group)的操作")
+                        .accessibilityValue("\(count) 个网站")
+                    }
+                    if group != library.groups.last { Divider().padding(.leading, 44) }
+                }
+            }
+            .padding(.horizontal, 20)
+            .padding(.vertical, 8)
+        }
+        .background(ReadingTheme.canvas)
+        .readingPageTitle("管理分组")
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button(selecting ? "取消" : "多选") {
+                    if selecting { endSelection() } else { selecting = true }
+                }
+                .disabled(library.groups.isEmpty)
+            }
+        }
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            if selecting { selectionBar }
+        }
+    }
+
+    private func nameSheet(original: String?) -> some View {
+        WebsiteGroupNameSheet(original: original, groups: library.groups) { name in
+            let renamingFilter = original != nil && original == filter
+            try await library.changeGroup(from: original, to: name)
+            if renamingFilter { filter = name }
+        }
+    }
+
+    private func groupRow(_ group: String, count: Int) -> some View {
+        HStack(spacing: 12) {
+            WebsiteGroupFolderIcon()
+            VStack(alignment: .leading, spacing: 3) {
+                Text(group).font(.headline).foregroundStyle(.primary)
+                Text("\(count) 个网站").font(.subheadline).foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 4)
+            if selecting {
+                Image(systemName: selected.contains(group) ? "checkmark.circle.fill" : "circle")
+                    .font(.title3).foregroundStyle(selected.contains(group) ? ReadingTheme.accent : Color.secondary)
+                    .frame(width: 34, height: 34)
+            } else {
+                Image(systemName: "ellipsis").foregroundStyle(.secondary).frame(width: 34, height: 34)
+            }
+        }
+        .padding(.vertical, 9)
+        .contentShape(Rectangle())
+    }
+
+    private var selectionBar: some View {
+        let all = Set(library.groups)
+        let allSelected = !all.isEmpty && selected == all
+        let toggleTitle = allSelected ? "取消全选" : "全选"
+        return HStack {
+            Button { selected = allSelected ? [] : all } label: {
+                HStack(spacing: 10) {
+                    Image(systemName: allSelected ? "checkmark.circle.fill" : (selected.isEmpty ? "circle" : "minus.circle.fill"))
+                        .font(.title3)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(toggleTitle).font(.subheadline.weight(.semibold))
+                        Text("已选 \(selected.count) 个分组").font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+                .frame(minHeight: 44)
+            }
+            .accessibilityLabel(toggleTitle)
+            .accessibilityValue("已选 \(selected.count) 个分组")
+            Spacer()
+            Button(role: .destructive) { action = .delete(selected) } label: {
+                Label("删除", systemImage: "trash")
+                    .font(.subheadline.weight(.semibold))
+                    .padding(.horizontal, 16).frame(minHeight: 44)
+                    .foregroundStyle(selected.isEmpty ? Color.secondary : Color.red)
+                    .background(ReadingTheme.accentSoft, in: Capsule())
+            }
+            .accessibilityLabel("删除所选分组")
+            .disabled(selected.isEmpty)
+        }
+        .buttonStyle(.plain)
+        .padding(.horizontal, 20).padding(.vertical, 8)
+        .background(.bar)
+        .overlay(alignment: .top) { Divider() }
+    }
+
+    private func endSelection() {
+        selecting = false
+        selected.removeAll()
+    }
+}
+
+private struct WebsiteGroupFolderIcon: View {
+    var isUngrouped = false
+
+    var body: some View {
+        Image(systemName: isUngrouped ? "tray" : "folder")
+            .font(.system(size: 17, weight: .medium))
+            .foregroundStyle(ReadingTheme.accent)
+            .frame(width: 32, height: 32)
+            .background(ReadingTheme.ink.opacity(0.06), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+            .accessibilityHidden(true)
+    }
+}
+
+struct WebsiteGroupChoice: View {
+    let group: String
+    let isSelected: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 12) {
+                WebsiteGroupFolderIcon(isUngrouped: group.isEmpty)
+                Text(group.isEmpty ? "未分组" : group).foregroundStyle(.primary)
+                Spacer()
+                if isSelected {
+                    Image(systemName: "checkmark").foregroundStyle(ReadingTheme.accent).accessibilityHidden(true)
+                }
+            }
+            .contentShape(Rectangle())
+        }
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
+    }
+}
+
+private struct WebsiteGroupDeletionView: View {
+    @EnvironmentObject private var library: RSSLibraryModel
+    let groups: Set<String>
+    @Environment(\.dismiss) private var dismiss
+    let didDelete: () -> Void
+    @State private var includingSources = false
+    @State private var working = false
+    @State private var errorMessage: String?
+
+    var body: some View {
+        let members = library.sources.filter { !groups.isDisjoint(with: $0.groups) }
+        let names = members.prefix(3).map(\.sourceName).joined(separator: "、")
+        return ScrollView {
+            VStack(alignment: .leading, spacing: 20) {
+                HStack(spacing: 14) {
+                    WebsiteGroupFolderIcon()
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(groups.count == 1 ? (groups.first ?? "") : "\(groups.count) 个分组").font(.title2.bold()).foregroundStyle(.primary)
+                        Text("\(members.count) 个网站").font(.subheadline).foregroundStyle(.secondary)
+                    }
+                }
+
+                if groups.count > 1 {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("所选分组").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                        Text(groups.sorted { $0.localizedStandardCompare($1) == .orderedAscending }.joined(separator: "、"))
+                            .font(.subheadline)
+                    }
+                }
+
+                if !members.isEmpty {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("组内网站").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                        Text(names + (members.count > 3 ? " 等" : ""))
+                            .font(.subheadline).lineLimit(3)
+                    }
+                }
+
+                Button { includingSources.toggle() } label: {
+                    HStack(alignment: .top, spacing: 12) {
+                        VStack(alignment: .leading, spacing: 7) {
+                            Text("同时删除分组中的网站").font(.headline)
+                            Text(includingSources
+                                 ? "网站及其文章缓存将一并删除，即使网站还属于其他分组。"
+                                 : "网站会保留。移除分组后，没有其他分组的网站将归入「未分组」。")
+                                .font(.subheadline).foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        Spacer(minLength: 0)
+                        Image(systemName: includingSources ? "checkmark.square.fill" : "square")
+                            .font(.title3)
+                            .foregroundStyle(includingSources ? Color.red : Color.secondary)
+                            .accessibilityHidden(true)
+                    }
+                    .multilineTextAlignment(.leading)
+                    .padding(16)
+                    .background(includingSources ? Color.red.opacity(0.09) : ReadingTheme.sheetCard,
+                                in: RoundedRectangle(cornerRadius: 16))
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("同时删除分组中的网站")
+                .accessibilityHint(includingSources ? "将删除网站及其文章缓存" : "仅删除分组，保留网站")
+                .accessibilityAddTraits(includingSources ? .isSelected : [])
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 20)
+            .padding(.vertical, 16)
+        }
+        .readingSheetTitle("删除分组")
+        .toolbar {
+            ReadingSheetActions {
+                Button("取消") { dismiss() }
+                ReadingSheetActionButton("删除", busyTitle: "删除中", isWorking: working) {
+                    working = true
+                    Task {
+                        do {
+                            try await library.deleteGroups(groups, includingSources: includingSources)
+                            didDelete()
+                            dismiss()
+                        } catch {
+                            errorMessage = error.localizedDescription
+                            working = false
+                        }
+                    }
+                }
+            }
+        }
+        .disabled(working)
+        .interactiveDismissDisabled(working)
+        .alert("删除失败", isPresented: Binding(get: { errorMessage != nil }, set: { if !$0 { errorMessage = nil } })) {
+            Button("好", role: .cancel) {}
+        } message: { Text(errorMessage ?? "") }
     }
 }
 
@@ -355,8 +1212,12 @@ private struct RSSArticleListView: View {
                     }}.padding(.horizontal)
                 }.padding(.vertical, 6)
             }
+            if !resolvingSorts, !library.articles.isEmpty, let error = library.feedError {
+                Text(error).font(.footnote).foregroundStyle(.secondary)
+            }
             GeometryReader { viewport in
                 articleCollection(viewport: viewport.size)
+                    .readingScrollContentBackgroundHidden()
                     .opacity(resolvingSorts ? 0 : 1)
                     .accessibilityHidden(resolvingSorts)
                     .overlay {
@@ -364,8 +1225,8 @@ private struct RSSArticleListView: View {
                             RagdollLoading("正在加载列表", width: 80, axis: .vertical)
                                 .accessibilityIdentifier("website.list.loading")
                         } else if library.articles.isEmpty, !library.canLoadMore {
-                            ReadingIllustratedEmptyState(artwork: "RSSArticleEmptyArtwork", title: "没有文章",
-                                                         message: "下拉可以重新加载文章。", bottomBalance: 0) { EmptyView() }
+                            ReadingIllustratedEmptyState(artwork: "RSSArticleEmptyArtwork", title: library.feedError == nil ? "没有文章" : "加载文章列表失败",
+                                                         message: library.feedError ?? "下拉可以重新加载文章。", bottomBalance: 0) { EmptyView() }
                                 .allowsHitTesting(false)
                         }
                     }
@@ -495,8 +1356,7 @@ private struct RSSArticleListView: View {
                     .listRowInsets(EdgeInsets(top: 17, leading: 30, bottom: 17, trailing: 28))
                     .listRowSeparator(.hidden)
                     .listRowBackground(
-                        RoundedRectangle(cornerRadius: 12, style: .continuous)
-                            .fill(ReadingTheme.groupedCanvas.opacity(0.75))
+                        ReadingCardBackground(cornerRadius: 12)
                             .padding(.horizontal, 14)
                             .padding(.vertical, 3)
                     )
@@ -859,9 +1719,8 @@ private struct RSSArticleCard: View {
             } else { Spacer().frame(height: Self.verticalPadding) }
         }
         .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
-        .background(style == 3 ? Color(.secondarySystemBackground) : .clear)
-        .clipShape(RoundedRectangle(cornerRadius: style == 3 ? 12 : 0, style: .continuous))
-        .overlay { if style == 3 { RoundedRectangle(cornerRadius: 12).stroke(.primary.opacity(0.08)) } }
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .background { ReadingCardBackground(cornerRadius: 12) }
         .contentShape(Rectangle())
     }
 
@@ -919,7 +1778,8 @@ private struct RSSArticleDetailView: View {
                                  nextArticle: nextArticle, onRefresh: { reloadID += 1 }, onAction: handleWebAction)
                     .id(loadedRequest)
             } else {
-                RagdollLoading("正在加载文章", width: 80, axis: .vertical)
+                RagdollLoading("正在加载", width: 80, axis: .vertical)
+                    .padding(.bottom, 80)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
@@ -1129,6 +1989,7 @@ struct RSSPhotoView: View {
 private struct RSSImportSheet: View {
     @EnvironmentObject private var library: RSSLibraryModel
     @Environment(\.dismiss) private var dismiss
+    let onPreview: (RSSSourceImportPayload) -> Void
     @State private var importing = false
     @State private var text = ""
     var body: some View {
@@ -1138,10 +1999,13 @@ private struct RSSImportSheet: View {
                 .toolbar {
                     ReadingSheetActions {
                         Button("取消") { dismiss() }
-                        ReadingSheetActionButton("导入", busyTitle: "导入中", isWorking: importing) {
+                        ReadingSheetActionButton("预检", busyTitle: "预检中", isWorking: importing) {
                             importing = true
                             Task {
-                                if await library.importText(text) { dismiss() }
+                                if let sources = await library.previewText(text) {
+                                    onPreview(sources)
+                                    dismiss()
+                                }
                                 importing = false
                             }
                         }.disabled(text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
@@ -1154,17 +2018,6 @@ private struct RSSImportSheet: View {
     }
 }
 
-private struct RSSExportDocument: FileDocument {
-    static var readableContentTypes: [UTType] { [.json] }
-    let data: Data
-    init(sources: [RssSource]) {
-        let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        data = (try? encoder.encode(sources)) ?? Data("[]".utf8)
-    }
-    init(configuration: ReadConfiguration) throws { data = configuration.file.regularFileContents ?? Data() }
-    func fileWrapper(configuration: WriteConfiguration) throws -> FileWrapper { FileWrapper(regularFileWithContents: data) }
-}
-
 private struct RSSStarEditSheet: View {
     @Environment(\.dismiss) private var dismiss
     @State private var value: RssStar
@@ -1174,7 +2027,7 @@ private struct RSSStarEditSheet: View {
     init(star: RssStar, save: @escaping (RssStar) async throws -> Void) { _value = State(initialValue: star); self.save = save }
     var body: some View {
         ReadingNavigationStack {
-            Form {
+            ReadingSheetForm {
                 TextField("标题", text: $value.title)
                 TextField("分组", text: $value.group)
                 ReadingLabeledContent("链接", value: value.link).textSelection(.enabled)

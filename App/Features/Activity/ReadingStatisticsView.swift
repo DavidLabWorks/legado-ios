@@ -23,9 +23,8 @@ struct ReadingStatisticsView: View {
                 .frame(maxWidth: .infinity)
             }
         }
-        .background(ReadingTheme.canvas)
-        .navigationTitle("阅读统计")
-        .navigationBarTitleDisplayMode(.inline)
+        .background(ReadingTheme.settingsCanvas)
+        .readingPageTitle("阅读统计")
     }
 
     private var todayCard: some View {

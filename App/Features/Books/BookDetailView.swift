@@ -16,6 +16,7 @@ struct BookDetailView: View {
         var id: URL { url }
     }
 
+    private var close: (() -> Void)?
     @State private var refreshTask: Task<Void, Never>?
     @State private var webPage: WebPage?
     @State private var showsSourceSwitch = false
@@ -28,7 +29,8 @@ struct BookDetailView: View {
         _model = StateObject(wrappedValue: BookDetailViewModel(searchBook: searchBook, source: source))
     }
 
-    init(book: Book, source: BookSource, chapters: [BookChapter] = []) {
+    init(book: Book, source: BookSource, chapters: [BookChapter] = [], close: (() -> Void)? = nil) {
+        self.close = close
         _model = StateObject(wrappedValue: BookDetailViewModel(book: book, source: source, chapters: chapters))
     }
 
@@ -40,40 +42,39 @@ struct BookDetailView: View {
     var body: some View {
         detailScrollView
         .refreshable { await refreshDetails() }
-        .background(ReadingTheme.canvas)
-        .navigationTitle("书籍详情")
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbar {
-            ToolbarItemGroup(placement: .topBarTrailing) {
-                Button("换源") { showsSourceSwitch = true }
-                    .disabled(sourceLibrary.sources.filter(\.enabled).count < 2)
-                Menu {
-                    if let url = model.originalWebPageURL {
-                        Button("打开原网页", systemImage: "safari") { openWebPage(url) }
-                            .accessibilityIdentifier("book.detail.openWebPage")
-                    }
-                    Button("允许更新", systemImage: model.book.canUpdate ? "checkmark" : "circle") {
-                        model.toggleCanUpdate()
-                        Task { await saveCurrentBook() }
-                    }
-                    Button("刷新", systemImage: "arrow.clockwise") {
-                        Task { await refreshDetails() }
-                    }
-                    if model.source.loginUrl?.isEmpty == false {
-                        NavigationLink {
-                            SourceLoginView(source: model.source)
-                        } label: {
-                            Label("登录", systemImage: "person.badge.key")
-                        }
-                    }
-                    ReadingShareLink(item: model.book.bookUrl) {
-                        Label("分享", systemImage: "square.and.arrow.up")
-                    }
-                } label: {
-                    Image(systemName: "ellipsis")
-                }
-                .accessibilityLabel("更多")
+        .background(close == nil ? ReadingTheme.canvas : ReadingTheme.sheetBackground)
+        .readingRouteHeader(close == nil ? "书籍详情" : "添加到书架", close: close) {
+            Button { showsSourceSwitch = true } label: {
+                Label("换源", systemImage: SourceSwitchView.symbol)
             }
+            .labelStyle(.iconOnly)
+            .disabled(sourceLibrary.sources.filter(\.enabled).count < 2)
+            Menu {
+                if let url = model.originalWebPageURL {
+                    Button("打开原网页", systemImage: "safari") { openWebPage(url) }
+                        .accessibilityIdentifier("book.detail.openWebPage")
+                }
+                Button("允许更新", systemImage: model.book.canUpdate ? "checkmark" : "circle") {
+                    model.toggleCanUpdate()
+                    Task { await saveCurrentBook() }
+                }
+                Button("刷新", systemImage: "arrow.clockwise") {
+                    Task { await refreshDetails() }
+                }
+                if model.source.loginUrl?.isEmpty == false {
+                    NavigationLink {
+                        SourceLoginView(source: model.source)
+                    } label: {
+                        Label("登录", systemImage: "person.badge.key")
+                    }
+                }
+                ReadingShareLink(item: model.book.bookUrl) {
+                    Label("分享", systemImage: "square.and.arrow.up")
+                }
+            } label: {
+                Image(systemName: "ellipsis")
+            }
+            .accessibilityLabel("更多")
         }
         .task {
             model.restoreSourceAfterReading(from: library.books, sources: sourceLibrary.sources)
@@ -165,6 +166,7 @@ struct BookDetailView: View {
                 if let cacheProgress { cacheProgressCard(cacheProgress) }
             }
             .listRowSeparator(.hidden)
+            .listRowBackground(Color.clear)
             chapterList
                 .listRowSeparator(.hidden)
         }
@@ -409,8 +411,8 @@ struct BookDetailChapterRows: View {
             } else {
                 BookChapterLink(book: book, chapters: chapters, source: source, index: chapter.index) {
                     HStack(alignment: .firstTextBaseline, spacing: 14) {
-                        ChapterDirectoryLabel(number: chapter.index + 1, count: chapters.count,
-                                              title: chapter.title)
+                        ChapterDirectoryLabel(number: chapter.index + 1, title: chapter.title,
+                                              wordCount: chapter.wordCount, updateInfo: chapter.tag)
                         if chapter.isVip {
                             Image(systemName: "lock.fill").font(.caption).foregroundStyle(.secondary)
                                 .accessibilityLabel("VIP 章节")
@@ -430,50 +432,35 @@ struct BookDetailChapterRows: View {
 
 struct ChapterDirectoryLabel: View {
     let number: Int
-    let count: Int
     let title: String
+    let wordCount: String?
+    let updateInfo: String?
     var isCurrent = false
-    @ScaledMetric(relativeTo: .caption) private var digitWidth: CGFloat = 8
-    private static let chapterPrefix = try! NSRegularExpression(
-        pattern: #"^\s*(第\s*[0-9０-９零〇一二两兩三四五六七八九十百千万萬]+\s*[章节節回话話集卷])\s*"#
-    )
+    var titleColor: Color = .primary
 
-    private var heading: (marker: String?, name: String) {
-        let original = title.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !original.isEmpty else { return (nil, "第\(number)章") }
-        guard let match = Self.chapterPrefix.firstMatch(in: original, range: NSRange(original.startIndex..., in: original)),
-              let prefix = Range(match.range(at: 1), in: original),
-              let matched = Range(match.range, in: original) else {
-            return (String(format: "%02d", number), original)
-        }
-        let remainder = original[matched.upperBound...].drop(while: { $0.isWhitespace || "·:：、".contains($0) })
-        return remainder.isEmpty ? (nil, original) : (String(original[prefix]), String(remainder))
+    private var subtitle: String {
+        let count = wordCount?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let info = updateInfo?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let countLabel = !count.isEmpty && count.allSatisfy(\.isNumber) ? "\(count)字" : count
+        return [countLabel, info].filter { !$0.isEmpty }.joined(separator: " · ")
     }
 
     var body: some View {
-        let heading = self.heading
-        HStack(alignment: .firstTextBaseline, spacing: 12) {
-            if let marker = heading.marker {
-                Text(verbatim: marker)
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.secondary)
-                    .frame(minWidth: digitWidth * CGFloat(3 + max(2, String(count).count)), alignment: .leading)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            Text(heading.name)
+        VStack(alignment: .leading, spacing: 4) {
+            Text(verbatim: title.isEmpty ? "第\(number)章" : title)
                 .font(.body.weight(isCurrent ? .semibold : .regular))
-                .foregroundStyle(.primary)
-                .multilineTextAlignment(.leading)
-                .fixedSize(horizontal: false, vertical: true)
-                .frame(maxWidth: .infinity, alignment: .leading)
-            if isCurrent {
-                Image(systemName: "bookmark.fill")
+                .foregroundStyle(titleColor)
+            let detail = subtitle
+            if !detail.isEmpty {
+                Text(verbatim: detail)
                     .font(.footnote)
-                    .foregroundStyle(ReadingTheme.accent)
-                    .frame(width: 24)
-                    .accessibilityLabel("正在阅读")
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
             }
         }
+        .multilineTextAlignment(.leading)
+        .fixedSize(horizontal: false, vertical: true)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 

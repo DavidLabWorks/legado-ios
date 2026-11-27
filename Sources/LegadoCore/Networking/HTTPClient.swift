@@ -744,6 +744,9 @@ public actor SourceNetworkPolicy {
             }
         }
         let failedResponse: HTTPResponse? = if case HTTPClientError.statusResponse(let response) = lastError { response } else { nil }
+        if let failedResponse, failedResponse.statusCode == 403 {
+            DiagnosticLog.shared.forbiddenRequest(prepared, request: request, response: failedResponse, source: source, stage: snapshotStage)
+        }
         await snapshotRecorder?.recordFailure(stage: snapshotStage, sourceID: source.id, prepared: prepared, response: failedResponse, error: lastError, timeout: timeout)
         throw lastError
     }
@@ -861,6 +864,9 @@ public actor SourceNetworkPolicy {
             }
         }
         let failedResponse: HTTPResponse? = if case HTTPClientError.statusResponse(let response) = lastError { response } else { nil }
+        if let failedResponse, failedResponse.statusCode == 403 {
+            DiagnosticLog.shared.forbiddenRequest(prepared, request: request, response: failedResponse, source: source, stage: snapshotStage)
+        }
         await snapshotRecorder?.recordFailure(stage: snapshotStage, sourceID: source.id, prepared: prepared, response: failedResponse, error: lastError, timeout: timeout)
         DiagnosticLog.shared.network(request, error: lastError, startedAt: started)
         throw lastError

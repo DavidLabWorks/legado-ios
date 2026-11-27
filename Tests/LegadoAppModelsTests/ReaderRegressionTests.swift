@@ -619,6 +619,39 @@ struct ReaderRegressionTests {
         #expect(try await cache.load(bookURL: new.bookUrl, chapterURL: "new")?.content == "新正文")
     }
 
+    @Test func forbidden101ChapterCanImportItsBrowserContent() async throws {
+        struct ForbiddenTransport: HTTPTransport {
+            func data(for request: URLRequest) async throws -> HTTPResponse {
+                .init(data: Data(), statusCode: 403, headers: [:], finalURL: try #require(request.url))
+            }
+        }
+        let directory = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let cache = ChapterContentCache(directory: directory)
+        var source = BookSource(bookSourceUrl: "https://101kks.com", bookSourceName: "101 看书")
+        var rules = ContentRule()
+        rules.content = "@css:div#txtcontent@html"
+        source.ruleContent = rules
+        let book = Book(bookUrl: source.id + "/book/21828.html", name: "书", origin: source.id)
+        let chapter = BookChapter(url: source.id + "/txt/21828/9204968.html", title: "第一章", bookUrl: book.bookUrl, index: 0)
+        let service = NetworkBookService(transport: ForbiddenTransport())
+        let reader = ReaderViewModel(book: book, chapters: [chapter], initialIndex: 0, source: source,
+                                     service: service, cache: cache)
+        #expect(reader.browserRecoveryChapter == nil)
+        await reader.load(rules: [], prefetchNextChapter: false)
+        #expect(reader.currentChapterError == "服务器返回 HTTP 403")
+        #expect(reader.browserRecoveryChapter == chapter)
+        await reader.prepareContinuousReading(rules: [])
+        let report = await service.loadContent(book: book, chapter: chapter, source: source, nextChapterURL: nil) { url in
+            #expect(url.absoluteString == chapter.url)
+            return "<div id='txtcontent'>本章正文</div>"
+        }
+        try await reader.acceptBrowserChapter(report, chapter: chapter, source: source)
+        #expect(reader.content == "本章正文")
+        #expect(reader.browserRecoveryChapter == nil)
+        #expect(try await cache.load(bookURL: book.bookUrl, chapterURL: chapter.url)?.content == "本章正文")
+    }
+
     @Test func browserChapterClearsTheScrollErrorAndCachesOnlyCompleteContent() async throws {
         let directory = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -853,6 +886,44 @@ struct ReaderRegressionTests {
         #expect(bookmark.resolvedChapterIndex(in: chapters) == 1)
         bookmark.chapterIndex = 99
         #expect(bookmark.resolvedChapterIndex(in: chapters) == nil)
+    }
+
+    @Test func repeatedChapterTitleKeepsBookmarkInItsOriginalVolume() {
+        let chapters = (0..<2).map { BookChapter(url: "c\($0)", title: "第一章", bookUrl: "book", index: $0) }
+        var bookmark = Bookmark(time: 1, bookName: "书")
+        bookmark.chapterIndex = 1
+        bookmark.chapterName = "第一章"
+        #expect(bookmark.resolvedChapterIndex(in: chapters) == 1)
+    }
+
+    @Test func openingOnlineBookmarkUsesItsChapterAndOffsetInTheFullDirectory() async throws {
+        let source = BookSource(bookSourceUrl: "https://fixture.test", bookSourceName: "源")
+        var book = Book(bookUrl: "book", name: "书", origin: source.id)
+        let chapters = ["第一章", "第二章", "第三章"].enumerated().map { index, title in
+            BookChapter(url: "chapter/\(index)", title: title, bookUrl: book.bookUrl, index: index)
+        }
+        book.durChapterIndex = 2
+        book.durChapterTitle = chapters[2].title
+        let directory = InMemoryBookChapterRepository(values: [book.bookUrl: chapters])
+        let library = BookLibraryModel(repository: InMemoryBookRepository(books: [book]),
+                                       updateCoordinator: .init(repository: directory))
+        var bookmark = Bookmark(time: 1, bookName: book.name)
+        bookmark.chapterName = chapters[1].title
+        bookmark.chapterPosition = 34
+        let opener = BookshelfReadViewModel()
+        await opener.load(book: book, source: source, library: library, bookmark: bookmark)
+        let restored = try #require(opener.resolvedBook)
+        let reader = ReaderViewModel(book: restored, chapters: opener.chapters,
+                                     initialIndex: restored.durChapterIndex, source: source)
+        #expect(reader.currentChapter == chapters[1])
+        #expect(reader.requestedPosition == 34)
+        #expect(reader.currentChapterNumber == 2)
+        reader.goNext()
+        #expect(reader.currentChapter == chapters[2])
+
+        bookmark.chapterName = "已删除的章"
+        bookmark.chapterIndex = 9
+        #expect(BookshelfReadViewModel.restoredBook(book, chapters: chapters, bookmark: bookmark) == nil)
     }
 
     @Test func bookmarkSelectionUsesSavedPositionAndCurrentPageAfterReopening() {

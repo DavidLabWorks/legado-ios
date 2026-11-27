@@ -2,6 +2,8 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 struct ReplaceRuleManagementView: View {
+    static let title = "替换净化"
+
     @EnvironmentObject private var library: ReplaceRuleLibraryModel
     @State private var showsImporter = false
     @State private var showsTextImporter = false
@@ -90,15 +92,18 @@ struct ReplaceRuleManagementView: View {
                     .listRowBackground(ReadingTheme.surface)
                 }
                 .readingManagementList()
-                .searchable(text: $query, prompt: "名称、匹配内容或分组")
+                .safeAreaInset(edge: .top, spacing: 0) {
+                    ReadingPillSearchField(placeholder: "名称、匹配内容或分组", text: $query,
+                                           cornerRadius: 14, fill: ReadingTheme.surface)
+                    .background(ReadingTheme.settingsCanvas)
+                }
             }
         }
-        .background(ReadingTheme.managementCanvas)
-        .navigationTitle("净化规则")
-        .navigationBarTitleDisplayMode(.large)
+        .background(ReadingTheme.settingsCanvas)
+        .readingPageTitle(Self.title)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
-                if !library.rules.isEmpty { EditButton().disabled(group != nil || !query.isEmpty) }
+                if !library.rules.isEmpty { EditButton().environment(\.locale, Locale(identifier: "zh-Hans")).disabled(group != nil || !query.isEmpty) }
             }
             ToolbarItem(placement: .primaryAction) {
                 Menu("更多", systemImage: "ellipsis") {

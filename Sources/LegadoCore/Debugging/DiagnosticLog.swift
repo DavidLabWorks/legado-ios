@@ -71,6 +71,42 @@ public final class DiagnosticLog: @unchecked Sendable {
                message: "\(request.httpMethod ?? "GET") \(url) · \(result) · \(duration) ms")
     }
 
+    func forbiddenRequest(_ prepared: PreparedRequest, request: URLRequest, response: HTTPResponse,
+                          source: BookSource, stage: DifferentialStage) {
+        let category: String
+        switch stage {
+        case .search: category = "搜索请求"
+        case .content: category = "章节请求"
+        default: return
+        }
+        guard isEnabled() else { return }
+        let page = Self.safeURL(prepared.url)
+        var details = [prepared.useWebView ? "书源 WebView" : "书源 HTTP 请求",
+                       "\(prepared.method.rawValue) \(page)", "HTTP \(response.statusCode)"]
+        let finalPage = Self.safeURL(response.finalURL)
+        if finalPage != page { details.append("响应地址 \(finalPage)") }
+        details.append(source.enabledCookieJar == true ? "书源 Cookie 管理已开启" : "书源 Cookie 管理已关闭")
+        if !prepared.useWebView {
+            let hasCookie = request.value(forHTTPHeaderField: "Cookie")?.isEmpty == false
+            details.append(hasCookie ? "初始请求含 Cookie" : "初始请求无 Cookie")
+            let settings = ApplicationSettingsStore.shared.settings
+            if prepared.proxy != nil || !settings.proxy.isEmpty { details.append("已配置应用或书源代理") }
+            else if let host = prepared.url.host?.lowercased(),
+                    let hosts = try? ApplicationSettings.parseHosts(settings.hosts), hosts[host] != nil {
+                details.append("已配置当前域名的 Hosts")
+            }
+        }
+        if response.headers.contains(where: { $0.key.lowercased() == "cf-mitigated" && $0.value.lowercased() == "challenge" }) {
+            details.append("响应标记为网页验证")
+        }
+        // Record only a numeric error code, never a raw title or response body.
+        let prefix = String(decoding: response.data.prefix(8192), as: UTF8.self)
+        if let tag = prefix.range(of: #"(?i)<title\b[^>]*>\s*[45][0-9]{2}\b"#, options: .regularExpression) {
+            details.append("错误页标题含 \(prefix[tag].suffix(3))")
+        }
+        record(.error, category: category, message: details.joined(separator: " · "))
+    }
+
     public static func safeURL(_ url: URL) -> String {
         guard var parts = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return "[URL]" }
         parts.user = nil; parts.password = nil; parts.query = nil; parts.fragment = nil

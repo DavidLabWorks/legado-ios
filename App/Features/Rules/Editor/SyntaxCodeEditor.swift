@@ -280,7 +280,6 @@ struct RuleCodeFieldView: View {
                 if language == .rule { Text("CSS · XPath · JSONPath · JS") }
             }.font(.caption).foregroundStyle(.secondary).padding(12)
         }
-        .navigationTitle(title)
-        .navigationBarTitleDisplayMode(.inline)
+        .readingPageTitle(title)
     }
 }
